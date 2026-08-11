@@ -1,0 +1,27 @@
+# Optional: provides the mandated PostgreSQL 17 when you do not have one
+# locally. The default DATABASE_URL already points at localhost:5432, so this
+# is a drop-in replacement for a Homebrew install.
+#
+#   docker compose up -d
+#   npm run db:reset
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ale-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: author_launch_engine
+    ports:
+      - '5432:5432'
+    volumes:
+      - ale-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d author_launch_engine']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ale-pgdata:
