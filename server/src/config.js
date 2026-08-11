@@ -20,6 +20,8 @@ export const config = {
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
   confidenceEscalationThreshold: number(process.env.CONFIDENCE_ESCALATION_THRESHOLD, 0.7),
   minPostsPerWeek: number(process.env.MIN_POSTS_PER_WEEK, 3),
+  relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
+  minOpportunitiesPerMonth: number(process.env.MIN_OPPORTUNITIES_PER_MONTH, 5),
 };
 
 export const PLATFORMS = ['twitter', 'instagram', 'facebook', 'linkedin'];

@@ -1,10 +1,18 @@
 import { Router } from 'express';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
+import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
+import { draftOutreachMessages } from '../agents/prOutreachAgent.js';
 import { config, PLATFORMS } from '../config.js';
 import { query } from '../db/pool.js';
-import { approveDraft, rejectDraft } from '../services/approvals.js';
+import {
+  approveDraft,
+  approveOutreach,
+  rejectDraft,
+  rejectOutreach,
+} from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
+import { sendOutreachMessage } from '../services/outreachSender.js';
 import { publishDue, scheduleDraft } from '../services/scheduler.js';
 
 export const router = Router();
@@ -207,6 +215,139 @@ router.get('/scheduled-posts', asyncRoute(async (req, res) => {
 router.post('/scheduled-posts/publish-due', asyncRoute(async (req, res) => {
   const published = await publishDue({ now: req.body?.now ? new Date(req.body.now) : new Date() });
   res.json(published);
+}));
+
+// --- Opportunities (STORY-002 build steps 1 and 2) ---
+
+router.post('/authors/:authorId/books/:bookId/opportunities/scout', asyncRoute(async (req, res) => {
+  const result = await scoutOpportunities({
+    authorId: Number(req.params.authorId),
+    bookId: Number(req.params.bookId),
+  });
+  res.status(201).json(result);
+}));
+
+router.get('/opportunities', asyncRoute(async (req, res) => {
+  const conditions = [];
+  const params = [];
+  for (const [column, value] of [
+    ['author_id', req.query.authorId],
+    ['type', req.query.type],
+    ['status', req.query.status],
+  ]) {
+    if (value) {
+      params.push(value);
+      conditions.push(`${column} = $${params.length}`);
+    }
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const { rows } = await query(
+    `SELECT o.*, m.id AS message_id, m.status AS message_status
+       FROM opportunities o
+       LEFT JOIN outreach_messages m ON m.opportunity_id = o.id
+       ${where}
+      ORDER BY o.relevance DESC, o.id`,
+    params,
+  );
+  res.json(rows);
+}));
+
+/** Monthly cadence proof for the "at least five per month" criterion. */
+router.get('/authors/:authorId/monthly-opportunities', asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT discovered_month,
+            COUNT(*)::int                              AS total,
+            COUNT(DISTINCT type)::int                  AS types,
+            ARRAY_AGG(DISTINCT type ORDER BY type)     AS type_list
+       FROM opportunities
+      WHERE author_id = $1 AND status = 'identified'
+      GROUP BY discovered_month
+      ORDER BY discovered_month DESC`,
+    [req.params.authorId],
+  );
+
+  const byType = await query(
+    `SELECT discovered_month, type, COUNT(*)::int AS total
+       FROM opportunities
+      WHERE author_id = $1 AND status = 'identified'
+      GROUP BY discovered_month, type`,
+    [req.params.authorId],
+  );
+
+  res.json(
+    rows.map((row) => ({
+      ...row,
+      breakdown: byType.rows
+        .filter((r) => String(r.discovered_month) === String(row.discovered_month))
+        .reduce((acc, r) => ({ ...acc, [r.type]: r.total }), {}),
+      meetsMinimum: row.total >= config.minOpportunitiesPerMonth,
+      minimum: config.minOpportunitiesPerMonth,
+      currentMonth: monthStart(),
+    })),
+  );
+}));
+
+// --- Outreach messages (STORY-002 build steps 3 to 5) ---
+
+router.post('/authors/:authorId/books/:bookId/outreach/draft', asyncRoute(async (req, res) => {
+  const messages = await draftOutreachMessages({
+    authorId: Number(req.params.authorId),
+    bookId: Number(req.params.bookId),
+    opportunityIds: req.body?.opportunityIds ?? null,
+    limit: req.body?.limit ?? 10,
+  });
+  res.status(201).json(messages);
+}));
+
+router.get('/outreach-messages', asyncRoute(async (req, res) => {
+  const conditions = [];
+  const params = [];
+  for (const [column, value] of [
+    ['m.author_id', req.query.authorId],
+    ['m.status', req.query.status],
+  ]) {
+    if (value) {
+      params.push(value);
+      conditions.push(`${column} = $${params.length}`);
+    }
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const { rows } = await query(
+    `SELECT m.*,
+            o.name AS opportunity_name, o.type AS opportunity_type,
+            o.host AS opportunity_host, o.contact_email, o.relevance,
+            s.status AS send_status, s.external_id AS send_external_id, s.sent_at
+       FROM outreach_messages m
+       JOIN opportunities o ON o.id = m.opportunity_id
+       LEFT JOIN outreach_sends s ON s.message_id = m.id
+       ${where}
+      ORDER BY m.created_at DESC, m.id DESC`,
+    params,
+  );
+  res.json(rows);
+}));
+
+router.post('/outreach-messages/:id/approve', asyncRoute(async (req, res) => {
+  const message = await approveOutreach({
+    messageId: Number(req.params.id),
+    reviewer: req.body?.reviewer,
+    notes: req.body?.notes ?? '',
+  });
+  res.json(message);
+}));
+
+router.post('/outreach-messages/:id/reject', asyncRoute(async (req, res) => {
+  const message = await rejectOutreach({
+    messageId: Number(req.params.id),
+    reviewer: req.body?.reviewer,
+    notes: req.body?.notes ?? '',
+  });
+  res.json(message);
+}));
+
+router.post('/outreach-messages/:id/send', asyncRoute(async (req, res) => {
+  const send = await sendOutreachMessage({ messageId: Number(req.params.id) });
+  res.status(201).json(send);
 }));
 
 // --- Audit trail (REQ-005) ---

@@ -3,6 +3,8 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 
 import { api } from './api.js';
 import { AuditPage } from './pages/AuditPage.jsx';
+import { OpportunitiesPage } from './pages/OpportunitiesPage.jsx';
+import { OutreachPage } from './pages/OutreachPage.jsx';
 import { ReviewPage } from './pages/ReviewPage.jsx';
 import { SchedulePage } from './pages/SchedulePage.jsx';
 import { UploadPage } from './pages/UploadPage.jsx';
@@ -29,7 +31,9 @@ export function App() {
       <header className="masthead">
         <div>
           <h1>Author Launch Engine</h1>
-          <div className="story">STORY-001 · Draft and Schedule Social Media Content</div>
+          <div className="story">
+            STORY-001 · Social content &nbsp;·&nbsp; STORY-002 · Outreach opportunities
+          </div>
         </div>
         {author && (
           <div className="story">
@@ -40,9 +44,11 @@ export function App() {
 
       <nav className="tabs">
         {[
-          ['/upload', '1 · Upload'],
-          ['/review', '2 · Review & approve'],
-          ['/schedule', '3 · Schedule'],
+          ['/upload', 'Upload'],
+          ['/review', 'Social · review'],
+          ['/schedule', 'Social · schedule'],
+          ['/opportunities', 'Opportunities'],
+          ['/outreach', 'Outreach'],
           ['/audit', 'Audit log'],
         ].map(([to, label]) => (
           <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
@@ -59,6 +65,8 @@ export function App() {
           <Route path="/upload" element={<UploadPage author={author} />} />
           <Route path="/review" element={<ReviewPage author={author} />} />
           <Route path="/schedule" element={<SchedulePage author={author} />} />
+          <Route path="/opportunities" element={<OpportunitiesPage author={author} />} />
+          <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/audit" element={<AuditPage author={author} />} />
         </Routes>
       )}

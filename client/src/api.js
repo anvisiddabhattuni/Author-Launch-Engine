@@ -39,4 +39,19 @@ export const api = {
   publishDue: (now) => request('/scheduled-posts/publish-due', { method: 'POST', body: { now } }),
 
   auditLog: (authorId, limit = 50) => request(`/audit-log?authorId=${authorId}&limit=${limit}`),
+
+  // STORY-002 — opportunities and outreach
+  scout: (authorId, bookId) =>
+    request(`/authors/${authorId}/books/${bookId}/opportunities/scout`, { method: 'POST' }),
+
+  opportunities: (params) => request(`/opportunities?${new URLSearchParams(params)}`),
+  monthlyOpportunities: (authorId) => request(`/authors/${authorId}/monthly-opportunities`),
+
+  draftOutreach: (authorId, bookId, body = {}) =>
+    request(`/authors/${authorId}/books/${bookId}/outreach/draft`, { method: 'POST', body }),
+
+  outreachMessages: (params) => request(`/outreach-messages?${new URLSearchParams(params)}`),
+  approveOutreach: (id, body) => request(`/outreach-messages/${id}/approve`, { method: 'POST', body }),
+  rejectOutreach: (id, body) => request(`/outreach-messages/${id}/reject`, { method: 'POST', body }),
+  sendOutreach: (id) => request(`/outreach-messages/${id}/send`, { method: 'POST' }),
 };
