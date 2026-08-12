@@ -22,6 +22,7 @@ export const config = {
   minPostsPerWeek: number(process.env.MIN_POSTS_PER_WEEK, 3),
   relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
   minOpportunitiesPerMonth: number(process.env.MIN_OPPORTUNITIES_PER_MONTH, 5),
+  minThemeAlignment: number(process.env.MIN_THEME_ALIGNMENT, 0.5),
 };
 
 export const PLATFORMS = ['twitter', 'instagram', 'facebook', 'linkedin'];

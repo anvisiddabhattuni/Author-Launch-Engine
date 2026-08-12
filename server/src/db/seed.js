@@ -73,6 +73,82 @@ const HISTORY = [
   },
 ];
 
+// Stand-in media list. Five cover beats that overlap the book's themes and two
+// deliberately do not, so targeting has something to exclude.
+const PRESS_CONTACTS = [
+  {
+    outlet: 'The Longform Review',
+    name: 'Dana Whitfield',
+    email: 'dana.whitfield@longformreview.test',
+    beats: ['craft', 'writing', 'books'],
+  },
+  {
+    outlet: 'Focus Quarterly',
+    name: 'Sam Iyer',
+    email: 's.iyer@focusquarterly.test',
+    beats: ['deep work', 'attention', 'productivity'],
+  },
+  {
+    outlet: 'The Bookshelf Desk',
+    name: 'Priya Raman',
+    email: 'priya@bookshelfdesk.test',
+    beats: ['books', 'publishing', 'craft'],
+  },
+  {
+    outlet: 'Working Life',
+    name: 'Tomas Beck',
+    email: 'tbeck@workinglife.test',
+    beats: ['resilience', 'careers', 'work'],
+  },
+  {
+    outlet: 'Culture Wire',
+    name: 'Alina Duarte',
+    email: 'alina@culturewire.test',
+    beats: ['arts', 'culture', 'attention'],
+  },
+  {
+    outlet: 'Fintech Daily',
+    name: 'Greg Olsen',
+    email: 'greg@fintechdaily.test',
+    beats: ['fintech', 'markets', 'crypto'],
+  },
+  {
+    outlet: 'Auto Trade Weekly',
+    name: 'Marta Silva',
+    email: 'marta@autotradeweekly.test',
+    beats: ['automotive', 'logistics', 'freight'],
+  },
+];
+
+// One of each milestone type REQ-003 names, so the drafting angle can be seen
+// changing between them.
+const MILESTONES = [
+  {
+    type: 'launch',
+    title: 'The Quiet Craft — hardcover launch',
+    inDays: 21,
+    location: 'Ljubljana',
+    details: 'First print run of 8,000 copies, with a launch reading at the city library.',
+  },
+  {
+    type: 'award',
+    title: 'The Quiet Craft shortlisted for the Vermilion Prize for Nonfiction',
+    inDays: 45,
+    location: 'London',
+    details: 'One of six titles shortlisted; the winner is announced at a ceremony in November.',
+  },
+  {
+    type: 'anniversary',
+    title: 'The Quiet Craft — one year in print',
+    inDays: 120,
+    location: '',
+    details: 'Twelve months since publication, with a paperback edition to follow.',
+  },
+];
+
+const isoDate = (inDays) =>
+  new Date(Date.now() + inDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
 async function seed() {
   for (const w of WINDOWS) {
     await query(
@@ -127,6 +203,29 @@ async function seed() {
     );
   }
   console.log(`seeded ${HISTORY.length} prior posts`);
+
+  for (const c of PRESS_CONTACTS) {
+    await query(
+      `INSERT INTO press_contacts (outlet, name, email, beats)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (email) DO UPDATE
+         SET outlet = EXCLUDED.outlet, name = EXCLUDED.name, beats = EXCLUDED.beats`,
+      [c.outlet, c.name, c.email, c.beats],
+    );
+  }
+  console.log(`seeded ${PRESS_CONTACTS.length} press contacts`);
+
+  // Milestones hang off the book, which is recreated above, so they are gone
+  // already; insert rather than upsert.
+  for (const m of MILESTONES) {
+    await query(
+      `INSERT INTO milestones (author_id, book_id, type, title, event_date, location, details)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (book_id, type, event_date) DO NOTHING`,
+      [author.id, bookRows[0].id, m.type, m.title, isoDate(m.inDays), m.location, m.details],
+    );
+  }
+  console.log(`seeded ${MILESTONES.length} milestones`);
 
   console.log(`\nseed complete — authorId=${author.id} bookId=${bookRows[0].id}`);
 }

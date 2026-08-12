@@ -1,16 +1,18 @@
 /**
- * End-to-end walkthrough of STORY-001, printed step by step.
+ * End-to-end walkthrough of STORY-001 to STORY-003, printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
 import { draftWeeklyPosts, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
+import { draftPressKit } from './agents/prMaterialsAgent.js';
 import { draftOutreachMessages } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { closePool, query } from './db/pool.js';
-import { approveDraft, approveOutreach } from './services/approvals.js';
+import { approveDraft, approveOutreach, approvePrMaterial } from './services/approvals.js';
 import { listAuditLog } from './services/auditLog.js';
 import { sendOutreachMessage } from './services/outreachSender.js';
+import { distributePressKit } from './services/prDistributor.js';
 import { publishDue, scheduleDraft } from './services/scheduler.js';
 
 const rule = (title) => console.log(`\n${'─'.repeat(72)}\n${title}\n${'─'.repeat(72)}`);
@@ -150,4 +152,85 @@ for (const entry of [...outreachLog].reverse().filter((e) => e.action.startsWith
 }
 
 console.log(`\nmonth of ${monthStart()} — STORY-002 complete\n`);
+
+// ── STORY-003 — press materials for book milestones ─────────────────────────
+
+rule('15. Scheduled milestones (the trigger for a press kit)');
+const { rows: milestones } = await query(
+  'SELECT * FROM milestones WHERE author_id = $1 ORDER BY event_date',
+  [author.id],
+);
+for (const m of milestones) {
+  console.log(`  [${m.type.padEnd(11)}] ${m.event_date.toISOString().slice(0, 10)}  ${m.title}`);
+}
+
+rule('16. PR and Outreach Agent drafts a press kit per milestone');
+const kits = [];
+for (const milestone of milestones) {
+  const { kit, materials } = await draftPressKit({ milestoneId: milestone.id });
+  kits.push({ kit, milestone, materials });
+  console.log(`\n[${milestone.type}] kit ${kit.id} — ${milestone.title}`);
+  for (const material of materials) {
+    console.log(
+      `  ${material.type.padEnd(14)} alignment=${material.theme_alignment} ` +
+        `confidence=${material.confidence} → ${material.status}`,
+    );
+    console.log(`    themes: ${material.themes_used.join(', ') || 'none'}`);
+    console.log(`    ${material.headline}`);
+  }
+}
+
+rule('17. The launch press release in full (acceptance: aligned with the book themes)');
+const launch = kits.find((k) => k.milestone.type === 'launch') ?? kits[0];
+const release = launch.materials.find((m) => m.type === 'press_release');
+console.log(release.body.replace(/^/gm, '  '));
+
+rule('18. Approval gate — distribution is refused while any material is unapproved');
+try {
+  await distributePressKit({ kitId: launch.kit.id });
+  console.log('UNEXPECTED: the kit was distributed without approval');
+} catch (error) {
+  console.log(`blocked as designed: ${error.message}`);
+}
+
+console.log('\napproving one material of three, then trying again:');
+await approvePrMaterial({
+  materialId: launch.materials[0].id,
+  reviewer: 'Anvi Siddabhattuni',
+  notes: 'Release reads well.',
+});
+try {
+  await distributePressKit({ kitId: launch.kit.id });
+  console.log('UNEXPECTED: a partially approved kit was distributed');
+} catch (error) {
+  console.log(`still blocked as designed: ${error.message}`);
+}
+
+rule('19. Human approves the rest, then the kit goes to the matching press contacts');
+for (const material of launch.materials.slice(1)) {
+  await approvePrMaterial({
+    materialId: material.id,
+    reviewer: 'Anvi Siddabhattuni',
+    notes: 'Approved for distribution.',
+  });
+}
+const { distributions } = await distributePressKit({ kitId: launch.kit.id });
+const { rows: allContacts } = await query('SELECT COUNT(*)::int AS n FROM press_contacts');
+console.log(
+  `distributed to ${distributions.length} of ${allContacts[0].n} press contacts ` +
+    '(the rest cover unrelated beats):',
+);
+for (const d of distributions) {
+  console.log(`  ${d.outlet.padEnd(22)} ${d.status.padEnd(6)} ${d.recipient.padEnd(34)} ${d.external_id ?? d.error}`);
+}
+
+rule('20. Press audit trail');
+const pressLog = await listAuditLog({ authorId: author.id, limit: 200 });
+for (const entry of [...pressLog]
+  .reverse()
+  .filter((e) => e.action.startsWith('pr_') || e.action.startsWith('milestone.'))) {
+  console.log(`${entry.created_at.toISOString()}  ${entry.actor.padEnd(26)} ${entry.action}`);
+}
+
+console.log('\nSTORY-003 complete — press kits drafted, reviewed and distributed\n');
 await closePool();

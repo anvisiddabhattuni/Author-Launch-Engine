@@ -2,17 +2,21 @@ import { Router } from 'express';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
+import { draftPressKit } from '../agents/prMaterialsAgent.js';
 import { draftOutreachMessages } from '../agents/prOutreachAgent.js';
 import { config, PLATFORMS } from '../config.js';
 import { query } from '../db/pool.js';
 import {
   approveDraft,
   approveOutreach,
+  approvePrMaterial,
   rejectDraft,
   rejectOutreach,
+  rejectPrMaterial,
 } from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
 import { sendOutreachMessage } from '../services/outreachSender.js';
+import { distributePressKit } from '../services/prDistributor.js';
 import { publishDue, scheduleDraft } from '../services/scheduler.js';
 
 export const router = Router();
@@ -348,6 +352,137 @@ router.post('/outreach-messages/:id/reject', asyncRoute(async (req, res) => {
 router.post('/outreach-messages/:id/send', asyncRoute(async (req, res) => {
   const send = await sendOutreachMessage({ messageId: Number(req.params.id) });
   res.status(201).json(send);
+}));
+
+// --- Milestones and press kits (STORY-003 build steps 1 to 4) ---
+
+router.get('/authors/:authorId/milestones', asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT m.*, k.id AS kit_id, k.status AS kit_status
+       FROM milestones m
+       LEFT JOIN pr_kits k ON k.milestone_id = m.id
+      WHERE m.author_id = $1
+      ORDER BY m.event_date`,
+    [req.params.authorId],
+  );
+  res.json(rows);
+}));
+
+router.post('/authors/:authorId/books/:bookId/milestones', asyncRoute(async (req, res) => {
+  const { type, title, eventDate, details = '', location = '' } = req.body ?? {};
+  if (!type || !title || !eventDate) {
+    throw Object.assign(new Error('type, title and eventDate are required'), { status: 400 });
+  }
+
+  const { rows } = await query(
+    `INSERT INTO milestones (author_id, book_id, type, title, event_date, details, location)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT (book_id, type, event_date) DO UPDATE
+       SET title = EXCLUDED.title, details = EXCLUDED.details, location = EXCLUDED.location
+     RETURNING *`,
+    [
+      Number(req.params.authorId),
+      Number(req.params.bookId),
+      type,
+      title,
+      eventDate,
+      details,
+      location,
+    ],
+  );
+
+  await recordAction({
+    actor: req.body?.actor ?? 'author',
+    action: 'milestone.scheduled',
+    entityType: 'milestone',
+    entityId: rows[0].id,
+    authorId: Number(req.params.authorId),
+    after: rows[0],
+    metadata: { type, eventDate },
+  });
+  res.status(201).json(rows[0]);
+}));
+
+router.post('/milestones/:id/press-kit', asyncRoute(async (req, res) => {
+  const result = await draftPressKit({ milestoneId: Number(req.params.id) });
+  res.status(201).json(result);
+}));
+
+router.get('/press-kits', asyncRoute(async (req, res) => {
+  const params = [];
+  let where = '';
+  if (req.query.authorId) {
+    params.push(req.query.authorId);
+    where = 'WHERE k.author_id = $1';
+  }
+
+  const { rows: kits } = await query(
+    `SELECT k.*,
+            m.title AS milestone_title, m.type AS milestone_type,
+            m.event_date, m.location, m.details,
+            COUNT(p.id)::int                                        AS material_count,
+            COUNT(*) FILTER (WHERE p.status = 'approved')::int      AS approved_count,
+            COUNT(*) FILTER (WHERE p.status = 'distributed')::int   AS distributed_count,
+            COALESCE(MIN(p.theme_alignment), 0)                     AS min_theme_alignment
+       FROM pr_kits k
+       JOIN milestones m ON m.id = k.milestone_id
+       LEFT JOIN pr_materials p ON p.kit_id = k.id
+       ${where}
+      GROUP BY k.id, m.title, m.type, m.event_date, m.location, m.details
+      ORDER BY m.event_date`,
+    params,
+  );
+
+  const { rows: materials } = await query(
+    `SELECT p.* FROM pr_materials p
+       ${req.query.authorId ? 'WHERE p.author_id = $1' : ''}
+      ORDER BY p.kit_id, p.id`,
+    params,
+  );
+
+  const { rows: distributions } = await query(
+    `SELECT d.* FROM pr_distributions d
+       ${req.query.authorId ? 'WHERE d.author_id = $1' : ''}
+      ORDER BY d.kit_id, d.id`,
+    params,
+  );
+
+  res.json(
+    kits.map((kit) => ({
+      ...kit,
+      readyToDistribute: kit.material_count > 0 && kit.approved_count === kit.material_count,
+      materials: materials.filter((m) => m.kit_id === kit.id),
+      distributions: distributions.filter((d) => d.kit_id === kit.id),
+    })),
+  );
+}));
+
+router.post('/pr-materials/:id/approve', asyncRoute(async (req, res) => {
+  const material = await approvePrMaterial({
+    materialId: Number(req.params.id),
+    reviewer: req.body?.reviewer,
+    notes: req.body?.notes ?? '',
+  });
+  res.json(material);
+}));
+
+router.post('/pr-materials/:id/reject', asyncRoute(async (req, res) => {
+  const material = await rejectPrMaterial({
+    materialId: Number(req.params.id),
+    reviewer: req.body?.reviewer,
+    notes: req.body?.notes ?? '',
+  });
+  res.json(material);
+}));
+
+router.post('/press-kits/:id/distribute', asyncRoute(async (req, res) => {
+  const result = await distributePressKit({ kitId: Number(req.params.id) });
+  res.status(201).json(result);
+}));
+
+router.get('/press-contacts', asyncRoute(async (_req, res) => {
+  const { rows } = await query('SELECT * FROM press_contacts ORDER BY id');
+  res.json(rows);
 }));
 
 // --- Audit trail (REQ-005) ---

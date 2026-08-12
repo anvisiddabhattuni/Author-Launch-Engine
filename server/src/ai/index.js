@@ -3,6 +3,8 @@ import { config } from '../config.js';
 import { anthropicProvider } from './anthropicProvider.js';
 import { outreachAnthropicProvider } from './outreachAnthropicProvider.js';
 import { outreachStubProvider } from './outreachStubProvider.js';
+import { prAnthropicProvider } from './prAnthropicProvider.js';
+import { prStubProvider } from './prStubProvider.js';
 import { stubProvider } from './stubProvider.js';
 
 const socialProviders = {
@@ -13,6 +15,11 @@ const socialProviders = {
 const outreachProviders = {
   stub: outreachStubProvider,
   anthropic: outreachAnthropicProvider,
+};
+
+const prProviders = {
+  stub: prStubProvider,
+  anthropic: prAnthropicProvider,
 };
 
 const resolve = (registry, name, kind) => {
@@ -32,3 +39,7 @@ export const getProvider = (name = config.aiProvider) =>
 /** Outreach email provider (STORY-002). */
 export const getOutreachProvider = (name = config.aiProvider) =>
   resolve(outreachProviders, name, 'outreach drafting');
+
+/** Press material provider (STORY-003). */
+export const getPrProvider = (name = config.aiProvider) =>
+  resolve(prProviders, name, 'press material drafting');

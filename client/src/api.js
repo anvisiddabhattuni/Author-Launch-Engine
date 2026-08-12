@@ -54,4 +54,19 @@ export const api = {
   approveOutreach: (id, body) => request(`/outreach-messages/${id}/approve`, { method: 'POST', body }),
   rejectOutreach: (id, body) => request(`/outreach-messages/${id}/reject`, { method: 'POST', body }),
   sendOutreach: (id) => request(`/outreach-messages/${id}/send`, { method: 'POST' }),
+
+  // STORY-003 — milestones and press materials
+  milestones: (authorId) => request(`/authors/${authorId}/milestones`),
+
+  createMilestone: (authorId, bookId, body) =>
+    request(`/authors/${authorId}/books/${bookId}/milestones`, { method: 'POST', body }),
+
+  draftPressKit: (milestoneId) => request(`/milestones/${milestoneId}/press-kit`, { method: 'POST' }),
+
+  pressKits: (authorId) => request(`/press-kits?authorId=${authorId}`),
+  pressContacts: () => request('/press-contacts'),
+
+  approvePrMaterial: (id, body) => request(`/pr-materials/${id}/approve`, { method: 'POST', body }),
+  rejectPrMaterial: (id, body) => request(`/pr-materials/${id}/reject`, { method: 'POST', body }),
+  distributeKit: (id) => request(`/press-kits/${id}/distribute`, { method: 'POST' }),
 };

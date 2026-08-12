@@ -5,9 +5,9 @@ import { recordAction } from './auditLog.js';
 const DECIDABLE = new Set(['pending_approval', 'escalated']);
 
 /**
- * The two kinds of thing a human approves. Both funnel through one decision
- * path so the gate behaves identically for a social post and an outreach
- * email, and both write to the same `approvals` table.
+ * The kinds of thing a human approves. All funnel through one decision path so
+ * the gate behaves identically for a social post, an outreach email and a press
+ * material, and all three write to the same `approvals` table.
  */
 const TARGETS = {
   draft: {
@@ -21,6 +21,12 @@ const TARGETS = {
     column: 'outreach_message_id',
     entityType: 'outreach_message',
     actionPrefix: 'outreach',
+  },
+  prMaterial: {
+    table: 'pr_materials',
+    column: 'pr_material_id',
+    entityType: 'pr_material',
+    actionPrefix: 'pr_material',
   },
 };
 
@@ -84,3 +90,9 @@ export const approveOutreach = ({ messageId, reviewer, notes }) =>
 
 export const rejectOutreach = ({ messageId, reviewer, notes }) =>
   decide({ target: 'outreach', id: messageId, decision: 'rejected', reviewer, notes });
+
+export const approvePrMaterial = ({ materialId, reviewer, notes }) =>
+  decide({ target: 'prMaterial', id: materialId, decision: 'approved', reviewer, notes });
+
+export const rejectPrMaterial = ({ materialId, reviewer, notes }) =>
+  decide({ target: 'prMaterial', id: materialId, decision: 'rejected', reviewer, notes });

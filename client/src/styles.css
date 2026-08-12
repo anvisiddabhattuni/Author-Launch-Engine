@@ -164,6 +164,15 @@ button.danger {
   border: 1px solid var(--danger);
 }
 
+button.link {
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  padding: 0;
+  font-weight: 500;
+  text-decoration: underline;
+}
+
 .row {
   display: flex;
   gap: 10px;
@@ -213,6 +222,9 @@ button.danger {
 .pill.queued { color: var(--accent); border-color: #1e3a5f; }
 .pill.published { color: var(--ok); border-color: #14432a; }
 .pill.failed { color: var(--danger); border-color: #4a1f1f; }
+.pill.sent { color: var(--ok); border-color: #14432a; }
+.pill.distributed { color: var(--ok); border-color: #14432a; }
+.pill.drafting { color: var(--warn); border-color: #4a3a12; }
 
 table {
   width: 100%;
