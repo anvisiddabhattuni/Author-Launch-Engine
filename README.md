@@ -122,8 +122,9 @@ Prints 20 stages with evidence at each one.
 npm run db:reset && npm test
 ```
 
-72 tests across 17 suites. For each story the leading suites map one-to-one onto its Gherkin
-scenarios; the rest cover the approval gate, escalation and the append-only log.
+92 tests across 19 suites. For each story the leading suites map one-to-one onto its Gherkin
+scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
+drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
 ## Configuration
 
