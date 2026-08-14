@@ -132,18 +132,33 @@ for (const m of outreach) {
 }
 
 rule('12. Approval gate — sending is refused before approval');
-const pitch = outreach.find((m) => m.status === 'pending_approval') ?? outreach[0];
-try {
-  await sendOutreachMessage({ messageId: pitch.id });
-  console.log('UNEXPECTED: the message was sent without approval');
-} catch (error) {
-  console.log(`blocked as designed: ${error.message}`);
+// On a re-run every opportunity may already carry a message, so fall back to
+// one still waiting on a human rather than dropping the gate demonstration.
+const { rows: waiting } = await query(
+  "SELECT * FROM outreach_messages WHERE author_id = $1 AND status = 'pending_approval' ORDER BY id LIMIT 1",
+  [author.id],
+);
+const pitch = outreach.find((m) => m.status === 'pending_approval') ?? outreach[0] ?? waiting[0];
+if (!pitch) {
+  console.log('skipped: every drafted message has already been approved and sent.');
+  console.log('run npm run db:reset && npm run demo to watch the gate refuse from scratch.');
+} else {
+  try {
+    await sendOutreachMessage({ messageId: pitch.id });
+    console.log('UNEXPECTED: the message was sent without approval');
+  } catch (error) {
+    console.log(`blocked as designed: ${error.message}`);
+  }
 }
 
 rule('13. Human approves, then the message goes out through the mocked email provider');
-await approveOutreach({ messageId: pitch.id, reviewer: 'Anvi Siddabhattuni', notes: 'Good fit.' });
-const sent = await sendOutreachMessage({ messageId: pitch.id });
-console.log(`message ${pitch.id} → ${sent.status}, provider id ${sent.external_id}, to ${sent.recipient}`);
+if (!pitch) {
+  console.log('skipped: nothing is waiting on a reviewer.');
+} else {
+  await approveOutreach({ messageId: pitch.id, reviewer: 'Anvi Siddabhattuni', notes: 'Good fit.' });
+  const sent = await sendOutreachMessage({ messageId: pitch.id });
+  console.log(`message ${pitch.id} → ${sent.status}, provider id ${sent.external_id}, to ${sent.recipient}`);
+}
 
 rule('14. Outreach audit trail');
 const outreachLog = await listAuditLog({ authorId: author.id, limit: 60 });
@@ -164,12 +179,30 @@ for (const m of milestones) {
   console.log(`  [${m.type.padEnd(11)}] ${m.event_date.toISOString().slice(0, 10)}  ${m.title}`);
 }
 
+/**
+ * A milestone can only hold one kit, so on a re-run without `db:reset` the
+ * existing kit is shown instead of failing. The demo is documentation; it has
+ * to survive being run twice.
+ */
+async function kitFor(milestone) {
+  const { rows } = await query('SELECT * FROM pr_kits WHERE milestone_id = $1', [milestone.id]);
+  if (!rows[0]) {
+    return { ...(await draftPressKit({ milestoneId: milestone.id })), reused: false };
+  }
+  const { rows: materials } = await query(
+    'SELECT * FROM pr_materials WHERE kit_id = $1 ORDER BY id',
+    [rows[0].id],
+  );
+  return { kit: rows[0], milestone, materials, reused: true };
+}
+
 rule('16. PR and Outreach Agent drafts a press kit per milestone');
 const kits = [];
 for (const milestone of milestones) {
-  const { kit, materials } = await draftPressKit({ milestoneId: milestone.id });
+  const { kit, materials, reused } = await kitFor(milestone);
   kits.push({ kit, milestone, materials });
-  console.log(`\n[${milestone.type}] kit ${kit.id} — ${milestone.title}`);
+  const note = reused ? '  (existing kit — run npm run db:reset for a clean pass)' : '';
+  console.log(`\n[${milestone.type}] kit ${kit.id} — ${milestone.title}${note}`);
   for (const material of materials) {
     console.log(
       `  ${material.type.padEnd(14)} alignment=${material.theme_alignment} ` +
@@ -185,36 +218,52 @@ const launch = kits.find((k) => k.milestone.type === 'launch') ?? kits[0];
 const release = launch.materials.find((m) => m.type === 'press_release');
 console.log(release.body.replace(/^/gm, '  '));
 
-rule('18. Approval gate — distribution is refused while any material is unapproved');
-try {
-  await distributePressKit({ kitId: launch.kit.id });
-  console.log('UNEXPECTED: the kit was distributed without approval');
-} catch (error) {
-  console.log(`blocked as designed: ${error.message}`);
-}
+const alreadyDistributed = launch.kit.status === 'distributed';
 
-console.log('\napproving one material of three, then trying again:');
-await approvePrMaterial({
-  materialId: launch.materials[0].id,
-  reviewer: 'Anvi Siddabhattuni',
-  notes: 'Release reads well.',
-});
-try {
-  await distributePressKit({ kitId: launch.kit.id });
-  console.log('UNEXPECTED: a partially approved kit was distributed');
-} catch (error) {
-  console.log(`still blocked as designed: ${error.message}`);
+rule('18. Approval gate — distribution is refused while any material is unapproved');
+if (alreadyDistributed) {
+  console.log('skipped: this kit was already distributed on an earlier run.');
+  console.log('run npm run db:reset && npm run demo to watch the gate refuse from scratch.');
+} else {
+  try {
+    await distributePressKit({ kitId: launch.kit.id });
+    console.log('UNEXPECTED: the kit was distributed without approval');
+  } catch (error) {
+    console.log(`blocked as designed: ${error.message}`);
+  }
+
+  console.log('\napproving one material of three, then trying again:');
+  await approvePrMaterial({
+    materialId: launch.materials[0].id,
+    reviewer: 'Anvi Siddabhattuni',
+    notes: 'Release reads well.',
+  });
+  try {
+    await distributePressKit({ kitId: launch.kit.id });
+    console.log('UNEXPECTED: a partially approved kit was distributed');
+  } catch (error) {
+    console.log(`still blocked as designed: ${error.message}`);
+  }
 }
 
 rule('19. Human approves the rest, then the kit goes to the matching press contacts');
-for (const material of launch.materials.slice(1)) {
-  await approvePrMaterial({
-    materialId: material.id,
-    reviewer: 'Anvi Siddabhattuni',
-    notes: 'Approved for distribution.',
-  });
+let distributions;
+if (alreadyDistributed) {
+  ({ rows: distributions } = await query(
+    'SELECT * FROM pr_distributions WHERE kit_id = $1 ORDER BY id',
+    [launch.kit.id],
+  ));
+  console.log('already approved and distributed on an earlier run; showing what was sent.');
+} else {
+  for (const material of launch.materials.slice(1)) {
+    await approvePrMaterial({
+      materialId: material.id,
+      reviewer: 'Anvi Siddabhattuni',
+      notes: 'Approved for distribution.',
+    });
+  }
+  ({ distributions } = await distributePressKit({ kitId: launch.kit.id }));
 }
-const { distributions } = await distributePressKit({ kitId: launch.kit.id });
 const { rows: allContacts } = await query('SELECT COUNT(*)::int AS n FROM press_contacts');
 console.log(
   `distributed to ${distributions.length} of ${allContacts[0].n} press contacts ` +
