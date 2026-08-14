@@ -234,10 +234,13 @@ router.post('/authors/:authorId/books/:bookId/opportunities/scout', asyncRoute(a
 router.get('/opportunities', asyncRoute(async (req, res) => {
   const conditions = [];
   const params = [];
+  // Qualify every column: this query joins outreach_messages, which carries its
+  // own author_id and status. Unqualified names are ambiguous to Postgres, and
+  // an unqualified status that happened to resolve would filter the wrong table.
   for (const [column, value] of [
-    ['author_id', req.query.authorId],
-    ['type', req.query.type],
-    ['status', req.query.status],
+    ['o.author_id', req.query.authorId],
+    ['o.type', req.query.type],
+    ['o.status', req.query.status],
   ]) {
     if (value) {
       params.push(value);
