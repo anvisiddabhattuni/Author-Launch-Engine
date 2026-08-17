@@ -2,13 +2,18 @@ import { config } from '../config.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 
-const NEWS_HOOK = {
-  launch: 'the book is being published',
-  award: 'the book has been shortlisted for a prize',
-  anniversary: 'the book has been in print for a year',
-};
+function newsHook({ milestone, anniversaryYears }) {
+  if (milestone.type === 'launch') return 'the book is being published';
+  if (milestone.type === 'award') return 'the book has been shortlisted for a prize';
+  if (milestone.type !== 'anniversary') return 'there is news about the book';
+  // Never state a year the data does not support: an unknown count becomes a
+  // vaguer hook rather than an invented "first anniversary".
+  return anniversaryYears
+    ? `the book has been in print for ${anniversaryYears} year${anniversaryYears === 1 ? '' : 's'}`
+    : 'the book is marking an anniversary of its publication';
+}
 
-function buildPrompt({ milestone, book, author }) {
+function buildPrompt({ milestone, book, author, anniversaryYears }) {
   return [
     `Write a press kit for the book "${book.title}" by ${author.name}.`,
     '',
@@ -17,7 +22,11 @@ function buildPrompt({ milestone, book, author }) {
     `Date: ${milestone.event_date}`,
     `Location: ${milestone.location || 'not specified'}`,
     `Details: ${milestone.details}`,
-    `The news hook is that ${NEWS_HOOK[milestone.type] ?? 'there is news about the book'}.`,
+    `The news hook is that ${newsHook({ milestone, anniversaryYears })}.`,
+    anniversaryYears
+      ? `This is the book's anniversary number ${anniversaryYears}. Do not describe it as any ` +
+        'other anniversary, and do not call it the first unless that number is 1.'
+      : null,
     '',
     `Book themes: ${book.themes.join(', ')}`,
     `Author voice: ${JSON.stringify(author.voice_profile)}`,
@@ -37,7 +46,9 @@ function buildPrompt({ milestone, book, author }) {
     '',
     'Respond with JSON only, no prose, in exactly this shape:',
     '{"materials":[{"type":"press_release","headline":"...","body":"...","themesUsed":["..."]}]}',
-  ].join('\n');
+  ]
+    .filter((line) => line !== null)
+    .join('\n');
 }
 
 const REQUIRED_TYPES = ['press_release', 'author_bio', 'fact_sheet'];
@@ -75,7 +86,7 @@ function parseKit(text) {
 export const prAnthropicProvider = {
   name: 'anthropic',
 
-  async draftKit({ milestone, book, author }) {
+  async draftKit({ milestone, book, author, anniversaryYears = null }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
@@ -90,7 +101,9 @@ export const prAnthropicProvider = {
       body: JSON.stringify({
         model: config.anthropicModel,
         max_tokens: 4000,
-        messages: [{ role: 'user', content: buildPrompt({ milestone, book, author }) }],
+        messages: [
+          { role: 'user', content: buildPrompt({ milestone, book, author, anniversaryYears }) },
+        ],
       }),
     });
 

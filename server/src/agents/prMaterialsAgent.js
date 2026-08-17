@@ -2,6 +2,7 @@ import { getPrProvider } from '../ai/index.js';
 import { config } from '../config.js';
 import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { anniversaryYears } from '../services/milestones.js';
 
 /**
  * Press materials are a second capability of the PR and Outreach Agent named in
@@ -148,7 +149,20 @@ export async function draftPressKit({
     );
     const kit = kitRows[0];
 
-    const produced = await provider.draftKit({ milestone, book, author });
+    // Which anniversary this is, when the milestone is one and the publication
+    // date makes it knowable. Passed to the provider so the copy can say so
+    // instead of assuming the first (STORY-004).
+    const years =
+      milestone.type === 'anniversary'
+        ? anniversaryYears({ publishedOn: book.published_on, eventDate: milestone.event_date })
+        : null;
+
+    const produced = await provider.draftKit({
+      milestone,
+      book,
+      author,
+      anniversaryYears: years,
+    });
 
     const materials = [];
     for (const item of produced) {
@@ -234,11 +248,12 @@ export async function draftPressKit({
           milestoneType: milestone.type,
           materials: materials.map((m) => m.type),
           provider: provider.name,
+          anniversaryYears: years,
         },
       },
       client,
     );
 
-    return { kit, milestone, materials };
+    return { kit, milestone, materials, anniversaryYears: years };
   });
 }

@@ -1,5 +1,5 @@
 /**
- * End-to-end walkthrough of STORY-001 to STORY-003, printed step by step.
+ * End-to-end walkthrough of STORY-001 to STORY-004, printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -11,6 +11,8 @@ import { config } from './config.js';
 import { closePool, query } from './db/pool.js';
 import { approveDraft, approveOutreach, approvePrMaterial } from './services/approvals.js';
 import { listAuditLog } from './services/auditLog.js';
+import { findApproachingMilestones } from './services/milestones.js';
+import { draftApproachingKits } from './services/milestoneWatcher.js';
 import { sendOutreachMessage } from './services/outreachSender.js';
 import { distributePressKit } from './services/prDistributor.js';
 import { publishDue, scheduleDraft } from './services/scheduler.js';
@@ -196,9 +198,12 @@ async function kitFor(milestone) {
   return { kit: rows[0], milestone, materials, reused: true };
 }
 
-rule('16. PR and Outreach Agent drafts a press kit per milestone');
+rule('16. PR and Outreach Agent drafts a press kit on request');
+// The anniversary is deliberately left alone here. STORY-003 drafts when a
+// person asks; STORY-004 drafts when the date approaches, and stage 21 has to
+// find something to do.
 const kits = [];
-for (const milestone of milestones) {
+for (const milestone of milestones.filter((m) => m.type !== 'anniversary')) {
   const { kit, materials, reused } = await kitFor(milestone);
   kits.push({ kit, milestone, materials });
   const note = reused ? '  (existing kit — run npm run db:reset for a clean pass)' : '';
@@ -282,4 +287,88 @@ for (const entry of [...pressLog]
 }
 
 console.log('\nSTORY-003 complete — press kits drafted, reviewed and distributed\n');
+
+// ── STORY-004 — an approaching anniversary drafts its own kit ────────────────
+
+rule(`21. What is approaching (lead time: ${config.milestoneLeadTimeDays} days)`);
+const { rows: bookRow } = await query('SELECT published_on FROM books WHERE id = $1', [book.id]);
+console.log(`"${book.title}" was published ${bookRow[0].published_on.toISOString().slice(0, 10)}\n`);
+
+const approaching = await findApproachingMilestones({ authorId: author.id });
+for (const m of approaching) {
+  const which = m.anniversaryYears ? ` (anniversary no. ${m.anniversaryYears})` : '';
+  console.log(
+    `  [${m.type.padEnd(11)}] in ${String(m.days_until).padStart(3)} days  ` +
+      `${(m.kit_id ? 'kit already drafted' : 'NEEDS A KIT').padEnd(19)}  ${m.title}${which}`,
+  );
+}
+const beyond = milestones.filter((m) => !approaching.some((a) => a.id === m.id));
+for (const m of beyond) {
+  const days = Math.round((m.event_date - Date.now()) / 86400000);
+  console.log(`  [${m.type.padEnd(11)}] in ${String(days).padStart(3)} days  outside the window   ${m.title}`);
+}
+
+rule('22. The agent drafts for the approaching anniversary without being asked');
+const watch = await draftApproachingKits({ authorId: author.id });
+console.log(
+  `${watch.approaching.length} approaching → ${watch.drafted.length} drafted, ` +
+    `${watch.alreadyDrafted.length} already had a kit, ${watch.failed.length} failed`,
+);
+
+const anniversaryKit =
+  watch.drafted.find((d) => d.milestone.type === 'anniversary') ??
+  watch.alreadyDrafted.find((m) => m.type === 'anniversary');
+
+if (watch.drafted.length === 0) {
+  console.log('\nnothing new to draft on this run — npm run db:reset && npm run demo for a clean pass');
+}
+
+for (const d of watch.drafted) {
+  console.log(`\n[${d.milestone.type}] kit ${d.kit.id} — ${d.milestone.title}`);
+  if (d.anniversaryYears) console.log(`  counted as anniversary no. ${d.anniversaryYears}`);
+  for (const material of d.materials) {
+    console.log(
+      `  ${material.type.padEnd(14)} alignment=${material.theme_alignment} ` +
+        `confidence=${material.confidence} → ${material.status}`,
+    );
+  }
+}
+
+rule('23. The anniversary release states which anniversary it is');
+const anniversaryRelease = watch.drafted
+  .find((d) => d.milestone.type === 'anniversary')
+  ?.materials.find((m) => m.type === 'press_release');
+
+if (anniversaryRelease) {
+  console.log(anniversaryRelease.body.split('\n').slice(0, 7).join('\n').replace(/^/gm, '  '));
+  console.log('\n  (before this story the copy said "first anniversary" regardless of the year)');
+} else {
+  console.log('  the anniversary kit already existed; reset the database to watch it drafted');
+}
+
+rule('24. Drafting on detection is still not permission to send');
+if (anniversaryKit) {
+  const kitId = anniversaryKit.kit?.id ?? anniversaryKit.kit_id;
+  try {
+    await distributePressKit({ kitId });
+    console.log('UNEXPECTED: an unreviewed kit was distributed');
+  } catch (error) {
+    console.log(`blocked as designed: ${error.message}`);
+  }
+}
+
+rule('25. Detection audit trail');
+const watchLog = await listAuditLog({ authorId: author.id, limit: 200 });
+for (const entry of [...watchLog]
+  .reverse()
+  .filter((e) => e.action === 'milestone.approaching' || e.action === 'milestone.scan_completed')) {
+  const meta = entry.metadata ?? {};
+  const detail =
+    entry.action === 'milestone.approaching'
+      ? `${meta.milestone} — ${meta.daysUntil} days out (window ${meta.leadTimeDays})`
+      : `${meta.approaching} approaching, ${meta.drafted} drafted, window ends ${meta.windowEndsOn}`;
+  console.log(`${entry.created_at.toISOString()}  ${entry.action.padEnd(28)} ${detail}`);
+}
+
+console.log('\nSTORY-004 complete — an approaching anniversary drafts its own kit, still held for review\n');
 await closePool();

@@ -38,6 +38,27 @@ const longDate = (value) =>
     timeZone: 'UTC',
   });
 
+const CARDINALS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+const ORDINALS = [
+  'first', 'second', 'third', 'fourth', 'fifth',
+  'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+];
+
+/** "one year" / "two years" / "14 years" — anniversaries past ten read fine as digits. */
+const yearsPhrase = (years) =>
+  years <= CARDINALS.length ? `${CARDINALS[years - 1]} year${years === 1 ? '' : 's'}` : `${years} years`;
+
+const ordinalWord = (years) => {
+  if (years <= ORDINALS.length) return ORDINALS[years - 1];
+  const suffix = years % 10 === 1 && years % 100 !== 11 ? 'st'
+    : years % 10 === 2 && years % 100 !== 12 ? 'nd'
+    : years % 10 === 3 && years % 100 !== 13 ? 'rd'
+    : 'th';
+  return `${years}${suffix}`;
+};
+
+const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
 /** Headline and opening paragraph carry the news; both turn on milestone type. */
 const ANGLES = {
   launch: ({ book, author, milestone, themes }) => ({
@@ -60,11 +81,20 @@ const ANGLES = {
       `A shortlist is a room full of books that took ${themes[1]} seriously. ` +
       `Being in that room is the part that matters.`,
   }),
-  anniversary: ({ book, author, milestone, themes }) => ({
-    headline: `"${book.title}" marks one year in print as its argument about ${themes[0]} finds new readers`,
+  // `years` is null when the publication date is unknown. Rather than assert an
+  // anniversary it cannot count, the copy says "another year" — vaguer, but not
+  // wrong, and wrong is what reaches a journalist.
+  anniversary: ({ book, author, milestone, themes, years }) => ({
+    headline: years
+      ? `"${book.title}" marks ${yearsPhrase(years)} in print as its argument about ${themes[0]} finds new readers`
+      : `"${book.title}" marks another year in print as its argument about ${themes[0]} finds new readers`,
     lede:
-      `"${book.title}" by ${author.name} reaches its first anniversary on ${longDate(milestone.event_date)}. ` +
-      `A year on, the book's case for ${themes[0]} and ${themes[2]} continues to reach readers ` +
+      (years
+        ? `"${book.title}" by ${author.name} reaches its ${ordinalWord(years)} anniversary on ${longDate(milestone.event_date)}. ` +
+          `${capitalize(yearsPhrase(years))} on, `
+        : `"${book.title}" by ${author.name} marks an anniversary on ${longDate(milestone.event_date)}. ` +
+          `Years on, `) +
+      `the book's case for ${themes[0]} and ${themes[2]} continues to reach readers ` +
       `who found it by recommendation rather than by advertising.`,
     quote:
       `Books about ${themes[1]} are supposed to disappear quietly. ` +
@@ -78,8 +108,8 @@ const KICKER = {
   anniversary: 'ANNIVERSARY',
 };
 
-function pressRelease({ book, author, milestone, themes, line }) {
-  const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({ book, author, milestone, themes });
+function pressRelease({ book, author, milestone, themes, line, years }) {
+  const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({ book, author, milestone, themes, years });
   const dateline = [milestone.location, longDate(milestone.event_date)].filter(Boolean).join(', ');
 
   const body = [
@@ -128,14 +158,16 @@ function authorBio({ book, author, themes, line }) {
   return { headline, body, themesUsed: themes };
 }
 
-function factSheet({ book, author, milestone, themes }) {
+function factSheet({ book, author, milestone, themes, years }) {
   const headline = `"${book.title}" — fact sheet`;
   const body = [
     `TITLE — ${book.title}`,
     `AUTHOR — ${author.name}`,
     `CATEGORY — Nonfiction`,
     `THEMES — ${themes.join(' · ')}`,
+    book.published_on ? `PUBLISHED — ${longDate(book.published_on)}` : null,
     `MILESTONE — ${milestone.title}`,
+    years ? `ANNIVERSARY — ${ordinalWord(years)}, ${yearsPhrase(years)} in print` : null,
     `DATE — ${longDate(milestone.event_date)}`,
     milestone.location ? `LOCATION — ${milestone.location}` : null,
     `DETAILS — ${milestone.details}`,
@@ -157,7 +189,7 @@ export const prStubProvider = {
   /**
    * @returns {Array<{type: string, headline: string, body: string, themesUsed: string[]}>}
    */
-  async draftKit({ milestone, book, author }) {
+  async draftKit({ milestone, book, author, anniversaryYears = null }) {
     const seed = hash(`${milestone.id}:${book.id}`);
     const lines = sentences(book.content);
     const line = lines.length > 0 ? pick(lines, seed) : book.title;
@@ -166,10 +198,12 @@ export const prStubProvider = {
     const themes = [...book.themes];
     while (themes.length < 4) themes.push(themes[themes.length - 1] ?? 'the work');
 
+    const years = anniversaryYears;
+
     return [
-      { type: 'press_release', ...pressRelease({ book, author, milestone, themes, line }) },
+      { type: 'press_release', ...pressRelease({ book, author, milestone, themes, line, years }) },
       { type: 'author_bio', ...authorBio({ book, author, themes, line }) },
-      { type: 'fact_sheet', ...factSheet({ book, author, milestone, themes }) },
+      { type: 'fact_sheet', ...factSheet({ book, author, milestone, themes, years }) },
     ];
   },
 };

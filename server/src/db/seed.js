@@ -128,7 +128,7 @@ const MILESTONES = [
     title: 'The Quiet Craft — hardcover launch',
     inDays: 21,
     location: 'Ljubljana',
-    details: 'First print run of 8,000 copies, with a launch reading at the city library.',
+    details: 'New hardcover edition, print run of 8,000 copies, with a reading at the city library.',
   },
   {
     type: 'award',
@@ -137,17 +137,35 @@ const MILESTONES = [
     location: 'London',
     details: 'One of six titles shortlisted; the winner is announced at a ceremony in November.',
   },
+  // Deliberately the *second* anniversary, and deliberately inside the default
+  // 30-day lead-time window: it is what proves the copy counts anniversaries
+  // instead of assuming the first, and it gives the STORY-004 watcher something
+  // real to find.
   {
     type: 'anniversary',
-    title: 'The Quiet Craft — one year in print',
-    inDays: 120,
+    title: 'The Quiet Craft — two years in print',
+    inDays: 24,
     location: '',
-    details: 'Twelve months since publication, with a paperback edition to follow.',
+    details: 'Two years since publication, with a paperback edition to follow.',
   },
 ];
 
+/** The anniversary above is the book's second, so publication is two years before it. */
+const ANNIVERSARY = MILESTONES.find((m) => m.type === 'anniversary');
+
 const isoDate = (inDays) =>
   new Date(Date.now() + inDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+/**
+ * Calendar-year arithmetic, not 365-day arithmetic: subtracting days would land
+ * a day off across a leap year and turn the second anniversary into the first.
+ */
+function minusYears(iso, years) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${String(y - years).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+const PUBLISHED_ON = minusYears(isoDate(ANNIVERSARY.inDays), 2);
 
 async function seed() {
   for (const w of WINDOWS) {
@@ -183,15 +201,17 @@ async function seed() {
 
   await query('DELETE FROM books WHERE author_id = $1', [author.id]);
   const { rows: bookRows } = await query(
-    `INSERT INTO books (author_id, title, content, themes) VALUES ($1,$2,$3,$4) RETURNING *`,
+    `INSERT INTO books (author_id, title, content, themes, published_on)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
     [
       author.id,
       'The Quiet Craft',
       BOOK_CONTENT,
       ['deep work', 'craft', 'attention', 'resilience'],
+      PUBLISHED_ON,
     ],
   );
-  console.log(`seeded book "${bookRows[0].title}" (id ${bookRows[0].id})`);
+  console.log(`seeded book "${bookRows[0].title}" (id ${bookRows[0].id}), published ${PUBLISHED_ON}`);
 
   await query('DELETE FROM social_history WHERE author_id = $1', [author.id]);
   for (const h of HISTORY) {

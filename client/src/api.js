@@ -69,4 +69,10 @@ export const api = {
   approvePrMaterial: (id, body) => request(`/pr-materials/${id}/approve`, { method: 'POST', body }),
   rejectPrMaterial: (id, body) => request(`/pr-materials/${id}/reject`, { method: 'POST', body }),
   distributeKit: (id) => request(`/press-kits/${id}/distribute`, { method: 'POST' }),
+
+  // STORY-004 — approaching milestones
+  approachingMilestones: (authorId) => request(`/authors/${authorId}/milestones/approaching`),
+
+  draftApproaching: (authorId, body = {}) =>
+    request(`/authors/${authorId}/milestones/draft-approaching`, { method: 'POST', body }),
 };

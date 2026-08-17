@@ -18,12 +18,26 @@ const formatDate = (value) =>
     timeZone: 'UTC',
   });
 
+function ordinal(n) {
+  const suffix =
+    n % 10 === 1 && n % 100 !== 11 ? 'st'
+    : n % 10 === 2 && n % 100 !== 12 ? 'nd'
+    : n % 10 === 3 && n % 100 !== 13 ? 'rd'
+    : 'th';
+  return `${n}${suffix}`;
+}
+
+const countdown = (days) =>
+  days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+
 /**
  * STORY-003: PR materials drafted for a milestone, each aligned with the book's
  * themes and held for human review before the kit can be distributed.
+ * STORY-004: an approaching milestone gets its kit drafted without being asked.
  */
 export function PressPage({ author, book }) {
   const [milestones, setMilestones] = useState([]);
+  const [approaching, setApproaching] = useState(null);
   const [kits, setKits] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [reviewer, setReviewer] = useState(author.name);
@@ -33,12 +47,14 @@ export function PressPage({ author, book }) {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [m, k, c] = await Promise.all([
+    const [m, a, k, c] = await Promise.all([
       api.milestones(author.id),
+      api.approachingMilestones(author.id),
       api.pressKits(author.id),
       api.pressContacts(),
     ]);
     setMilestones(m);
+    setApproaching(a);
     setKits(k);
     setContacts(c);
   }, [author.id]);
@@ -70,6 +86,78 @@ export function PressPage({ author, book }) {
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
+      {approaching && (
+        <div className="card">
+          <h2>
+            Approaching ({approaching.approaching.length} within {approaching.leadTimeDays} days)
+          </h2>
+          <p className="hint">
+            A milestone inside the lead-time window should already have a press kit waiting for
+            review — a journalist needs notice, and so do you. Drafting on detection does not skip
+            the approval gate: every material still lands held for review.
+          </p>
+
+          {approaching.approaching.length === 0 ? (
+            <div className="empty">
+              Nothing within {approaching.leadTimeDays} days. The next milestone is further out.
+            </div>
+          ) : (
+            <>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Milestone</th>
+                    <th>Type</th>
+                    <th>When</th>
+                    <th>Press kit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {approaching.approaching.map((m) => (
+                    <tr key={m.id}>
+                      <td>
+                        {m.title}
+                        {m.anniversaryYears && (
+                          <span className="mono"> · {ordinal(m.anniversaryYears)} anniversary</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className="pill">{m.type}</span>
+                      </td>
+                      <td>{countdown(m.days_until)}</td>
+                      <td>
+                        {m.kit_id ? (
+                          <span className={`pill ${m.kit_status}`}>{m.kit_status}</span>
+                        ) : (
+                          <span className="pill escalated">needs drafting</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="row" style={{ marginTop: 14 }}>
+                <button
+                  disabled={busy || approaching.needingKit === 0}
+                  onClick={() =>
+                    run(
+                      () => api.draftApproaching(author.id),
+                      'Kits drafted for every approaching milestone. All held for review.',
+                    )
+                  }
+                >
+                  Draft kits for approaching milestones
+                </button>
+                {approaching.needingKit === 0 && (
+                  <span className="hint">Every approaching milestone already has a kit.</span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="card">
         <h2>Milestones ({milestones.length})</h2>
         <p className="hint">
@@ -93,7 +181,12 @@ export function PressPage({ author, book }) {
             <tbody>
               {milestones.map((m) => (
                 <tr key={m.id}>
-                  <td>{m.title}</td>
+                  <td>
+                    {m.title}
+                    {m.anniversaryYears && (
+                      <span className="mono"> · {ordinal(m.anniversaryYears)} anniversary</span>
+                    )}
+                  </td>
                   <td>
                     <span className="pill">{m.type}</span>
                   </td>

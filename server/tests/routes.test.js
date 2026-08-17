@@ -120,7 +120,12 @@ describe('the other list routes respond', () => {
     });
   }
 
-  for (const path of ['/weekly-coverage', '/monthly-opportunities', '/milestones']) {
+  for (const path of [
+    '/weekly-coverage',
+    '/monthly-opportunities',
+    '/milestones',
+    '/milestones/approaching',
+  ]) {
     it(`GET /authors/:id${path} returns 200`, async () => {
       const { status, body } = await get(`/authors/${authorId}${path}`);
       assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);

@@ -15,6 +15,8 @@ import {
   rejectPrMaterial,
 } from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
+import { anniversaryYears, findApproachingMilestones } from '../services/milestones.js';
+import { draftApproachingKits } from '../services/milestoneWatcher.js';
 import { sendOutreachMessage } from '../services/outreachSender.js';
 import { distributePressKit } from '../services/prDistributor.js';
 import { publishDue, scheduleDraft } from '../services/scheduler.js';
@@ -361,14 +363,55 @@ router.post('/outreach-messages/:id/send', asyncRoute(async (req, res) => {
 
 router.get('/authors/:authorId/milestones', asyncRoute(async (req, res) => {
   const { rows } = await query(
-    `SELECT m.*, k.id AS kit_id, k.status AS kit_status
+    `SELECT m.*,
+            k.id           AS kit_id,
+            k.status       AS kit_status,
+            b.published_on AS book_published_on,
+            (m.event_date - CURRENT_DATE) AS days_until
        FROM milestones m
+       JOIN books b ON b.id = m.book_id
        LEFT JOIN pr_kits k ON k.milestone_id = m.id
       WHERE m.author_id = $1
       ORDER BY m.event_date`,
     [req.params.authorId],
   );
-  res.json(rows);
+  res.json(
+    rows.map((row) => ({
+      ...row,
+      anniversaryYears:
+        row.type === 'anniversary'
+          ? anniversaryYears({ publishedOn: row.book_published_on, eventDate: row.event_date })
+          : null,
+    })),
+  );
+}));
+
+/** Read model for STORY-004: what is close enough to need a kit already. */
+router.get('/authors/:authorId/milestones/approaching', asyncRoute(async (req, res) => {
+  const leadTimeDays = req.query.leadTimeDays
+    ? Number(req.query.leadTimeDays)
+    : config.milestoneLeadTimeDays;
+
+  const approaching = await findApproachingMilestones({
+    authorId: Number(req.params.authorId),
+    leadTimeDays,
+  });
+
+  res.json({
+    leadTimeDays,
+    approaching,
+    needingKit: approaching.filter((m) => !m.kit_id).length,
+  });
+}));
+
+/** Command for STORY-004: draft a kit for every approaching milestone missing one. */
+router.post('/authors/:authorId/milestones/draft-approaching', asyncRoute(async (req, res) => {
+  const result = await draftApproachingKits({
+    authorId: Number(req.params.authorId),
+    leadTimeDays: req.body?.leadTimeDays ?? config.milestoneLeadTimeDays,
+    ...(req.body?.now ? { now: new Date(req.body.now) } : {}),
+  });
+  res.status(201).json(result);
 }));
 
 router.post('/authors/:authorId/books/:bookId/milestones', asyncRoute(async (req, res) => {

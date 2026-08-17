@@ -174,7 +174,7 @@ describe('REQ-003: drafts are created for major book milestones', () => {
     const headlines = {};
     for (const [type, title] of [
       ['award', 'The Quiet Craft shortlisted for the Vermilion Prize'],
-      ['anniversary', 'The Quiet Craft — one year in print'],
+      ['anniversary', 'The Quiet Craft — an anniversary in print'],
     ]) {
       const milestone = await createMilestone(type, 60 + Object.keys(headlines).length, title);
       const { materials } = await draftPressKit({ milestoneId: milestone.id });
@@ -182,7 +182,10 @@ describe('REQ-003: drafts are created for major book milestones', () => {
     }
 
     assert.notEqual(headlines.award, headlines.anniversary);
-    assert.match(headlines.anniversary, /one year in print/i);
+    // This book carries no publication date, so the number of years is unknowable
+    // and the copy must not invent one. The counted case is in anniversaries.test.js.
+    assert.match(headlines.anniversary, /another year in print/i);
+    assert.doesNotMatch(headlines.anniversary, /\bfirst\b|\bone year\b/i);
   });
 
   it('refuses a second kit for the same milestone', async () => {

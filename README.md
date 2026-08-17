@@ -10,6 +10,7 @@ Implemented so far:
 - **STORY-002 — Identify and Draft Outreach Messages for Opportunities** (Opportunity Scouting Agent
   and PR & Outreach Agent), fulfilling `REQ-002`
 - **STORY-003 — Draft PR Materials for Book Launch** (PR & Outreach Agent), fulfilling `REQ-003`
+- **STORY-004 — Draft PR Materials for Book Anniversary** (PR & Outreach Agent), fulfilling `REQ-003`
 
 ## What works today
 
@@ -53,7 +54,37 @@ press list, and only to contacts whose beat matches one of the book's themes.
 Press materials are a second capability of the same PR & Outreach Agent that owns STORY-002, kept in
 its own module because a press release and a booking pitch share an owner but not a job.
 
-Trust-Before-Intelligence controls required by all three stories:
+### STORY-004 — anniversaries, and drafting before you ask
+
+| Story build step | Where it lives |
+|---|---|
+| 1. PR generation extended to handle anniversaries | `server/src/ai/prStubProvider.js`, `prAnthropicProvider.js` |
+| 2. Logic identifying *upcoming* anniversaries and drafting for them | `server/src/services/milestones.js`, `milestoneWatcher.js` |
+| 3. Drafts stored pending review | unchanged — the same `pr_materials.status` path as STORY-003 |
+| 4. API for anniversary generation and retrieval | `GET /api/authors/:id/milestones/approaching`, `POST .../draft-approaching` |
+| 5. React component to display and review them | `client/src/pages/PressPage.jsx` — the *Approaching* card |
+
+STORY-003 already drafted for anniversary milestones, so this story is really about the two things it
+left out.
+
+**A milestone has to be noticed.** STORY-003 drafted a kit when a person asked for one, which means
+a forgotten date produced nothing. `findApproachingMilestones` returns milestones falling inside
+`MILESTONE_LEAD_TIME_DAYS`, and `draftApproachingKits` drafts a kit for each one that lacks it. A
+milestone already past is not approaching, and one beyond the window is not yet the agent's business.
+Detection is audited (`milestone.approaching`) before drafting starts and separately from it, so a
+provider failure cannot erase the fact that the milestone was seen.
+
+**An anniversary has a number.** The copy was hardcoded to the first — "reaches its first
+anniversary" — so a second or third would have gone to journalists factually wrong. `books.published_on`
+makes the count derivable, and `anniversaryYears()` counts full calendar years, which is why it does
+not round a date one day early up to the next year. When the publication date is unknown the copy
+says "another year in print" rather than inventing one: a vaguer sentence is recoverable, a wrong
+fact in a press release is not.
+
+Drafting on detection changes *when* drafting starts and nothing about who decides. Every material
+still lands `pending_approval`, and `distributePressKit` still refuses a kit the watcher produced.
+
+Trust-Before-Intelligence controls required by all four stories:
 
 - **Audit log** — every draft, opportunity, material, decision, schedule, publish, send and
   distribution is appended to `audit_log`. Append-only is enforced by database triggers, so
@@ -103,7 +134,7 @@ schedule, Opportunities, Outreach, Press, Audit log.
 npm run db:reset && npm run demo
 ```
 
-Prints 20 stages with evidence at each one.
+Prints 25 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -111,10 +142,17 @@ Prints 20 stages with evidence at each one.
 - **Stages 9–14, STORY-002:** the directory scan with relevance scores and rejections, the monthly
   cadence check, personalized outreach drafts, the send gate refusing an unapproved message,
   approval and mocked sending, and the outreach audit trail.
-- **Stages 15–20, STORY-003:** the scheduled milestones, a press kit drafted per milestone with
+- **Stages 15–20, STORY-003:** the scheduled milestones, a press kit drafted on request with
   theme-alignment scores, the launch press release in full, the distribution gate refusing both a
   wholly unapproved kit and a partially approved one, distribution to the matching press contacts
   only, and the press audit trail.
+- **Stages 21–25, STORY-004:** the lead-time window with one milestone inside it and one beyond, the
+  agent drafting the approaching anniversary without being asked, the release stating which
+  anniversary it is, the distribution gate refusing the kit the watcher just drafted, and the
+  detection audit trail.
+
+Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
+drafts when a person asks, STORY-004 drafts when the date approaches.
 
 ## Tests
 
@@ -122,7 +160,7 @@ Prints 20 stages with evidence at each one.
 npm run db:reset && npm test
 ```
 
-92 tests across 19 suites. For each story the leading suites map one-to-one onto its Gherkin
+109 tests across 24 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -141,6 +179,7 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `RELEVANCE_THRESHOLD` | `0.5` | Below this, a directory listing is not recorded as an opportunity |
 | `MIN_OPPORTUNITIES_PER_MONTH` | `5` | Monthly cadence minimum from REQ-002 |
 | `MIN_THEME_ALIGNMENT` | `0.5` | Below this share of the book's themes, a press material escalates |
+| `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
 
 ### Content providers
 
@@ -186,7 +225,9 @@ are the verified matches rather than the provider's own claim about what it used
 | `GET` | `/api/outreach-messages?authorId=&status=` | List outreach messages |
 | `POST` | `/api/outreach-messages/:id/approve` · `/reject` | Record a human decision |
 | `POST` | `/api/outreach-messages/:id/send` | Send through the mocked email provider |
-| `GET` | `/api/authors/:id/milestones` | List milestones and whether each has a kit |
+| `GET` | `/api/authors/:id/milestones` | List milestones, whether each has a kit, and which anniversary it is |
+| `GET` | `/api/authors/:id/milestones/approaching` | Milestones inside the lead-time window, soonest first |
+| `POST` | `/api/authors/:id/milestones/draft-approaching` | Draft a kit for every approaching milestone missing one |
 | `POST` | `/api/authors/:id/books/:bookId/milestones` | Schedule a launch, anniversary or award |
 | `POST` | `/api/milestones/:id/press-kit` | Draft the three press materials for a milestone |
 | `GET` | `/api/press-kits?authorId=` | Kits with their materials, scores and distributions |
@@ -204,13 +245,16 @@ These are deliberate deferrals, not oversights:
 - Per-tenant isolation is by `author_id` column filtering, not the separate-schema-per-tenant model
   the requirements describe.
 - Publishing, outreach sending and press distribution are triggered on demand rather than by a
-  background worker.
+  background worker. STORY-004 added the *detection* a worker would call
+  (`draftApproachingKits`), but something still has to call it — the UI button, the demo, or a cron
+  entry. Nothing runs on a timer yet.
 - Social platform, directory, email and press-list adapters are all mocked; no live credentials are
   involved.
 - Directory listings are a fixed catalogue, so a monthly rescan finds nothing new. A live adapter
   would return fresh listings over time.
-- Milestones are seeded or entered by hand. Nothing detects that a launch date is approaching and
-  drafts a kit on its own, so REQ-003 is satisfied on demand rather than proactively.
+- Milestones are still seeded or entered by hand. STORY-004 detects an approaching one and drafts for
+  it, but nothing generates the milestone itself — an anniversary does not recur onto next year's
+  calendar on its own.
 - A press kit is distributed as one email per contact. Real newsroom workflows expect attachments
   and an embargo date, neither of which the mocked provider models.
 - The build guide specifies Create React App; this uses Vite, since CRA is deprecated and

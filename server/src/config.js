@@ -23,6 +23,10 @@ export const config = {
   relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
   minOpportunitiesPerMonth: number(process.env.MIN_OPPORTUNITIES_PER_MONTH, 5),
   minThemeAlignment: number(process.env.MIN_THEME_ALIGNMENT, 0.5),
+  // How far ahead a milestone counts as "approaching". A press kit needs to sit
+  // with a reviewer, and journalists need lead time of their own, so detection
+  // has to fire well before the date rather than on it.
+  milestoneLeadTimeDays: number(process.env.MILESTONE_LEAD_TIME_DAYS, 30),
 };
 
 export const PLATFORMS = ['twitter', 'instagram', 'facebook', 'linkedin'];
