@@ -2,6 +2,7 @@ import { getPrProvider } from '../ai/index.js';
 import { config } from '../config.js';
 import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { isAnnounceable, outcomeOf } from '../services/awards.js';
 import { anniversaryYears } from '../services/milestones.js';
 
 /**
@@ -117,9 +118,26 @@ export async function draftPressKit({
     const milestone = milestoneRows[0];
     if (!milestone) throw Object.assign(new Error('Milestone not found'), { status: 404 });
 
-    const { rows: existing } = await client.query('SELECT * FROM pr_kits WHERE milestone_id = $1', [
-      milestoneId,
-    ]);
+    // An award the book did not win is not news, so there is nothing to draft.
+    // Refused here rather than in the caller so the UI, the watcher and the API
+    // all get the same answer (STORY-005).
+    if (!isAnnounceable(milestone)) {
+      throw Object.assign(
+        new Error(
+          `Milestone ${milestoneId} has outcome "${outcomeOf(milestone)}": ` +
+            'an award that was not won produces no press material',
+        ),
+        { status: 409 },
+      );
+    }
+
+    // Only one kit may be *in progress*. A distributed kit is history — a book
+    // that was shortlisted and then wins needs a second announcement, not a
+    // refusal.
+    const { rows: existing } = await client.query(
+      "SELECT * FROM pr_kits WHERE milestone_id = $1 AND status = 'drafting'",
+      [milestoneId],
+    );
     if (existing[0]) {
       throw Object.assign(
         new Error(`Milestone ${milestoneId} already has a press kit (id ${existing[0].id})`),
@@ -157,11 +175,15 @@ export async function draftPressKit({
         ? anniversaryYears({ publishedOn: book.published_on, eventDate: milestone.event_date })
         : null;
 
+    const awardOutcome = outcomeOf(milestone);
+
     const produced = await provider.draftKit({
       milestone,
       book,
       author,
       anniversaryYears: years,
+      awardOutcome,
+      awardName: milestone.award_name ?? null,
     });
 
     const materials = [];
@@ -249,11 +271,13 @@ export async function draftPressKit({
           materials: materials.map((m) => m.type),
           provider: provider.name,
           anniversaryYears: years,
+          awardOutcome,
+          awardName: milestone.award_name ?? null,
         },
       },
       client,
     );
 
-    return { kit, milestone, materials, anniversaryYears: years };
+    return { kit, milestone, materials, anniversaryYears: years, awardOutcome };
   });
 }

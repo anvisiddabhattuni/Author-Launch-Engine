@@ -51,6 +51,22 @@ async function decide({ target, id, decision, reviewer, notes = '' }) {
       );
     }
 
+    // Reviewing withdrawn copy wastes the reviewer's attention, which is the
+    // scarce resource this whole gate is spending (STORY-005).
+    if (target === 'prMaterial') {
+      const { rows: kitRows } = await client.query('SELECT * FROM pr_kits WHERE id = $1', [
+        record.kit_id,
+      ]);
+      if (kitRows[0]?.status === 'superseded') {
+        throw Object.assign(
+          new Error(
+            `pr_material ${id} belongs to superseded kit ${record.kit_id} and no longer needs a decision`,
+          ),
+          { status: 409 },
+        );
+      }
+    }
+
     await client.query(
       `INSERT INTO approvals (${spec.column}, decision, reviewer, notes) VALUES ($1,$2,$3,$4)`,
       [id, decision, reviewer, notes],

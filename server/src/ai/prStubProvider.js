@@ -71,16 +71,37 @@ const ANGLES = {
       `I wanted to write the book I needed during the middle of a long project, ` +
       `when nothing was working and ${themes[2]} was the only thing left to spend.`,
   }),
-  award: ({ book, author, milestone, themes }) => ({
-    headline: `"${book.title}" by ${author.name} named to the ${milestone.title.replace(/^.*shortlisted for (the )?/i, '')} shortlist`,
-    lede:
-      `"${book.title}" by ${author.name} has been shortlisted for a major nonfiction prize, ` +
-      `announced on ${longDate(milestone.event_date)}. Judges cited the book's treatment of ${themes[0]} ` +
-      `and ${themes[1]} as the reason for its inclusion.`,
-    quote:
-      `A shortlist is a room full of books that took ${themes[1]} seriously. ` +
-      `Being in that room is the part that matters.`,
-  }),
+  // A win and a shortlisting are different news. The prize name arrives as data
+  // (`awardName`); it used to be scraped out of the milestone title with a
+  // regex, which mangled the headline for any title not phrased as "shortlisted
+  // for X" — a won award being exactly such a title.
+  award: ({ book, author, milestone, themes, awardOutcome, awardName }) => {
+    const prize = awardName ? `the ${awardName}` : 'a major nonfiction prize';
+
+    if (awardOutcome === 'won') {
+      return {
+        headline: `"${book.title}" by ${author.name} wins ${prize}`,
+        lede:
+          `"${book.title}" by ${author.name} has won ${prize}, announced on ` +
+          `${longDate(milestone.event_date)}. Judges cited the book's treatment of ${themes[0]} ` +
+          `and ${themes[1]} as the reason for the award.`,
+        quote:
+          `Prizes go to books, but the work is done by people nobody is watching yet. ` +
+          `This one is for anyone still spending ${themes[2]} on something that has not paid them back.`,
+      };
+    }
+
+    return {
+      headline: `"${book.title}" by ${author.name} named to the ${awardName ?? 'nonfiction prize'} shortlist`,
+      lede:
+        `"${book.title}" by ${author.name} has been shortlisted for ${prize}, ` +
+        `announced on ${longDate(milestone.event_date)}. Judges cited the book's treatment of ${themes[0]} ` +
+        `and ${themes[1]} as the reason for its inclusion.`,
+      quote:
+        `A shortlist is a room full of books that took ${themes[1]} seriously. ` +
+        `Being in that room is the part that matters.`,
+    };
+  },
   // `years` is null when the publication date is unknown. Rather than assert an
   // anniversary it cannot count, the copy says "another year" — vaguer, but not
   // wrong, and wrong is what reaches a journalist.
@@ -102,19 +123,28 @@ const ANGLES = {
   }),
 };
 
-const KICKER = {
-  launch: 'NEW RELEASE',
-  award: 'AWARD NEWS',
-  anniversary: 'ANNIVERSARY',
+const kicker = (type, awardOutcome) => {
+  if (type === 'launch') return 'NEW RELEASE';
+  if (type === 'anniversary') return 'ANNIVERSARY';
+  if (type === 'award') return awardOutcome === 'won' ? 'AWARD WINNER' : 'SHORTLIST';
+  return 'BOOK NEWS';
 };
 
-function pressRelease({ book, author, milestone, themes, line, years }) {
-  const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({ book, author, milestone, themes, years });
+function pressRelease({ book, author, milestone, themes, line, years, awardOutcome, awardName }) {
+  const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({
+    book,
+    author,
+    milestone,
+    themes,
+    years,
+    awardOutcome,
+    awardName,
+  });
   const dateline = [milestone.location, longDate(milestone.event_date)].filter(Boolean).join(', ');
 
   const body = [
     'FOR IMMEDIATE RELEASE',
-    KICKER[milestone.type] ?? 'BOOK NEWS',
+    kicker(milestone.type, awardOutcome),
     '',
     angle.headline,
     '',
@@ -158,7 +188,13 @@ function authorBio({ book, author, themes, line }) {
   return { headline, body, themesUsed: themes };
 }
 
-function factSheet({ book, author, milestone, themes, years }) {
+const AWARD_STATUS_LINE = {
+  won: 'Winner',
+  shortlisted: 'Shortlisted',
+  not_won: 'Shortlisted (did not win)',
+};
+
+function factSheet({ book, author, milestone, themes, years, awardOutcome, awardName }) {
   const headline = `"${book.title}" — fact sheet`;
   const body = [
     `TITLE — ${book.title}`,
@@ -167,6 +203,8 @@ function factSheet({ book, author, milestone, themes, years }) {
     `THEMES — ${themes.join(' · ')}`,
     book.published_on ? `PUBLISHED — ${longDate(book.published_on)}` : null,
     `MILESTONE — ${milestone.title}`,
+    awardName ? `AWARD — ${awardName}` : null,
+    awardOutcome ? `AWARD STATUS — ${AWARD_STATUS_LINE[awardOutcome] ?? awardOutcome}` : null,
     years ? `ANNIVERSARY — ${ordinalWord(years)}, ${yearsPhrase(years)} in print` : null,
     `DATE — ${longDate(milestone.event_date)}`,
     milestone.location ? `LOCATION — ${milestone.location}` : null,
@@ -189,7 +227,14 @@ export const prStubProvider = {
   /**
    * @returns {Array<{type: string, headline: string, body: string, themesUsed: string[]}>}
    */
-  async draftKit({ milestone, book, author, anniversaryYears = null }) {
+  async draftKit({
+    milestone,
+    book,
+    author,
+    anniversaryYears = null,
+    awardOutcome = null,
+    awardName = null,
+  }) {
     const seed = hash(`${milestone.id}:${book.id}`);
     const lines = sentences(book.content);
     const line = lines.length > 0 ? pick(lines, seed) : book.title;
@@ -201,9 +246,15 @@ export const prStubProvider = {
     const years = anniversaryYears;
 
     return [
-      { type: 'press_release', ...pressRelease({ book, author, milestone, themes, line, years }) },
+      {
+        type: 'press_release',
+        ...pressRelease({ book, author, milestone, themes, line, years, awardOutcome, awardName }),
+      },
       { type: 'author_bio', ...authorBio({ book, author, themes, line }) },
-      { type: 'fact_sheet', ...factSheet({ book, author, milestone, themes, years }) },
+      {
+        type: 'fact_sheet',
+        ...factSheet({ book, author, milestone, themes, years, awardOutcome, awardName }),
+      },
     ];
   },
 };

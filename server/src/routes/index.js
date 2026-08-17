@@ -15,6 +15,8 @@ import {
   rejectPrMaterial,
 } from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
+import { recordAwardOutcome } from '../services/awardOutcome.js';
+import { AWARD_OUTCOMES, findAwardsAwaitingOutcome, outcomeOf } from '../services/awards.js';
 import { anniversaryYears, findApproachingMilestones } from '../services/milestones.js';
 import { draftApproachingKits } from '../services/milestoneWatcher.js';
 import { sendOutreachMessage } from '../services/outreachSender.js';
@@ -370,7 +372,13 @@ router.get('/authors/:authorId/milestones', asyncRoute(async (req, res) => {
             (m.event_date - CURRENT_DATE) AS days_until
        FROM milestones m
        JOIN books b ON b.id = m.book_id
-       LEFT JOIN pr_kits k ON k.milestone_id = m.id
+       LEFT JOIN LATERAL (
+            SELECT id, status
+              FROM pr_kits
+             WHERE milestone_id = m.id AND status <> 'superseded'
+             ORDER BY id DESC
+             LIMIT 1
+       ) k ON true
       WHERE m.author_id = $1
       ORDER BY m.event_date`,
     [req.params.authorId],
@@ -382,8 +390,37 @@ router.get('/authors/:authorId/milestones', asyncRoute(async (req, res) => {
         row.type === 'anniversary'
           ? anniversaryYears({ publishedOn: row.book_published_on, eventDate: row.event_date })
           : null,
+      awardOutcome: outcomeOf(row),
     })),
   );
+}));
+
+/** Read model for STORY-005: awards whose result nobody has recorded yet. */
+router.get('/authors/:authorId/awards/awaiting-outcome', asyncRoute(async (req, res) => {
+  const awaiting = await findAwardsAwaitingOutcome({ authorId: Number(req.params.authorId) });
+  res.json({ awaiting, count: awaiting.length });
+}));
+
+/**
+ * Command for STORY-005. Recording a win is what triggers the win release; the
+ * release is still held for review, and recording a loss draws nothing.
+ */
+router.post('/milestones/:id/award-outcome', asyncRoute(async (req, res) => {
+  const { outcome, awardName = null, actor = 'author', notes = '' } = req.body ?? {};
+  if (!outcome) {
+    throw Object.assign(new Error(`outcome is required (${AWARD_OUTCOMES.join(', ')})`), {
+      status: 400,
+    });
+  }
+
+  const result = await recordAwardOutcome({
+    milestoneId: Number(req.params.id),
+    outcome,
+    awardName,
+    actor,
+    notes,
+  });
+  res.status(201).json(result);
 }));
 
 /** Read model for STORY-004: what is close enough to need a kit already. */
@@ -415,16 +452,17 @@ router.post('/authors/:authorId/milestones/draft-approaching', asyncRoute(async 
 }));
 
 router.post('/authors/:authorId/books/:bookId/milestones', asyncRoute(async (req, res) => {
-  const { type, title, eventDate, details = '', location = '' } = req.body ?? {};
+  const { type, title, eventDate, details = '', location = '', awardName = null } = req.body ?? {};
   if (!type || !title || !eventDate) {
     throw Object.assign(new Error('type, title and eventDate are required'), { status: 400 });
   }
 
   const { rows } = await query(
-    `INSERT INTO milestones (author_id, book_id, type, title, event_date, details, location)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `INSERT INTO milestones (author_id, book_id, type, title, event_date, details, location, award_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (book_id, type, event_date) DO UPDATE
-       SET title = EXCLUDED.title, details = EXCLUDED.details, location = EXCLUDED.location
+       SET title = EXCLUDED.title, details = EXCLUDED.details, location = EXCLUDED.location,
+           award_name = COALESCE(EXCLUDED.award_name, milestones.award_name)
      RETURNING *`,
     [
       Number(req.params.authorId),
@@ -434,6 +472,7 @@ router.post('/authors/:authorId/books/:bookId/milestones', asyncRoute(async (req
       eventDate,
       details,
       location,
+      type === 'award' ? awardName : null,
     ],
   );
 
@@ -465,7 +504,7 @@ router.get('/press-kits', asyncRoute(async (req, res) => {
   const { rows: kits } = await query(
     `SELECT k.*,
             m.title AS milestone_title, m.type AS milestone_type,
-            m.event_date, m.location, m.details,
+            m.event_date, m.location, m.details, m.award_name, m.outcome,
             COUNT(p.id)::int                                        AS material_count,
             COUNT(*) FILTER (WHERE p.status = 'approved')::int      AS approved_count,
             COUNT(*) FILTER (WHERE p.status = 'distributed')::int   AS distributed_count,
@@ -474,8 +513,8 @@ router.get('/press-kits', asyncRoute(async (req, res) => {
        JOIN milestones m ON m.id = k.milestone_id
        LEFT JOIN pr_materials p ON p.kit_id = k.id
        ${where}
-      GROUP BY k.id, m.title, m.type, m.event_date, m.location, m.details
-      ORDER BY m.event_date`,
+      GROUP BY k.id, m.title, m.type, m.event_date, m.location, m.details, m.award_name, m.outcome
+      ORDER BY m.event_date, k.id`,
     params,
   );
 
@@ -496,7 +535,10 @@ router.get('/press-kits', asyncRoute(async (req, res) => {
   res.json(
     kits.map((kit) => ({
       ...kit,
-      readyToDistribute: kit.material_count > 0 && kit.approved_count === kit.material_count,
+      readyToDistribute:
+        kit.status === 'drafting' &&
+        kit.material_count > 0 &&
+        kit.approved_count === kit.material_count,
       materials: materials.filter((m) => m.kit_id === kit.id),
       distributions: distributions.filter((d) => d.kit_id === kit.id),
     })),

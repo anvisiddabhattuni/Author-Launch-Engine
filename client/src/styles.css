@@ -225,6 +225,8 @@ button.link {
 .pill.sent { color: var(--ok); border-color: #14432a; }
 .pill.distributed { color: var(--ok); border-color: #14432a; }
 .pill.drafting { color: var(--warn); border-color: #4a3a12; }
+.pill.superseded { color: var(--muted); border-color: #2a2a2a; }
+.pill.won { color: var(--ok); border-color: #14432a; }
 
 table {
   width: 100%;

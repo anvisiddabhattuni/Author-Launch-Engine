@@ -11,6 +11,7 @@ Implemented so far:
   and PR & Outreach Agent), fulfilling `REQ-002`
 - **STORY-003 — Draft PR Materials for Book Launch** (PR & Outreach Agent), fulfilling `REQ-003`
 - **STORY-004 — Draft PR Materials for Book Anniversary** (PR & Outreach Agent), fulfilling `REQ-003`
+- **STORY-005 — Draft PR Materials for Book Awards** (PR & Outreach Agent), fulfilling `REQ-003`
 
 ## What works today
 
@@ -84,7 +85,33 @@ fact in a press release is not.
 Drafting on detection changes *when* drafting starts and nothing about who decides. Every material
 still lands `pending_approval`, and `distributePressKit` still refuses a kit the watcher produced.
 
-Trust-Before-Intelligence controls required by all four stories:
+### STORY-005 — awards, and not guessing the result
+
+| Story build step | Where it lives |
+|---|---|
+| 1. PR generation includes book awards as a trigger | `server/src/ai/prStubProvider.js`, `prAnthropicProvider.js` |
+| 2. Award detection: a recorded *win* drafts; a past ceremony with no result waits | `server/src/services/awards.js`, `awardOutcome.js` |
+| 3. Drafts stored pending review | unchanged — the same `pr_materials.status` path as STORY-003 |
+| 4. API for award generation and retrieval | `GET /api/authors/:id/awards/awaiting-outcome`, `POST /api/milestones/:id/award-outcome` |
+| 5. React interface for award drafts and review | `client/src/pages/PressPage.jsx` — the *Awards awaiting a result* card |
+
+STORY-003 already drafted for award milestones, so this story is the distinction it collapsed.
+
+**A win and a shortlisting are different news.** The copy always said "has been shortlisted", and the
+prize name was scraped out of the title with a regex. `milestones.outcome` (`shortlisted` / `won` /
+`not_won`) and `milestones.award_name` make both facts data. Recording a win is the trigger the
+acceptance criterion names: the agent drafts, still into the approval gate. Recording a loss drafts
+nothing — a loss is not announced, and that decision is audited so an empty log cannot look like a
+system that failed to notice.
+
+**The system will not guess.** An award whose ceremony has passed, still marked shortlisted, is listed
+as awaiting a result. Guessing either way puts a false claim in front of a journalist.
+
+**Winning withdraws the shortlist copy.** A real author gets both announcements, so a milestone may
+hold more than one kit. The shortlist kit is superseded rather than deleted, and neither a superseded
+kit nor an unreviewed win kit can be distributed — even if the shortlist had already been approved.
+
+Trust-Before-Intelligence controls required by all five stories:
 
 - **Audit log** — every draft, opportunity, material, decision, schedule, publish, send and
   distribution is appended to `audit_log`. Append-only is enforced by database triggers, so
@@ -134,7 +161,7 @@ schedule, Opportunities, Outreach, Press, Audit log.
 npm run db:reset && npm run demo
 ```
 
-Prints 25 stages with evidence at each one.
+Prints 31 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -150,9 +177,14 @@ Prints 25 stages with evidence at each one.
   agent drafting the approaching anniversary without being asked, the release stating which
   anniversary it is, the distribution gate refusing the kit the watcher just drafted, and the
   detection audit trail.
+- **Stages 26–31, STORY-005:** an award whose ceremony has passed and whose result nobody recorded,
+  recording the win as the trigger that drafts, the release stating a win rather than a shortlisting,
+  the gate refusing the win kit, the withdrawn shortlist kit refused even after the fact, and the
+  award audit trail.
 
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
-drafts when a person asks, STORY-004 drafts when the date approaches.
+drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
+award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 
 ## Tests
 
@@ -160,7 +192,7 @@ drafts when a person asks, STORY-004 drafts when the date approaches.
 npm run db:reset && npm test
 ```
 
-109 tests across 24 suites. For each story the leading suites map one-to-one onto its Gherkin
+126 tests across 30 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -229,6 +261,8 @@ are the verified matches rather than the provider's own claim about what it used
 | `GET` | `/api/authors/:id/milestones/approaching` | Milestones inside the lead-time window, soonest first |
 | `POST` | `/api/authors/:id/milestones/draft-approaching` | Draft a kit for every approaching milestone missing one |
 | `POST` | `/api/authors/:id/books/:bookId/milestones` | Schedule a launch, anniversary or award |
+| `GET` | `/api/authors/:id/awards/awaiting-outcome` | Awards whose ceremony has passed with no result recorded |
+| `POST` | `/api/milestones/:id/award-outcome` | Record won / not_won / shortlisted; a win drafts, a loss does not |
 | `POST` | `/api/milestones/:id/press-kit` | Draft the three press materials for a milestone |
 | `GET` | `/api/press-kits?authorId=` | Kits with their materials, scores and distributions |
 | `POST` | `/api/pr-materials/:id/approve` · `/reject` | Record a human decision |
@@ -254,7 +288,8 @@ These are deliberate deferrals, not oversights:
   would return fresh listings over time.
 - Milestones are still seeded or entered by hand. STORY-004 detects an approaching one and drafts for
   it, but nothing generates the milestone itself — an anniversary does not recur onto next year's
-  calendar on its own.
+  calendar on its own. Award *results* are recorded by a person for the same reason: the system will
+  not scrape a prize site and guess.
 - A press kit is distributed as one email per contact. Real newsroom workflows expect attachments
   and an embargo date, neither of which the mocked provider models.
 - The build guide specifies Create React App; this uses Vite, since CRA is deprecated and

@@ -66,6 +66,19 @@ export async function distributePressKit({ kitId }) {
         });
       }
 
+      // Withdrawn copy must not be sendable, however well reviewed it was. A
+      // shortlist release approved before the book won is approved copy that now
+      // states the wrong news (STORY-005).
+      if (kit.status === 'superseded') {
+        throw Object.assign(
+          new Error(
+            `Press kit ${kitId} was superseded and cannot be distributed` +
+              (kit.superseded_reason ? `: ${kit.superseded_reason}` : ''),
+          ),
+          { status: 409 },
+        );
+      }
+
       const { rows: materials } = await client.query(
         'SELECT * FROM pr_materials WHERE kit_id = $1 ORDER BY id',
         [kitId],

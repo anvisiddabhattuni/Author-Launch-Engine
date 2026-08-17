@@ -125,6 +125,7 @@ describe('the other list routes respond', () => {
     '/monthly-opportunities',
     '/milestones',
     '/milestones/approaching',
+    '/awards/awaiting-outcome',
   ]) {
     it(`GET /authors/:id${path} returns 200`, async () => {
       const { status, body } = await get(`/authors/${authorId}${path}`);

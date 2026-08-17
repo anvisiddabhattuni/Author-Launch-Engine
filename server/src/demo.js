@@ -1,5 +1,5 @@
 /**
- * End-to-end walkthrough of STORY-001 to STORY-004, printed step by step.
+ * End-to-end walkthrough of STORY-001 to STORY-005, printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -13,6 +13,8 @@ import { approveDraft, approveOutreach, approvePrMaterial } from './services/app
 import { listAuditLog } from './services/auditLog.js';
 import { findApproachingMilestones } from './services/milestones.js';
 import { draftApproachingKits } from './services/milestoneWatcher.js';
+import { recordAwardOutcome } from './services/awardOutcome.js';
+import { findAwardsAwaitingOutcome } from './services/awards.js';
 import { sendOutreachMessage } from './services/outreachSender.js';
 import { distributePressKit } from './services/prDistributor.js';
 import { publishDue, scheduleDraft } from './services/scheduler.js';
@@ -187,8 +189,14 @@ for (const m of milestones) {
  * to survive being run twice.
  */
 async function kitFor(milestone) {
-  const { rows } = await query('SELECT * FROM pr_kits WHERE milestone_id = $1', [milestone.id]);
-  if (!rows[0]) {
+  const { rows } = await query(
+    `SELECT * FROM pr_kits
+      WHERE milestone_id = $1
+      ORDER BY CASE status WHEN 'drafting' THEN 0 WHEN 'distributed' THEN 1 ELSE 2 END, id DESC
+      LIMIT 1`,
+    [milestone.id],
+  );
+  if (!rows[0] || rows[0].status === 'superseded') {
     return { ...(await draftPressKit({ milestoneId: milestone.id })), reused: false };
   }
   const { rows: materials } = await query(
@@ -305,7 +313,11 @@ for (const m of approaching) {
 const beyond = milestones.filter((m) => !approaching.some((a) => a.id === m.id));
 for (const m of beyond) {
   const days = Math.round((m.event_date - Date.now()) / 86400000);
-  console.log(`  [${m.type.padEnd(11)}] in ${String(days).padStart(3)} days  outside the window   ${m.title}`);
+  const when =
+    days < 0
+      ? `${String(Math.abs(days)).padStart(3)} days ago  already passed     `
+      : `in ${String(days).padStart(3)} days  outside the window  `;
+  console.log(`  [${m.type.padEnd(11)}] ${when} ${m.title}`);
 }
 
 rule('22. The agent drafts for the approaching anniversary without being asked');
@@ -371,4 +383,120 @@ for (const entry of [...watchLog]
 }
 
 console.log('\nSTORY-004 complete — an approaching anniversary drafts its own kit, still held for review\n');
+
+// ── STORY-005 — a recorded win drafts its own kit ────────────────────────────
+
+rule('26. Awards whose result nobody has written down');
+const awaiting = await findAwardsAwaitingOutcome({ authorId: author.id });
+if (awaiting.length === 0) {
+  console.log('  none — the result was already recorded on an earlier run');
+} else {
+  for (const m of awaiting) {
+    console.log(
+      `  ${m.award_name ?? m.title} — ceremony ${m.days_since} day${Number(m.days_since) === 1 ? '' : 's'} ago, still marked shortlisted`,
+    );
+  }
+  console.log('\n  the system will not guess. a false win in a press release is unrecoverable.');
+}
+
+const awardMilestone = milestones.find((m) => m.type === 'award');
+const shortlistKit = kits.find((k) => k.milestone.type === 'award');
+
+rule('27. Recording the win is what drafts the win release');
+const win = await recordAwardOutcome({
+  milestoneId: awardMilestone.id,
+  outcome: 'won',
+  actor: 'Anvi Siddabhattuni',
+  notes: 'Confirmed at the London ceremony.',
+});
+
+if (win.drafted) {
+  console.log(`outcome shortlisted → won. kit ${win.kit.id} drafted, held for review.`);
+  if (win.supersededKit) {
+    console.log(
+      `shortlist kit ${win.supersededKit.id} withdrawn: ${win.supersededKit.superseded_reason}`,
+    );
+  }
+  for (const material of win.materials) {
+    console.log(
+      `  ${material.type.padEnd(14)} alignment=${material.theme_alignment} ` +
+        `confidence=${material.confidence} → ${material.status}`,
+    );
+  }
+} else {
+  console.log(
+    `already recorded as ${win.milestone.outcome} — kit ${win.kit?.id ?? 'none'} ` +
+      '(npm run db:reset && npm run demo for a clean pass)',
+  );
+}
+
+rule('28. The win release states a win, not a shortlisting');
+const winRelease =
+  win.materials.find((m) => m.type === 'press_release') ??
+  (
+    await query(
+      `SELECT p.* FROM pr_materials p
+         JOIN pr_kits k ON k.id = p.kit_id
+        WHERE k.milestone_id = $1 AND k.status = 'drafting' AND p.type = 'press_release'
+        ORDER BY p.id DESC LIMIT 1`,
+      [awardMilestone.id],
+    )
+  ).rows[0];
+
+if (winRelease) {
+  console.log(winRelease.body.split('\n').slice(0, 7).join('\n').replace(/^/gm, '  '));
+  if (shortlistKit) {
+    const oldHeadline = shortlistKit.materials.find((m) => m.type === 'press_release')?.headline;
+    if (oldHeadline && !/wins/i.test(oldHeadline)) {
+      console.log(`\n  shortlist headline was: ${oldHeadline}`);
+      console.log('  (before this story both would have said "has been shortlisted")');
+    }
+  }
+}
+
+rule('29. Drafting on a recorded win is still not permission to send');
+const winKitId = win.kit?.id;
+if (winKitId) {
+  try {
+    await distributePressKit({ kitId: winKitId });
+    console.log('UNEXPECTED: an unreviewed win kit was distributed');
+  } catch (error) {
+    console.log(`blocked as designed: ${error.message}`);
+  }
+}
+
+rule('30. The withdrawn shortlist kit cannot go out either');
+if (shortlistKit && (win.supersededKit || shortlistKit.kit.status === 'superseded')) {
+  try {
+    await distributePressKit({ kitId: shortlistKit.kit.id });
+    console.log('UNEXPECTED: withdrawn shortlist copy was distributed');
+  } catch (error) {
+    console.log(`blocked as designed: ${error.message}`);
+  }
+} else {
+  console.log('  no shortlist kit left to refuse — it was already withdrawn on an earlier run');
+}
+
+rule('31. Award audit trail');
+const awardLog = await listAuditLog({ authorId: author.id, limit: 250 });
+for (const entry of [...awardLog]
+  .reverse()
+  .filter(
+    (e) =>
+      e.action === 'award.outcome_recorded' ||
+      e.action === 'award.no_material' ||
+      e.action === 'pr_kit.superseded',
+  )) {
+  const meta = entry.metadata ?? {};
+  const detail =
+    entry.action === 'award.outcome_recorded'
+      ? `${meta.from} → ${meta.to} (${meta.award ?? 'unspecified prize'})`
+      : entry.action === 'pr_kit.superseded'
+        ? meta.reason
+        : meta.reason;
+  console.log(`${entry.created_at.toISOString()}  ${entry.action.padEnd(28)} ${detail}`);
+}
+
+console.log('\nSTORY-005 complete — a recorded win drafts its own kit, still held for review\n');
 await closePool();
+

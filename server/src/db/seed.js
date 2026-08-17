@@ -130,12 +130,16 @@ const MILESTONES = [
     location: 'Ljubljana',
     details: 'New hardcover edition, print run of 8,000 copies, with a reading at the city library.',
   },
+  // Deliberately a few days ago: the ceremony has happened and nobody has
+  // recorded the result, which is the state STORY-005 exists to notice. The
+  // shortlist is still news until a win or a loss is written down.
   {
     type: 'award',
     title: 'The Quiet Craft shortlisted for the Vermilion Prize for Nonfiction',
-    inDays: 45,
+    inDays: -3,
     location: 'London',
-    details: 'One of six titles shortlisted; the winner is announced at a ceremony in November.',
+    details: 'One of six titles shortlisted; the winner was announced at a ceremony in London.',
+    awardName: 'Vermilion Prize for Nonfiction',
   },
   // Deliberately the *second* anniversary, and deliberately inside the default
   // 30-day lead-time window: it is what proves the copy counts anniversaries
@@ -239,10 +243,21 @@ async function seed() {
   // already; insert rather than upsert.
   for (const m of MILESTONES) {
     await query(
-      `INSERT INTO milestones (author_id, book_id, type, title, event_date, location, details)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+      `INSERT INTO milestones
+         (author_id, book_id, type, title, event_date, location, details, award_name, outcome)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (book_id, type, event_date) DO NOTHING`,
-      [author.id, bookRows[0].id, m.type, m.title, isoDate(m.inDays), m.location, m.details],
+      [
+        author.id,
+        bookRows[0].id,
+        m.type,
+        m.title,
+        isoDate(m.inDays),
+        m.location,
+        m.details,
+        m.awardName ?? null,
+        m.type === 'award' ? 'shortlisted' : null,
+      ],
     );
   }
   console.log(`seeded ${MILESTONES.length} milestones`);

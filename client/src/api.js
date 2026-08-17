@@ -75,4 +75,10 @@ export const api = {
 
   draftApproaching: (authorId, body = {}) =>
     request(`/authors/${authorId}/milestones/draft-approaching`, { method: 'POST', body }),
+
+  // STORY-005 — award outcomes
+  awardsAwaitingOutcome: (authorId) => request(`/authors/${authorId}/awards/awaiting-outcome`),
+
+  recordAwardOutcome: (milestoneId, body) =>
+    request(`/milestones/${milestoneId}/award-outcome`, { method: 'POST', body }),
 };

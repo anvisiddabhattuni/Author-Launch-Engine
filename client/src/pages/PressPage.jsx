@@ -34,10 +34,12 @@ const countdown = (days) =>
  * STORY-003: PR materials drafted for a milestone, each aligned with the book's
  * themes and held for human review before the kit can be distributed.
  * STORY-004: an approaching milestone gets its kit drafted without being asked.
+ * STORY-005: recording that an award was won is what drafts the win release.
  */
 export function PressPage({ author, book }) {
   const [milestones, setMilestones] = useState([]);
   const [approaching, setApproaching] = useState(null);
+  const [awaiting, setAwaiting] = useState(null);
   const [kits, setKits] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [reviewer, setReviewer] = useState(author.name);
@@ -47,14 +49,16 @@ export function PressPage({ author, book }) {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [m, a, k, c] = await Promise.all([
+    const [m, a, w, k, c] = await Promise.all([
       api.milestones(author.id),
       api.approachingMilestones(author.id),
+      api.awardsAwaitingOutcome(author.id),
       api.pressKits(author.id),
       api.pressContacts(),
     ]);
     setMilestones(m);
     setApproaching(a);
+    setAwaiting(w);
     setKits(k);
     setContacts(c);
   }, [author.id]);
@@ -85,6 +89,77 @@ export function PressPage({ author, book }) {
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
+
+      {awaiting && awaiting.count > 0 && (
+        <div className="card">
+          <h2>Awards awaiting a result ({awaiting.count})</h2>
+          <p className="hint">
+            The ceremony has happened and nobody has written down who won. The system will not guess
+            — announcing a shortlisting as a win is a false claim, and announcing a win as a
+            shortlisting understates it. Recording a win drafts the release and holds it for review.
+            Recording a loss drafts nothing.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Award</th>
+                <th>When</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {awaiting.awaiting.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    {m.award_name ?? m.title}
+                    <span className="mono"> · currently shortlisted</span>
+                  </td>
+                  <td>
+                    {Number(m.days_since) === 0
+                      ? 'today'
+                      : `${m.days_since} day${Number(m.days_since) === 1 ? '' : 's'} ago`}
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button
+                        disabled={busy}
+                        onClick={() =>
+                          run(
+                            () =>
+                              api.recordAwardOutcome(m.id, {
+                                outcome: 'won',
+                                actor: reviewer,
+                              }),
+                            `Win recorded for ${m.award_name ?? m.title}. A new kit is held for review.`,
+                          )
+                        }
+                      >
+                        Record win
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={busy}
+                        onClick={() =>
+                          run(
+                            () =>
+                              api.recordAwardOutcome(m.id, {
+                                outcome: 'not_won',
+                                actor: reviewer,
+                              }),
+                            `Loss recorded. No press material will be drafted.`,
+                          )
+                        }
+                      >
+                        Did not win
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {approaching && (
         <div className="card">
@@ -186,9 +261,15 @@ export function PressPage({ author, book }) {
                     {m.anniversaryYears && (
                       <span className="mono"> · {ordinal(m.anniversaryYears)} anniversary</span>
                     )}
+                    {m.award_name && <span className="mono"> · {m.award_name}</span>}
                   </td>
                   <td>
                     <span className="pill">{m.type}</span>
+                    {m.awardOutcome && (
+                      <span className={`pill ${m.awardOutcome === 'won' ? 'won' : ''}`}>
+                        {m.awardOutcome.replace('_', ' ')}
+                      </span>
+                    )}
                   </td>
                   <td>{formatDate(m.event_date)}</td>
                   <td>
@@ -199,7 +280,7 @@ export function PressPage({ author, book }) {
                     )}
                   </td>
                   <td>
-                    {!m.kit_id && (
+                    {!m.kit_id && m.awardOutcome !== 'not_won' && (
                       <button
                         disabled={busy}
                         onClick={() =>
@@ -239,6 +320,11 @@ export function PressPage({ author, book }) {
               <div className="meta">
                 <span className={`pill ${kit.status}`}>{kit.status}</span>
                 <span className="pill">{kit.milestone_type}</span>
+                {kit.outcome && (
+                  <span className={`pill ${kit.outcome === 'won' ? 'won' : ''}`}>
+                    {kit.outcome.replace('_', ' ')}
+                  </span>
+                )}
                 <strong>{kit.milestone_title}</strong>
                 <span>{formatDate(kit.event_date)}</span>
                 <span>
@@ -246,6 +332,9 @@ export function PressPage({ author, book }) {
                 </span>
                 <span>min alignment {Number(kit.min_theme_alignment).toFixed(2)}</span>
               </div>
+              {kit.status === 'superseded' && kit.superseded_reason && (
+                <p className="hint">{kit.superseded_reason}</p>
+              )}
 
               {kit.materials.map((material) => (
                 <div className="draft" key={material.id} style={{ marginTop: 12 }}>
@@ -274,7 +363,7 @@ export function PressPage({ author, book }) {
 
                   <div className="meta mono">{material.rationale}</div>
 
-                  {DECIDABLE.includes(material.status) && (
+                  {kit.status !== 'superseded' && DECIDABLE.includes(material.status) && (
                     <>
                       <input
                         placeholder="Notes for the record (optional)"
@@ -320,7 +409,7 @@ export function PressPage({ author, book }) {
                 </div>
               ))}
 
-              {kit.status !== 'distributed' && (
+              {kit.status === 'drafting' && (
                 <div className="row" style={{ marginTop: 14 }}>
                   <button
                     disabled={busy}

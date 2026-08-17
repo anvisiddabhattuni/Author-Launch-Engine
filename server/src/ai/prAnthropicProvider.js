@@ -2,9 +2,16 @@ import { config } from '../config.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 
-function newsHook({ milestone, anniversaryYears }) {
+function newsHook({ milestone, anniversaryYears, awardOutcome, awardName }) {
   if (milestone.type === 'launch') return 'the book is being published';
-  if (milestone.type === 'award') return 'the book has been shortlisted for a prize';
+  if (milestone.type === 'award') {
+    const prize = awardName ? `the ${awardName}` : 'a major nonfiction prize';
+    // Understating a win is a disservice; overstating a shortlisting is a false
+    // claim. Neither is left to the model to infer from the title.
+    return awardOutcome === 'won'
+      ? `the book has WON ${prize}`
+      : `the book has been shortlisted for ${prize} and has not won it`;
+  }
   if (milestone.type !== 'anniversary') return 'there is news about the book';
   // Never state a year the data does not support: an unknown count becomes a
   // vaguer hook rather than an invented "first anniversary".
@@ -13,7 +20,7 @@ function newsHook({ milestone, anniversaryYears }) {
     : 'the book is marking an anniversary of its publication';
 }
 
-function buildPrompt({ milestone, book, author, anniversaryYears }) {
+function buildPrompt({ milestone, book, author, anniversaryYears, awardOutcome, awardName }) {
   return [
     `Write a press kit for the book "${book.title}" by ${author.name}.`,
     '',
@@ -22,7 +29,14 @@ function buildPrompt({ milestone, book, author, anniversaryYears }) {
     `Date: ${milestone.event_date}`,
     `Location: ${milestone.location || 'not specified'}`,
     `Details: ${milestone.details}`,
-    `The news hook is that ${newsHook({ milestone, anniversaryYears })}.`,
+    awardName ? `Award: ${awardName}` : null,
+    `The news hook is that ${newsHook({ milestone, anniversaryYears, awardOutcome, awardName })}.`,
+    awardOutcome === 'won'
+      ? 'The book WON. Lead with the win. Do not describe it as a shortlisting or a nomination.'
+      : null,
+    awardOutcome === 'shortlisted'
+      ? 'The book was shortlisted and has NOT won. Do not imply or state that it won.'
+      : null,
     anniversaryYears
       ? `This is the book's anniversary number ${anniversaryYears}. Do not describe it as any ` +
         'other anniversary, and do not call it the first unless that number is 1.'
@@ -86,7 +100,14 @@ function parseKit(text) {
 export const prAnthropicProvider = {
   name: 'anthropic',
 
-  async draftKit({ milestone, book, author, anniversaryYears = null }) {
+  async draftKit({
+    milestone,
+    book,
+    author,
+    anniversaryYears = null,
+    awardOutcome = null,
+    awardName = null,
+  }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
@@ -102,7 +123,17 @@ export const prAnthropicProvider = {
         model: config.anthropicModel,
         max_tokens: 4000,
         messages: [
-          { role: 'user', content: buildPrompt({ milestone, book, author, anniversaryYears }) },
+          {
+            role: 'user',
+            content: buildPrompt({
+              milestone,
+              book,
+              author,
+              anniversaryYears,
+              awardOutcome,
+              awardName,
+            }),
+          },
         ],
       }),
     });

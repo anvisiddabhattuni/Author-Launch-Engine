@@ -1,6 +1,8 @@
 import { config } from '../config.js';
 import { query } from '../db/pool.js';
 
+import { isAnnounceable, outcomeOf } from './awards.js';
+
 /**
  * Milestone reads shared by the press-kit agent, the watcher and the API.
  *
@@ -53,6 +55,9 @@ export async function findApproachingMilestones({
   const run = client ? client.query.bind(client) : query;
   const today = now.toISOString().slice(0, 10);
 
+  // A milestone can carry more than one kit since STORY-005 — a shortlist
+  // announcement and then a win — so the join takes the one that matters now
+  // rather than multiplying the row. A superseded kit is not it.
   const { rows } = await run(
     `SELECT m.*,
             b.title        AS book_title,
@@ -62,7 +67,13 @@ export async function findApproachingMilestones({
             (m.event_date - $2::date) AS days_until
        FROM milestones m
        JOIN books b ON b.id = m.book_id
-       LEFT JOIN pr_kits k ON k.milestone_id = m.id
+       LEFT JOIN LATERAL (
+            SELECT id, status
+              FROM pr_kits
+             WHERE milestone_id = m.id AND status <> 'superseded'
+             ORDER BY id DESC
+             LIMIT 1
+       ) k ON true
       WHERE m.author_id = $1
         AND m.event_date >= $2::date
         AND m.event_date <= ($2::date + $3::int)
@@ -70,11 +81,16 @@ export async function findApproachingMilestones({
     [authorId, today, leadTimeDays],
   );
 
-  return rows.map((row) => ({
-    ...row,
-    anniversaryYears:
-      row.type === 'anniversary'
-        ? anniversaryYears({ publishedOn: row.book_published_on, eventDate: row.event_date })
-        : null,
-  }));
+  return rows
+    .map((row) => ({
+      ...row,
+      anniversaryYears:
+        row.type === 'anniversary'
+          ? anniversaryYears({ publishedOn: row.book_published_on, eventDate: row.event_date })
+          : null,
+      awardOutcome: outcomeOf(row),
+    }))
+    // An award the book did not win has nothing to announce, so it is not work
+    // waiting to be done (STORY-005).
+    .filter(isAnnounceable);
 }
