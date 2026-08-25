@@ -143,6 +143,28 @@ describe('STORY-066: meme drafting grounded in the book', () => {
     }
   });
 
+  it('keeps the panel text out of the caption that gets posted', () => {
+    // Joining the panels into the caption with a separator put a literal "|"
+    // in the tweet and repeated in the post text the words the picture was
+    // already showing. The panels are in the image; the caption sits beside it.
+    for (const meme of batch.filter((d) => d.format === 'meme')) {
+      assert.ok(!meme.content.includes('|'), `caption carries a separator: ${meme.content}`);
+      assert.ok(Array.isArray(meme.media.panels) && meme.media.panels.length > 0);
+    }
+  });
+
+  it('scores a meme on the caption and the picture together', () => {
+    // A meme's argument is laid into the panels, so scoring the caption alone
+    // measures half the post — and escalated every good meme when it was.
+    const memes = batch.filter((d) => d.format === 'meme');
+    for (const meme of memes) {
+      assert.ok(
+        Number(meme.theme_alignment) >= config.minThemeAlignment,
+        `${meme.media.template} aligned ${meme.theme_alignment} on caption "${meme.content}"`,
+      );
+    }
+  });
+
   it('routes memes to a visual-first platform', async () => {
     const { rows } = await query('SELECT platform FROM platform_windows WHERE visual_first');
     const visual = rows.map((r) => r.platform);
@@ -304,6 +326,23 @@ describe('The template library and its images', () => {
     assert.ok(usable.every((t) => t.licence?.commercial === true));
     assert.ok(!usable.some((t) => t.id === 'tmpl-stock-photo'), 'editorial-only is not offered');
     assert.ok(!usable.some((t) => t.id === 'tmpl-community-remix'), 'unlicensed is not offered');
+  });
+
+  it('shrinks the type to fit rather than dropping lines', () => {
+    // Silent truncation was the first thing the rendered preview exposed: a
+    // long panel simply stopped mid-sentence and nothing said so.
+    const long =
+      'Resilience is what remains when motivation has gone home for the evening, and the ' +
+      'people who finish things are the ones who showed up on the unremarkable Tuesday.';
+    const uri = renderMeme({
+      template: templateById('tmpl-two-panel'),
+      caption: 'On resilience.',
+      panels: ['What everyone thinks resilience is', long],
+      bookTitle: 'The Quiet Craft',
+    });
+    const svg = Buffer.from(uri.split(',')[1], 'base64').toString('utf8');
+    const lastWord = long.split(' ').pop().replace('.', '');
+    assert.ok(svg.includes(lastWord), 'the end of the sentence is in the picture');
   });
 
   it('renders the same bytes for the same inputs', () => {

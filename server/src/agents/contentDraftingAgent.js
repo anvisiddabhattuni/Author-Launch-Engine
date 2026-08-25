@@ -165,6 +165,13 @@ export function termTargetFor(content) {
  * Our code scores in both cases: a provider reporting its own alignment would
  * make REQ-001's criterion unverifiable, which is the one thing it cannot be.
  */
+/**
+ * @param {string} [readerText] Everything a reader actually reads, when that is
+ *   more than the caption. A meme's argument is laid into the picture
+ *   (STORY-066), so scoring `content` alone measures half the post: the caption
+ *   names the theme and the panels are what argue it. The character limit still
+ *   applies to `content`, because only the caption counts against it.
+ */
 export function scoreDraft({
   content,
   themesUsed,
@@ -174,17 +181,19 @@ export function scoreDraft({
   grounding = null,
   voice = null,
   bookTitle = '',
+  readerText = null,
 }) {
-  const termTarget = termTargetFor(content);
+  const scored = readerText ?? content;
+  const termTarget = termTargetFor(scored);
   const inPlay = grounding
-    ? themesInPlay({ content, claimed: themesUsed, grounding, bookTitle })
+    ? themesInPlay({ content: scored, claimed: themesUsed, grounding, bookTitle })
     : [];
 
   // Scored on the copy minus the title, for the same reason the title is
   // excluded from naming: the book's name is not an argument the book makes.
   const alignment = grounding
     ? alignToThemes({
-        text: withoutTitle(content, bookTitle),
+        text: withoutTitle(scored, bookTitle),
         grounding: { themes: inPlay },
         termTarget,
         // The book's whole theme list, not just the ones this post raises: a
@@ -195,11 +204,11 @@ export function scoreDraft({
 
   const themeScore = alignment
     ? alignment.score
-    : labelReuseScore(`${content} ${themesUsed.join(' ')}`, bookThemes);
+    : labelReuseScore(`${scored} ${themesUsed.join(' ')}`, bookThemes);
 
   const voiceResult = voice
-    ? checkVoice({ text: content, voice })
-    : { score: vocabularyOverlapScore(content, history), violations: [], traits: [], summary: 'vocabulary overlap with prior posts' };
+    ? checkVoice({ text: scored, voice })
+    : { score: vocabularyOverlapScore(scored, history), violations: [], traits: [], summary: 'vocabulary overlap with prior posts' };
 
   const fit = fitScore(content, maxChars);
   const confidence = Number(
@@ -361,6 +370,11 @@ export async function draftWeeklyPosts({
         grounding,
         voice,
         bookTitle: book.title,
+        // A meme is read as caption plus picture, so it is scored as both.
+        readerText:
+          candidate.format === 'meme'
+            ? [candidate.content, ...(candidate.panels ?? [])].join(' ')
+            : null,
       });
 
       // A meme is built and checked here, before it can be queued (STORY-066).
@@ -373,11 +387,14 @@ export async function draftWeeklyPosts({
             imageRef: renderMeme({
               template: candidate.template,
               caption: candidate.content,
+              panels: candidate.panels,
               bookTitle: book.title,
             }),
             altText: candidate.altText ?? '',
             template: candidate.template.id,
             layout: candidate.template.layout,
+            // What the picture says, kept beside the caption it sits next to.
+            panels: candidate.panels ?? [candidate.content],
             provenance: provenanceFor(candidate.template),
           }
         : null;

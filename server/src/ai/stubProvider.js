@@ -110,9 +110,16 @@ const slug = (theme) => theme.replace(/[^a-zA-Z0-9]+/g, '');
  * the book, not making its argument.
  */
 const MEME_CAPTIONS = {
-  'two-panel': (theme, s) => `What everyone thinks ${theme} is | ${s.claim}`,
-  single: (theme, s) => s.claim,
-  quote: (theme, s) => s.claim,
+  // The panels carry the joke; the caption is what actually gets posted beside
+  // the picture. Keeping them separate is not tidiness — joining them with a
+  // separator put a literal "|" in the tweet, and repeated in the post text the
+  // words the image was already showing.
+  'two-panel': (theme, s) => ({
+    panels: [`What everyone thinks ${theme} is`, s.claim],
+    caption: `On ${theme}, and what it actually costs.`,
+  }),
+  single: (theme, s) => ({ panels: [s.claim], caption: s.claim }),
+  quote: (theme, s) => ({ panels: [s.claim], caption: `From "${s.title}", on ${theme}.` }),
 };
 
 export const stubProvider = {
@@ -196,7 +203,7 @@ export const stubProvider = {
       // check exists to catch what slips past this, not to be the only guard.
       if (templates.length === 0) break;
       const template = pick(templates, seed >>> 5);
-      const caption = (MEME_CAPTIONS[template.layout] ?? MEME_CAPTIONS.single)(theme, {
+      const { panels, caption } = (MEME_CAPTIONS[template.layout] ?? MEME_CAPTIONS.single)(theme, {
         claim: claim ?? line,
         title: book.title,
       });
@@ -208,9 +215,11 @@ export const stubProvider = {
         themesUsed: [theme],
         groundedIn: (entry?.passages ?? []).map((p) => p.id),
         template,
+        panels,
         // Alt text is written here, at generation, because the drafter is the
-        // only thing that knows what the image was built to show.
-        altText: `${template.name}: ${caption.replace(/\s*\|\s*/g, ' — ')}`,
+        // only thing that knows what the image was built to show — and what it
+        // shows is the panels, not the caption sitting beside it.
+        altText: `${template.name}: ${panels.join(' — ')}`,
       });
     }
 

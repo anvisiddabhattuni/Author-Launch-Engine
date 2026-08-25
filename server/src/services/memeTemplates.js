@@ -117,40 +117,63 @@ function wrap(text, perLine) {
  * Deterministic: the same template and caption always produce the same bytes,
  * which is what lets a test assert on an image and a demo re-run unchanged.
  */
-export function renderMeme({ template, caption, bookTitle }) {
+/**
+ * Font size that fits `lines` in the space available, rather than dropping the
+ * lines that do not fit.
+ *
+ * Silent truncation was the first bug the rendered preview exposed: a long
+ * bottom panel simply stopped mid-sentence, and the reviewer had no way to know
+ * the image was showing less than the caption said. Shrinking is a visible
+ * compromise; cutting is an invisible one.
+ */
+const fitSize = (lines, max, budget) => Math.max(20, Math.min(max, Math.floor(budget / lines)));
+
+/**
+ * @param {object} input
+ * @param {string} input.caption The post's caption — what actually gets published.
+ * @param {string[]} [input.panels] Text laid into the image. For a two-panel
+ *   layout the setup and the turn; defaults to the caption for single layouts.
+ *   Kept separate from `caption` because they are different things: the panels
+ *   are *in* the picture, and repeating them in the post text is how a stray
+ *   panel separator ends up in a tweet.
+ */
+export function renderMeme({ template, caption, panels = null, bookTitle }) {
   const { palette, layout } = template;
   const W = 800;
   const H = layout === 'two-panel' ? 800 : 600;
 
-  const panels = layout === 'two-panel' ? String(caption).split(/\s*\|\s*|\n+/) : [String(caption)];
+  const text = panels ?? [String(caption)];
   const blocks = [];
 
   if (layout === 'two-panel') {
-    const [top = '', bottom = ''] = panels;
+    const [top = '', bottom = ''] = text;
     blocks.push(`<rect x="0" y="0" width="${W}" height="${H / 2}" fill="${palette.bg}"/>`);
     blocks.push(
       `<rect x="0" y="${H / 2}" width="${W}" height="${H / 2}" fill="${palette.accent}" opacity="0.12"/>`,
     );
-    wrap(top, 30).slice(0, 3).forEach((line, i) => {
-      blocks.push(
-        `<text x="40" y="${110 + i * 54}" font-family="Georgia,serif" font-size="40" fill="${palette.fg}">${escape(line)}</text>`,
-      );
-    });
-    wrap(bottom, 30).slice(0, 3).forEach((line, i) => {
-      blocks.push(
-        `<text x="40" y="${H / 2 + 110 + i * 54}" font-family="Georgia,serif" font-size="40" fill="${palette.fg}">${escape(line)}</text>`,
-      );
-    });
+    for (const [source, offset] of [[top, 0], [bottom, H / 2]]) {
+      const lines = wrap(source, 32);
+      const size = fitSize(lines.length, 40, 200);
+      const step = Math.round(size * 1.35);
+      const startY = offset + H / 4 - ((lines.length - 1) * step) / 2 + size / 3;
+      lines.forEach((line, i) => {
+        blocks.push(
+          `<text x="40" y="${Math.round(startY + i * step)}" font-family="Georgia,serif" font-size="${size}" fill="${palette.fg}">${escape(line)}</text>`,
+        );
+      });
+    }
     blocks.push(
       `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="${palette.accent}" stroke-width="4"/>`,
     );
   } else {
     blocks.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="${palette.bg}"/>`);
-    const lines = wrap(caption, layout === 'quote' ? 28 : 26).slice(0, 6);
-    const startY = H / 2 - (lines.length - 1) * 28;
+    const lines = wrap(text[0], layout === 'quote' ? 30 : 28);
+    const size = fitSize(lines.length, layout === 'quote' ? 38 : 42, 320);
+    const step = Math.round(size * 1.35);
+    const startY = H / 2 - ((lines.length - 1) * step) / 2;
     lines.forEach((line, i) => {
       blocks.push(
-        `<text x="${W / 2}" y="${startY + i * 56}" text-anchor="middle" font-family="Georgia,serif" font-size="${layout === 'quote' ? 38 : 42}" fill="${palette.fg}">${escape(line)}</text>`,
+        `<text x="${W / 2}" y="${Math.round(startY + i * step)}" text-anchor="middle" font-family="Georgia,serif" font-size="${size}" fill="${palette.fg}">${escape(line)}</text>`,
       );
     });
     if (layout === 'quote') {

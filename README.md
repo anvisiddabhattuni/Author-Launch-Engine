@@ -591,6 +591,16 @@ leave room for it.
 previews an actual image rather than a grey box, and the same inputs always produce the same bytes.
 No network call, the same constraint that kept theme retrieval lexical in STORY-006.
 
+**The caption and the panels are different things, and looking at the render is what proved it.**
+The first version joined a two-panel meme's text into the caption with a separator — which put a
+literal `|` in the tweet and repeated in the post text the words the picture was already showing.
+The panels now live in `media.panels` and the caption is what gets posted beside the image. That
+split has a second consequence worth stating: a meme is *scored* on caption plus panels, because the
+argument is laid into the picture and scoring the caption alone measures half the post — it escalated
+every good meme until it did. The character limit still applies to the caption alone, since that is
+all the platform counts. The same render also exposed silent truncation: a long panel simply stopped
+mid-sentence, so the type now shrinks to fit rather than dropping the lines that do not.
+
 **Brand safety and image rights are different kinds of failure and are treated differently.** This is
 the part worth defending. Brand safety is a *judgement* — whether a joke is off-key for this author
 is something a person can overrule — so a finding escalates and reaches a human, who may approve it
@@ -731,7 +741,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-309 tests across 78 suites. For each story the leading suites map one-to-one onto its Gherkin
+312 tests across 78 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
