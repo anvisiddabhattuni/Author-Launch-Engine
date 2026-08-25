@@ -240,6 +240,25 @@ button.link {
    reviewer can see how close a rejected lead came without doing the sum. */
 .muted { color: var(--muted); }
 
+/* A meme is one post, so the image and its caption are previewed as one unit
+   (STORY-066). Stacks on narrow screens rather than shrinking the image to
+   something a reviewer cannot actually judge. */
+.meme {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.meme img {
+  width: 260px;
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid #2a2f3a;
+  background: #0b0d11;
+}
+.meme > div { flex: 1 1 320px; min-width: 0; }
+
 table {
   width: 100%;
   border-collapse: collapse;

@@ -18,6 +18,7 @@ export const REASONS = {
   CONFIDENCE: 'confidence',
   THEME_ALIGNMENT: 'theme_alignment',
   VOICE: 'voice',
+  BRAND_SAFETY: 'brand_safety',
 };
 
 /** Statuses a human is still able to act on, and so a monitor may still change. */
@@ -36,7 +37,12 @@ export const DECIDABLE = ['pending_approval', 'escalated'];
  *   must not pass on the strength of its themes (STORY-009).
  * @returns {{status: 'escalated'|'pending_approval', reasons: string[]}}
  */
-export function assess({ confidence, themeAlignment = null, voice = null }) {
+export function assess({
+  confidence,
+  themeAlignment = null,
+  voice = null,
+  safetyFindings = [],
+}) {
   const reasons = [];
 
   if (Number(confidence) < config.confidenceEscalationThreshold) {
@@ -47,6 +53,13 @@ export function assess({ confidence, themeAlignment = null, voice = null }) {
   }
   if (voice !== null && Number(voice) < config.minVoiceMatch) {
     reasons.push(REASONS.VOICE);
+  }
+  // Brand safety is a judgement a person may overrule, so a finding escalates
+  // rather than blocking (STORY-066). Image *rights* are not here on purpose:
+  // they are a fact nobody at this company can overrule, and are enforced at
+  // publication instead — the rule a superseded press kit follows.
+  if (safetyFindings.length > 0) {
+    reasons.push(REASONS.BRAND_SAFETY);
   }
 
   return {

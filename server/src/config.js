@@ -20,6 +20,10 @@ export const config = {
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
   confidenceEscalationThreshold: number(process.env.CONFIDENCE_ESCALATION_THRESHOLD, 0.7),
   minPostsPerWeek: number(process.env.MIN_POSTS_PER_WEEK, 3),
+  // At least this many meme candidates per batch (STORY-066). The acceptance
+  // criterion is "at least one meme candidate is produced per batch", so one is
+  // a floor the drafter has to meet rather than an average it may miss.
+  minMemesPerBatch: number(process.env.MIN_MEMES_PER_BATCH, 1),
   relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
   // How well a listing has to fit the *author* — as opposed to the book — to be
   // worth a human's attention (STORY-010). Its own floor because it is an

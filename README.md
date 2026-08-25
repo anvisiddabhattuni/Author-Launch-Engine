@@ -20,6 +20,7 @@ Implemented so far:
 - **STORY-009 — Content Drafting Agent Creates Social Media Posts** (Content Drafting Agent), fulfilling `REQ-001` and `REQ-004`
 - **STORY-010 — PR and Outreach Agent Identifies Speaking Opportunities** (PR and Outreach Agent), fulfilling `REQ-002` and `REQ-004`
 - **STORY-011 — Coordination and Governance Agent Manages Agent Tasks** (Coordination and Governance Agent), fulfilling `REQ-003` and `REQ-004`
+- **STORY-066 — Generate Meme Content for Social Platforms** (AI Content Generation Agent), fulfilling `REQ-001`
 
 ## What works today
 
@@ -560,6 +561,57 @@ the module exposes no approval logic at all.
 > **A guarantee that only holds at concurrency 1 is not a guarantee, and the only way to find out is
 > to run two.**
 
+### STORY-066 — a meme is a draft with a picture
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Meme content type with image, caption, provenance | `014_memes.sql` — `drafts.format`, `drafts.media` |
+| 2. Meme generation in the AI Content Generation Agent | `memeTemplates.js`, `stubProvider.js` |
+| 3. Brand-safety and image-rights check before queueing | `brandSafety.js` |
+| 4. React approval UI previewing image and caption as one | `client/src/pages/ReviewPage.jsx` |
+| 5. Route memes to visual-first platforms | `platform_windows.visual_first` |
+
+Added to the backlog after Ram's review: *"On platforms like X, memes might get more traction than
+text."* Scoped against the existing REQ-001 rather than opening a new requirement, so the
+traceability matrix stays intact.
+
+**A meme is a `drafts` row with a different `format`, not a table of its own.** That is the whole
+design decision. Everything a text post already has — the approval gate in `scheduleDraft`, the
+append-only audit trail, escalation, the weekly cadence count, the STORY-011 coordination resource —
+applies to a meme with no second copy of any of it. The story's second acceptance clause is
+*"identical to the gate on text posts"*, and the cheapest way to be identical to something is to be
+it. A `memes` table would have needed its own gate, and a second gate is a gate with a hole in it.
+
+**The caption is the book's argument, not a label.** Memes are drafted from the same STORY-009
+grounding the text posts use — the theme's key message and the passages that evidence it — with one
+caption shape per template layout, because the image carries half the sentence and the words have to
+leave room for it.
+
+**The image is real, and rendered offline.** Templates render to SVG data URIs, so the approval UI
+previews an actual image rather than a grey box, and the same inputs always produce the same bytes.
+No network call, the same constraint that kept theme retrieval lexical in STORY-006.
+
+**Brand safety and image rights are different kinds of failure and are treated differently.** This is
+the part worth defending. Brand safety is a *judgement* — whether a joke is off-key for this author
+is something a person can overrule — so a finding escalates and reaches a human, who may approve it
+anyway. Image rights are a *fact*. Nobody at this company can grant a licence they do not hold, so an
+unresolved or refused image is refused at publication **even after a human approves it** — the rule a
+superseded press kit has followed since STORY-005. Demo stage 79 approves a meme and watches it be
+refused anyway.
+
+**An image with no provenance is `unresolved`, not `cleared`.** The system does not assume a licence
+it cannot point at, for the same reason it will not guess an award result or invent a claim about the
+book. A `cc-by` licence naming nobody to attribute is also unresolved: a requirement that cannot be
+satisfied has not been satisfied. Two of the five templates are withheld from the drafter before
+generation starts — the rights check exists to catch what gets past that, not to be the only guard.
+
+> **The interesting question was not "how do we make memes", it was "what can this refuse".** A
+> content type is easy to add. What made this story worth building carefully is that it is the first
+> thing in the system whose output carries someone else's property, and that turns out to need a
+> different control from every other gate here: **one a reviewer is not allowed to open.** Every
+> other check in this codebase escalates to a human because a human is the final authority. This one
+> does not, because on this question they are not.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -605,7 +657,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 74 stages with evidence at each one.
+Prints 80 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -664,6 +716,11 @@ Prints 74 stages with evidence at each one.
   than per-queue serialisation, eight workers racing one queue with no errors, and the distribution
   log.
 
+- **Stages 75–80, STORY-066:** a meme landing in the same table and the same gate as a text post,
+  the caption and the rendered image with its licence, the two templates withheld before generation,
+  the five safety and rights outcomes side by side, an approved meme refused at publication because
+  its rights are unresolved, and the meme trail with provenance.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -674,7 +731,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-284 tests across 72 suites. For each story the leading suites map one-to-one onto its Gherkin
+309 tests across 78 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -696,6 +753,7 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `THEME_MESSAGE_TERM_TARGET` | `8` | How many of the book's own words about a theme a draft must carry to count as arguing it |
 | `SOCIAL_MESSAGE_TERM_TARGET` | `3` | The same target's floor for a social post; the bar scales with the post's own length |
 | `MIN_VOICE_MATCH` | `0.5` | Below this match against the author's previous posts, a social draft escalates |
+| `MIN_MEMES_PER_BATCH` | `1` | Meme candidates every batch of social content must include |
 | `EXPERTISE_THRESHOLD` | `0.5` | Below this fit against the *author*, a listing does not qualify on expertise |
 | `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
 | `JWT_SECRET` | dev-only default | Session signing key. The server refuses to start with the default when `NODE_ENV=production` |
@@ -807,7 +865,19 @@ These are deliberate deferrals, not oversights:
   (`draftApproachingKits`), but something still has to call it — the UI button, the demo, or a cron
   entry. Nothing runs on a timer yet.
 - Social platform, directory, email and press-list adapters are all mocked; no live credentials are
-  involved.
+  involved. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
+  tested that an image of this size and type would be accepted by a real platform.
+- Meme images are SVG rendered from a fixed catalogue of five templates. There is no image *model*
+  here and no stock provider — "generated or template-based" from the story is template-based only,
+  and a generated image would need its own provenance shape and its own rights answer.
+- Brand safety is a readable list of terms plus two structural checks, not a classifier. It will
+  miss an off-key joke that uses none of those words, which is the same class of blind spot
+  STORY-010 named — inspectable on purpose, because it decides what a person is asked to look at.
+- `image_rights` is decided once, at generation. Nothing re-checks it later, so a licence that is
+  revoked after a meme was cleared stays cleared. STORY-008's monitor re-derives escalation
+  decisions on a schedule and this is the obvious second thing for it to re-derive.
+- Alt text is generated from the template name and the caption. It describes the *text* in the
+  image, not the image, which is the honest limit of writing alt text without seeing a picture.
 - Directory listings are a fixed catalogue, so a monthly rescan finds nothing new. A live adapter
   would return fresh listings over time. As of STORY-010 the adapters accept a type filter, so a
   real one could be asked for speaking listings only rather than filtered after the fact.

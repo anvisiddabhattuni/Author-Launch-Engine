@@ -4,11 +4,14 @@ import { closePool, query } from './pool.js';
 
 // Posting windows are hours in UTC. Values reflect commonly cited engagement
 // peaks per platform and are the "optimal times" the scheduler targets.
+// `visualFirst` decides where memes are routed (STORY-066). Reference data
+// about the platform, so it lives here beside the posting windows rather than
+// as a list of platform names inside the drafting agent.
 const WINDOWS = [
-  { platform: 'twitter', bestHours: [13, 15, 17], bestDays: [1, 2, 3, 4, 5], maxChars: 280 },
-  { platform: 'instagram', bestHours: [16, 18, 20], bestDays: [1, 2, 3, 4, 5, 6], maxChars: 2200 },
-  { platform: 'facebook', bestHours: [14, 16, 19], bestDays: [2, 3, 4, 5], maxChars: 63206 },
-  { platform: 'linkedin', bestHours: [12, 14, 16], bestDays: [2, 3, 4], maxChars: 3000 },
+  { platform: 'twitter', bestHours: [13, 15, 17], bestDays: [1, 2, 3, 4, 5], maxChars: 280, visualFirst: true },
+  { platform: 'instagram', bestHours: [16, 18, 20], bestDays: [1, 2, 3, 4, 5, 6], maxChars: 2200, visualFirst: true },
+  { platform: 'facebook', bestHours: [14, 16, 19], bestDays: [2, 3, 4, 5], maxChars: 63206, visualFirst: false },
+  { platform: 'linkedin', bestHours: [12, 14, 16], bestDays: [2, 3, 4], maxChars: 3000, visualFirst: false },
 ];
 
 const BOOK_CONTENT = `
@@ -195,13 +198,14 @@ const PUBLISHED_ON = minusYears(isoDate(ANNIVERSARY.inDays), 2);
 async function seed() {
   for (const w of WINDOWS) {
     await query(
-      `INSERT INTO platform_windows (platform, best_hours, best_days, max_chars)
-       VALUES ($1,$2,$3,$4)
+      `INSERT INTO platform_windows (platform, best_hours, best_days, max_chars, visual_first)
+       VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (platform) DO UPDATE
-         SET best_hours = EXCLUDED.best_hours,
-             best_days  = EXCLUDED.best_days,
-             max_chars  = EXCLUDED.max_chars`,
-      [w.platform, w.bestHours, w.bestDays, w.maxChars],
+         SET best_hours   = EXCLUDED.best_hours,
+             best_days    = EXCLUDED.best_days,
+             max_chars    = EXCLUDED.max_chars,
+             visual_first = EXCLUDED.visual_first`,
+      [w.platform, w.bestHours, w.bestDays, w.maxChars, w.visualFirst],
     );
   }
   console.log(`seeded ${WINDOWS.length} platform windows`);

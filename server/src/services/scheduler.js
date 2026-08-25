@@ -59,6 +59,24 @@ export async function scheduleDraft({ draftId, from = new Date() }) {
         );
       }
 
+      // Image rights outrank approval (STORY-066).
+      //
+      // A reviewer can accept a brand-safety risk on the author's behalf — that
+      // is a judgement, and it escalates to them for exactly that reason. They
+      // cannot accept a licence on the rights-holder's behalf. So an image whose
+      // rights are unresolved or refused is refused here even though a human
+      // said yes, the same rule a superseded press kit has followed since
+      // STORY-005: approval is necessary to publish, and not always sufficient.
+      if (draft.format === 'meme' && draft.image_rights !== 'cleared') {
+        throw Object.assign(
+          new Error(
+            `Draft ${draftId} cannot be scheduled: image rights are "${draft.image_rights}". ` +
+              'Approval does not grant a licence.',
+          ),
+          { status: 409, blockedDraft: draft },
+        );
+      }
+
       const { rows: windowRows } = await client.query(
         'SELECT * FROM platform_windows WHERE platform = $1',
         [draft.platform],

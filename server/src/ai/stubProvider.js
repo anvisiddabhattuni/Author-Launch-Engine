@@ -96,6 +96,25 @@ const TEMPLATES = {
 
 const slug = (theme) => theme.replace(/[^a-zA-Z0-9]+/g, '');
 
+/**
+ * Caption shapes, one per template layout (STORY-066).
+ *
+ * A meme caption is not a short text post: the image carries half the sentence,
+ * so the words have to leave room for it. Each shape is written against the
+ * layout's own `shape` description rather than being one caption style pasted
+ * into three different pictures.
+ *
+ * All three are built from the theme's *claim* — the key message a human wrote,
+ * or a sentence from a retrieved passage — for the same reason text posts have
+ * been since STORY-009: a caption assembled from a theme label is name-checking
+ * the book, not making its argument.
+ */
+const MEME_CAPTIONS = {
+  'two-panel': (theme, s) => `What everyone thinks ${theme} is | ${s.claim}`,
+  single: (theme, s) => s.claim,
+  quote: (theme, s) => s.claim,
+};
+
 export const stubProvider = {
   name: 'stub',
 
@@ -105,7 +124,17 @@ export const stubProvider = {
    * @param {object} [input.voice] Traits derived from the author's own posts.
    * @returns {Array<{platform: string, content: string, themesUsed: string[]}>}
    */
-  async generateCandidates({ book, grounding = null, voice = null, platforms, count, weekOf }) {
+  async generateCandidates({
+    book,
+    grounding = null,
+    voice = null,
+    platforms,
+    count,
+    weekOf,
+    memeCount = 0,
+    visualFirstPlatforms = [],
+    templates = [],
+  }) {
     // Prefer the grounded themes: they are the ones with evidence behind them.
     // `books.themes` remains the fallback for a book with no theme index.
     const grounded = grounding?.themes ?? [];
@@ -132,6 +161,7 @@ export const stubProvider = {
       const render = pick(usable.length > 0 ? usable : templates, seed >>> 7);
 
       candidates.push({
+        format: 'text',
         platform,
         content: render(theme, {
           title: book.title,
@@ -143,6 +173,44 @@ export const stubProvider = {
         // Recorded so the trace can say which passages this post was written
         // from, not only which it turned out to echo.
         groundedIn: (entry?.passages ?? []).map((p) => p.id),
+      });
+    }
+
+    // Memes (STORY-066). Produced from the same grounding as the text posts —
+    // the image is a second way to carry the book's argument, not a second
+    // source of it — and routed to the platforms the database marks visual-first.
+    for (let i = 0; i < memeCount; i += 1) {
+      const platform =
+        visualFirstPlatforms.length > 0
+          ? visualFirstPlatforms[i % visualFirstPlatforms.length]
+          : platforms[i % platforms.length];
+      const seed = hash(`meme:${book.id}:${weekOf}:${platform}:${i}`);
+      const theme = pick(themes, seed);
+      const entry = index.get(theme) ?? null;
+
+      const claim = claimFor(entry);
+      const line = lineFor(entry, book, seed >>> 3);
+
+      // Only templates whose licence we can actually point at. An unusable
+      // template is not a candidate the drafter should be producing; the rights
+      // check exists to catch what slips past this, not to be the only guard.
+      if (templates.length === 0) break;
+      const template = pick(templates, seed >>> 5);
+      const caption = (MEME_CAPTIONS[template.layout] ?? MEME_CAPTIONS.single)(theme, {
+        claim: claim ?? line,
+        title: book.title,
+      });
+
+      candidates.push({
+        format: 'meme',
+        platform,
+        content: caption,
+        themesUsed: [theme],
+        groundedIn: (entry?.passages ?? []).map((p) => p.id),
+        template,
+        // Alt text is written here, at generation, because the drafter is the
+        // only thing that knows what the image was built to show.
+        altText: `${template.name}: ${caption.replace(/\s*\|\s*/g, ' — ')}`,
       });
     }
 

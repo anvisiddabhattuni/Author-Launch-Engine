@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011), printed step by step.
+ * STORY-011, and STORY-066), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -33,6 +33,8 @@ import {
 import { retrieveThemeGrounding } from './services/themeRetrieval.js';
 import { deriveExpertise, scoreExpertise } from './services/authorExpertise.js';
 import { resourceFor } from './services/coordination.js';
+import { reviewMemeCandidate } from './services/brandSafety.js';
+import { TEMPLATES, provenanceFor, usableTemplates } from './services/memeTemplates.js';
 import { searchAllDirectories } from './services/directories.js';
 import { scoreOpportunity } from './services/keywordAnalysis.js';
 import { deriveVoice } from './services/voiceProfile.js';
@@ -1439,9 +1441,118 @@ console.log('\nThe coordinator does not re-check approval. That gate has lived i
 console.log('services since STORY-001 so a new caller cannot route around it, and a second');
 console.log('copy of the rule is exactly what STORY-008 existed to remove.');
 
+
+// ── STORY-066 ────────────────────────────────────────────────────────────────
+// Memes as a content format alongside text posts. Added after Ram's review:
+// "On platforms like X, memes might get more traction than text."
+
+rule('75. A meme is a draft, not a second content system');
+const memeBatch = await draftWeeklyPosts({
+  authorId: author.id,
+  bookId: book.id,
+  count: 3,
+  weekOf: weekStart(new Date(Date.now() + 14 * 86400000)),
+});
+for (const d of memeBatch) {
+  console.log(
+    `${d.format.padEnd(5)} ${d.platform.padEnd(10)} ${d.status.padEnd(17)} ` +
+      `rights ${d.image_rights.padEnd(15)} ${d.media?.template ?? ''}`,
+  );
+}
+console.log('\nSame table, same status column, same approval gate, same audit trail. A memes');
+console.log('table would have needed its own gate, and a second gate is a gate with a hole.');
+
+const demoMeme = memeBatch.find((d) => d.format === 'meme');
+rule('76. The caption is the book\'s argument, and the image is real');
+console.log(`platform : ${demoMeme.platform} (routed here because the row says visual_first)`);
+console.log(`template : ${demoMeme.media.template} — ${demoMeme.media.layout}`);
+console.log(`caption  : ${demoMeme.content}`);
+console.log(`alt text : ${demoMeme.media.altText}`);
+console.log(`image    : ${demoMeme.media.imageRef.slice(0, 64)}…  (${demoMeme.media.imageRef.length} bytes, SVG data URI)`);
+console.log(`licence  : ${JSON.stringify(demoMeme.media.provenance.licence)}`);
+console.log('\nRendered offline and deterministically, so the demo and the tests can assert on');
+console.log('an image without a network call — the same constraint that kept retrieval lexical.');
+
+rule('77. What the drafter is allowed to build from');
+console.log('template                  commercial  terms            offered to the drafter?');
+for (const t of TEMPLATES) {
+  const usable = usableTemplates().some((u) => u.id === t.id);
+  console.log(
+    `  ${t.id.padEnd(24)} ${String(t.licence?.commercial ?? '—').padEnd(11)} ` +
+      `${String(t.licence?.terms ?? 'none recorded').padEnd(16)} ${usable ? 'yes' : 'NO'}`,
+  );
+}
+console.log('\nTwo are withheld before generation even starts. The rights check exists to catch');
+console.log('what gets past this, not to be the only guard.');
+
+rule('78. A judgement escalates; a licence refuses');
+const safetyCases = [
+  ['clean caption, cc0 template', 'tmpl-single-caption', 'Attention is a muscle that adapts to the load you give it.', 'Caption on a dark field'],
+  ['no alt text', 'tmpl-single-caption', 'Attention is a muscle.', ''],
+  ['register the author never uses', 'tmpl-single-caption', 'This one weird trick is a guaranteed cure. Only idiots miss it.', 'x'],
+  ['editorial-only licence', 'tmpl-stock-photo', 'Attention is a muscle.', 'A photograph'],
+  ['no licence recorded', 'tmpl-community-remix', 'Attention is a muscle.', 'A remix'],
+];
+console.log('case                            rights      publishable  findings');
+for (const [label, id, caption, altText] of safetyCases) {
+  const tmpl = TEMPLATES.find((t) => t.id === id);
+  const review = reviewMemeCandidate({
+    caption,
+    media: { imageRef: 'x', altText, provenance: provenanceFor(tmpl) },
+    maxChars: 280,
+  });
+  console.log(
+    `  ${label.padEnd(30)} ${review.rights.padEnd(11)} ${String(review.publishable).padEnd(12)} ` +
+      `${review.findings.join(',') || '—'}`,
+  );
+}
+console.log('\nBrand safety is a judgement a reviewer may overrule, so a finding escalates.');
+console.log('Rights are a fact nobody here can overrule, so they are enforced at publication.');
+
+rule('79. Approval is necessary to publish, and not always sufficient');
+const { rows: blockedMeme } = await query(
+  "SELECT * FROM drafts WHERE format = 'meme' ORDER BY id DESC LIMIT 1",
+);
+await query("UPDATE drafts SET image_rights = 'unresolved' WHERE id = $1", [blockedMeme[0].id]);
+await approveDraft({
+  draftId: blockedMeme[0].id,
+  reviewer: 'Anvi Siddabhattuni',
+  notes: 'Reads well, ship it.',
+});
+try {
+  await scheduleDraft({ draftId: blockedMeme[0].id });
+  console.log('UNEXPECTED: an uncleared image was scheduled');
+} catch (error) {
+  console.log(`blocked as designed: ${error.message}`);
+}
+const { rows: stillApproved } = await query('SELECT status FROM drafts WHERE id = $1', [
+  blockedMeme[0].id,
+]);
+console.log(`\nthe human decision stands — status is still "${stillApproved[0].status}" — it is`);
+console.log('simply not enough. A reviewer can accept a risk for the author. They cannot');
+console.log('accept a licence on the rights-holder\'s behalf. Same rule a superseded press kit');
+console.log('has followed since STORY-005.');
+
+rule('80. The meme trail, with provenance');
+const memeLog = await listAuditLog({ authorId: author.id, limit: 400 });
+for (const entry of memeLog
+  .slice()
+  .reverse()
+  .filter((e) => e.metadata?.format === 'meme')
+  .slice(0, 5)) {
+  const m = entry.metadata;
+  console.log(
+    `${entry.created_at.toISOString()}  ${entry.action.padEnd(16)} ` +
+      `${String(m.template).padEnd(22)} rights=${String(m.imageRights).padEnd(11)} ` +
+      `licence=${m.provenance?.licence?.terms ?? 'none'}`,
+  );
+}
+console.log('\nProvenance is on the append-only log, not only on the row: a meme whose licence');
+console.log('is questioned later has to be answerable from the record.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-011 complete — the agents run in an order somebody decided, and two of');
-console.log('them never read the same table at once\n');
+console.log('\nSTORY-066 complete — a meme is a draft with a picture, held by the same gate,');
+console.log('and no image goes out on a licence nobody can point at\n');
 await closePool();
 

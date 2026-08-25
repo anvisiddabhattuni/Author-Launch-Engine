@@ -134,9 +134,49 @@ export function ReviewPage({ author, book }) {
                 <span>draft {draft.id}</span>
               </div>
 
-              <pre>{draft.content}</pre>
+              {draft.format === 'meme' ? (
+                // Image and caption previewed as one unit (STORY-066): they are
+                // one post, and a reviewer judging the caption alone is judging
+                // half of what would go out.
+                <div className="meme">
+                  <img src={draft.media?.imageRef} alt={draft.media?.altText ?? ''} />
+                  <div>
+                    <pre>{draft.content}</pre>
+                    <div className="meta mono">
+                      <span>{draft.media?.template}</span>
+                      <span>{draft.media?.provenance?.licence?.terms ?? 'no licence'}</span>
+                      {draft.media?.provenance?.licence?.attribution && (
+                        <span>© {draft.media.provenance.licence.attribution}</span>
+                      )}
+                    </div>
+                    <div className="meta mono">
+                      alt: {draft.media?.altText || <em>none — unreadable to a screen reader</em>}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <pre>{draft.content}</pre>
+              )}
 
               <div className="meta mono">{draft.rationale}</div>
+
+              {draft.format === 'meme' && (
+                <div className="meta">
+                  {/* Rights outrank approval, so they are stated plainly rather
+                      than buried in the rationale. */}
+                  <span
+                    className={`pill ${draft.image_rights === 'cleared' ? 'approved' : 'escalated'}`}
+                    title="An uncleared image cannot publish even once you approve it"
+                  >
+                    image rights: {draft.image_rights}
+                  </span>
+                  {draft.safety_findings?.map((f) => (
+                    <span className="pill unnamed" key={f}>
+                      {f.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {draft.voice_violations?.length > 0 && (
                 <div className="meta">

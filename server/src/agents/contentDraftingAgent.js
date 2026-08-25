@@ -4,6 +4,8 @@ import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
 import { assess } from '../services/escalationPolicy.js';
 import { checkVoice, deriveVoice } from '../services/voiceProfile.js';
+import { RIGHTS, reviewMemeCandidate } from '../services/brandSafety.js';
+import { provenanceFor, renderMeme, usableTemplates } from '../services/memeTemplates.js';
 import {
   ACTOR as CONTENT_AGENT,
   alignToThemes,
@@ -250,6 +252,7 @@ export async function draftWeeklyPosts({
   platforms = PLATFORMS,
   providerName = config.aiProvider,
   weekOf = weekStart(),
+  memeCount = config.minMemesPerBatch,
 }) {
   const provider = getProvider(providerName);
 
@@ -271,6 +274,14 @@ export async function draftWeeklyPosts({
 
     const { rows: windows } = await client.query('SELECT * FROM platform_windows');
     const maxCharsFor = new Map(windows.map((w) => [w.platform, w.max_chars]));
+    // Which platforms a meme is worth routing to (STORY-066). Read from the
+    // platform row rather than a list in this file, so adding a platform is a
+    // seed change and not a code change. Intersected with the platforms this
+    // batch was asked for, so a caller naming only LinkedIn still gets memes
+    // rather than silently getting none.
+    const visualFirst = windows
+      .filter((w) => w.visual_first && platforms.includes(w.platform))
+      .map((w) => w.platform);
 
     // Retrieval, before generation. Logged against the book rather than a draft
     // because a week of posts has no row of its own, and the retrieval is a
@@ -322,6 +333,11 @@ export async function draftWeeklyPosts({
       platforms,
       count,
       weekOf,
+      // At least one meme per batch is the acceptance criterion, so it is a
+      // floor the drafter is asked for rather than an average it may miss.
+      memeCount,
+      visualFirstPlatforms: visualFirst,
+      templates: usableTemplates(),
     });
 
     const saved = [];
@@ -347,17 +363,47 @@ export async function draftWeeklyPosts({
         bookTitle: book.title,
       });
 
-      // Three independent reasons to escalate. Theme alignment and voice are
+      // A meme is built and checked here, before it can be queued (STORY-066).
+      // The image is rendered from the template the provider chose, provenance
+      // is written at generation time rather than reconstructed later, and both
+      // checks run before the candidate is allowed near the approval queue.
+      const isMeme = candidate.format === 'meme';
+      const media = isMeme
+        ? {
+            imageRef: renderMeme({
+              template: candidate.template,
+              caption: candidate.content,
+              bookTitle: book.title,
+            }),
+            altText: candidate.altText ?? '',
+            template: candidate.template.id,
+            layout: candidate.template.layout,
+            provenance: provenanceFor(candidate.template),
+          }
+        : null;
+
+      const review = isMeme
+        ? reviewMemeCandidate({ caption: candidate.content, media, maxChars })
+        : { findings: [], rights: RIGHTS.NOT_APPLICABLE, rightsReason: '', attribution: null };
+
+      // Four independent reasons to escalate. Theme alignment and voice are
       // separate floors rather than blended into confidence, because REQ-001
       // asks for both specifically: copy that argues the book perfectly in a
       // voice the author has never used must not pass on its themes alone.
-      const { status, reasons } = assess({ confidence, themeAlignment, voice: voiceScore });
+      // Brand-safety findings join them — a judgement a human may overrule.
+      const { status, reasons } = assess({
+        confidence,
+        themeAlignment,
+        voice: voiceScore,
+        safetyFindings: review.findings,
+      });
 
       const { rows } = await client.query(
         `INSERT INTO drafts
            (author_id, book_id, platform, content, themes_used, confidence, rationale, status,
-            week_of, provider, theme_alignment, voice_score, voice_violations, grounded_passages)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            week_of, provider, theme_alignment, voice_score, voice_violations, grounded_passages,
+            format, media, safety_findings, image_rights)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          RETURNING *`,
         [
           authorId,
@@ -376,6 +422,10 @@ export async function draftWeeklyPosts({
           voiceScore,
           voiceViolations,
           grounding.passageCount,
+          candidate.format ?? 'text',
+          media ? JSON.stringify(media) : null,
+          review.findings,
+          review.rights,
         ],
       );
       const draft = rows[0];
@@ -423,6 +473,20 @@ export async function draftWeeklyPosts({
             minVoiceMatch: config.minVoiceMatch,
             reasons,
             groundedPassages: grounding.passageCount,
+            format: candidate.format ?? 'text',
+            // The story's trust clause asks for image provenance on the log,
+            // not only on the row: a meme whose licence is later questioned has
+            // to be answerable from the append-only record.
+            ...(isMeme
+              ? {
+                  template: candidate.template.id,
+                  provenance: media.provenance,
+                  imageRights: review.rights,
+                  imageRightsReason: review.rightsReason,
+                  safetyFindings: review.findings,
+                  publishable: review.publishable,
+                }
+              : {}),
             reason:
               status === 'escalated'
                 ? `below floor: ${reasons.join(', ')}`
