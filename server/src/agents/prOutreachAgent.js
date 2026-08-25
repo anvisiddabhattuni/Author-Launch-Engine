@@ -2,6 +2,7 @@ import { getOutreachProvider } from '../ai/index.js';
 import { config } from '../config.js';
 import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { assess } from '../services/escalationPolicy.js';
 
 export const ACTOR = 'PROutreachAgent';
 
@@ -143,8 +144,7 @@ export async function draftOutreachMessages({
         history,
       });
 
-      const status =
-        confidence < config.confidenceEscalationThreshold ? 'escalated' : 'pending_approval';
+      const { status, reasons } = assess({ confidence });
 
       const { rows } = await client.query(
         `INSERT INTO outreach_messages

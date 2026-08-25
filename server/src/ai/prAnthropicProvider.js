@@ -20,7 +20,40 @@ function newsHook({ milestone, anniversaryYears, awardOutcome, awardName }) {
     : 'the book is marking an anniversary of its publication';
 }
 
-function buildPrompt({ milestone, book, author, anniversaryYears, awardOutcome, awardName }) {
+/**
+ * The retrieved context block (STORY-006).
+ *
+ * Replaces the first 2,500 characters of the book, which was not retrieval — it
+ * was whatever happened to be at the front. Each theme now arrives with what
+ * the book claims about it and the passages that back the claim, so the model
+ * is grounded in the part of the book that is relevant to the themes it has to
+ * reflect.
+ */
+function groundedThemes(grounding) {
+  const themes = grounding?.themes ?? [];
+  if (themes.length === 0) return [];
+
+  return [
+    'THEMES, GROUNDED IN THE BOOK ITSELF. Use these passages as your source for what the',
+    'book argues. Do not contradict them, and do not add claims they do not support.',
+    '',
+    ...themes.flatMap((entry) => [
+      `THEME: ${entry.theme}`,
+      entry.keyMessage ? `  Key message: ${entry.keyMessage}` : null,
+      // A theme with nothing behind it is said so plainly. Left unmarked, the
+      // model would fill the silence with a plausible-sounding claim.
+      entry.passages.length === 0
+        ? '  No passage in the book evidences this theme. Do not invent one.'
+        : null,
+      ...entry.passages.map((passage) => `  From the book: ${passage.content}`),
+      '',
+    ]),
+  ].filter((line) => line !== null);
+}
+
+function buildPrompt({
+  milestone, book, author, anniversaryYears, awardOutcome, awardName, grounding,
+}) {
   return [
     `Write a press kit for the book "${book.title}" by ${author.name}.`,
     '',
@@ -42,10 +75,10 @@ function buildPrompt({ milestone, book, author, anniversaryYears, awardOutcome, 
         'other anniversary, and do not call it the first unless that number is 1.'
       : null,
     '',
-    `Book themes: ${book.themes.join(', ')}`,
     `Author voice: ${JSON.stringify(author.voice_profile)}`,
     `Author contact: ${author.email}`,
-    `Book excerpt:\n${book.content.slice(0, 2500)}`,
+    '',
+    ...groundedThemes(grounding),
     '',
     'Produce exactly three materials:',
     '1. press_release — standard release: FOR IMMEDIATE RELEASE, headline, dateline, lede,',
@@ -54,9 +87,11 @@ function buildPrompt({ milestone, book, author, anniversaryYears, awardOutcome, 
     '2. author_bio — third person, roughly 100 words.',
     '3. fact_sheet — short labelled lines a journalist can lift verbatim.',
     '',
-    'Every material must explicitly reference the book themes listed above using those exact',
-    'words, because alignment with the book themes is checked and a material that ignores them',
-    'is rejected. Sound like the author, not like a marketer. No exclamation marks, no hype.',
+    'Every material must reference the themes above using those exact words, AND must carry the',
+    'argument behind each one in the book\'s own language. Alignment is checked twice: once for',
+    'the theme being named and once for its key message being reflected, and a material that',
+    'only name-checks a theme scores as though it had missed it. Sound like the author, not',
+    'like a marketer. No exclamation marks, no hype.',
     '',
     'Respond with JSON only, no prose, in exactly this shape:',
     '{"materials":[{"type":"press_release","headline":"...","body":"...","themesUsed":["..."]}]}',
@@ -107,6 +142,7 @@ export const prAnthropicProvider = {
     anniversaryYears = null,
     awardOutcome = null,
     awardName = null,
+    grounding = null,
   }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
@@ -132,6 +168,7 @@ export const prAnthropicProvider = {
               anniversaryYears,
               awardOutcome,
               awardName,
+              grounding,
             }),
           },
         ],

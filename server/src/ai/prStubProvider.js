@@ -6,6 +6,13 @@
  * The angle changes per milestone type: a launch is news because the book is
  * new, an award is news because someone else vouched for it, and an
  * anniversary is news only if you give it a reason to be.
+ *
+ * STORY-006 changed where the words come from. The copy used to be assembled
+ * from theme *labels* and a sentence picked at random out of the whole book;
+ * it now writes from the `grounding` retrieved for each theme — what the book
+ * claims, and the passages that back the claim. That is the generation half of
+ * RAG, and it is why alignment is now something the drafter does rather than
+ * something done to the draft afterwards.
  */
 
 function hash(text) {
@@ -25,6 +32,59 @@ function sentences(text) {
     .map((s) => s.replace(/\s+/g, ' ').trim())
     .filter((s) => s.length >= 40 && s.length <= 200);
 }
+
+/** The grounding retrieved for this book, indexed by theme name. */
+function groundingIndex(grounding) {
+  return new Map((grounding?.themes ?? []).map((entry) => [entry.theme, entry]));
+}
+
+/**
+ * What the book actually claims about a theme.
+ *
+ * The key message a human wrote if there is one; otherwise the sentence in the
+ * retrieved evidence that actually mentions the theme. Taking the passage's
+ * opening sentence instead would attribute the wrong claim to a theme the
+ * passage only touches once — two themes retrieving the same paragraph would
+ * both be given its first line, which is a confident-sounding falsehood.
+ *
+ * Null when nothing in the book argues the theme. The copy then says nothing
+ * about it rather than inventing a claim, the same rule an unknown anniversary
+ * and an unrecorded award outcome already follow.
+ */
+function claimFor(index, theme) {
+  const entry = index.get(theme);
+  if (!entry) return null;
+  if (entry.keyMessage) return entry.keyMessage;
+
+  const needle = theme.toLowerCase();
+  for (const passage of entry.passages) {
+    const own = passage.content
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
+      .find((sentence) => sentence.toLowerCase().includes(needle));
+    if (own) return own;
+  }
+  return null;
+}
+
+/**
+ * The line readers return to, drawn from a retrieved passage rather than from
+ * anywhere in the book. A quote that supports the themes being announced is the
+ * point; a random sentence was only ever a stand-in for one.
+ */
+function quotableLine({ index, themes, book, seed }) {
+  const retrieved = themes
+    .flatMap((theme) => index.get(theme)?.passages ?? [])
+    .flatMap((passage) => sentences(passage.content));
+  const pool = retrieved.length > 0 ? retrieved : sentences(book.content);
+  return pool.length > 0 ? pick(pool, seed) : book.title;
+}
+
+/** Claims for the themes that have one, in the book's own order. */
+const claimsFor = (index, themes) =>
+  [...new Set(themes)]
+    .map((theme) => ({ theme, claim: claimFor(index, theme) }))
+    .filter((entry) => entry.claim);
 
 /** "a, b, c and d" — a bare comma list reads like a database dump in copy. */
 const prose = (items) =>
@@ -130,7 +190,9 @@ const kicker = (type, awardOutcome) => {
   return 'BOOK NEWS';
 };
 
-function pressRelease({ book, author, milestone, themes, line, years, awardOutcome, awardName }) {
+function pressRelease({
+  book, author, milestone, themes, claims, line, years, awardOutcome, awardName,
+}) {
   const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({
     book,
     author,
@@ -153,7 +215,15 @@ function pressRelease({ book, author, milestone, themes, line, years, awardOutco
     milestone.details,
     '',
     `The book takes ${prose(themes)} as its subject, and makes its case in short chapters drawn ` +
-      `from ordinary working life rather than from research summaries. One line readers return to:`,
+      `from ordinary working life rather than from research summaries.`,
+    '',
+    // The retrieved claims, stated as claims. A journalist writing from this
+    // kit should be able to quote what the book argues, not only what it is
+    // filed under — which is the difference STORY-006 exists to make.
+    claims.length > 0 ? 'WHAT THE BOOK ARGUES' : null,
+    ...claims.map(({ theme, claim }) => `${capitalize(theme)} — ${claim}`),
+    claims.length > 0 ? '' : null,
+    'One line readers return to:',
     '',
     `"${line}"`,
     '',
@@ -165,20 +235,34 @@ function pressRelease({ book, author, milestone, themes, line, years, awardOutco
     `MEDIA CONTACT — ${author.name}, ${author.email}`,
     '',
     '###',
-  ].join('\n');
+  ]
+    .filter((part) => part !== null)
+    .join('\n');
 
   return { headline: angle.headline, body, themesUsed: themes };
 }
 
-function authorBio({ book, author, themes, line }) {
+function authorBio({ book, author, themes, claims, index, line }) {
   const headline = `${author.name} — author biography`;
+  // The opening line names the first two themes, so the argument paragraph
+  // takes the ones it has not covered yet — between them the bio names every
+  // theme the book claims. Two claims is a bio; four is a fact sheet with a
+  // name on it.
+  const remaining = claimsFor(index, themes.slice(2));
+  const carried = (remaining.length > 0 ? remaining : claims).slice(0, 2);
   const body = [
     `${author.name} writes about ${themes[0]}, ${themes[1]} and the ordinary discipline that ` +
       `holds a long project together.`,
     '',
-    `Her book "${book.title}" argues that ${themes[2]} is the only real currency any of us spend, ` +
-      `and that ${themes[3]} is what remains after motivation has gone home for the evening. ` +
-      `She writes in short declarative sentences and concrete images, without hype.`,
+    // The argument used to be hardcoded here — the stub asserted what the book
+    // said about themes[2] and themes[3] whatever book it was handed. It now
+    // states only what retrieval found the book actually arguing.
+    carried.length > 0
+      ? `The book "${book.title}" makes its case theme by theme. ` +
+        carried.map(({ theme, claim }) => `On ${theme}: ${claim}`).join(' ') +
+        ` ${author.name} writes in short declarative sentences and concrete images, without hype.`
+      : `The book "${book.title}" is a nonfiction work on ${prose(themes)}. ${author.name} writes ` +
+        `in short declarative sentences and concrete images, without hype.`,
     '',
     `"${line}"`,
     '',
@@ -194,7 +278,7 @@ const AWARD_STATUS_LINE = {
   not_won: 'Shortlisted (did not win)',
 };
 
-function factSheet({ book, author, milestone, themes, years, awardOutcome, awardName }) {
+function factSheet({ book, author, milestone, themes, claims, years, awardOutcome, awardName }) {
   const headline = `"${book.title}" — fact sheet`;
   const body = [
     `TITLE — ${book.title}`,
@@ -210,9 +294,14 @@ function factSheet({ book, author, milestone, themes, years, awardOutcome, award
     milestone.location ? `LOCATION — ${milestone.location}` : null,
     `DETAILS — ${milestone.details}`,
     '',
-    `SUMMARY — A book about ${prose([themes[0], themes[1]])}: why ${themes[2]} is the scarce ` +
-      `resource in creative work, and how ${themes[3]} carries a project through its middle.`,
+    `SUMMARY — A book about ${prose(themes)}, argued in short chapters drawn from ordinary ` +
+      `working life rather than from research summaries.`,
     '',
+    // A fact sheet exists to be lifted verbatim, so the key messages belong on
+    // it as their own lines rather than dissolved into a summary sentence.
+    claims.length > 0 ? 'KEY MESSAGES' : null,
+    ...claims.map(({ theme, claim }) => `${capitalize(theme)} — ${claim}`),
+    claims.length > 0 ? '' : null,
     `MEDIA CONTACT — ${author.name}, ${author.email}`,
   ]
     .filter(Boolean)
@@ -234,26 +323,36 @@ export const prStubProvider = {
     anniversaryYears = null,
     awardOutcome = null,
     awardName = null,
+    // What retrieval found the book arguing about each of its themes. Absent
+    // only when a caller drafts without the grounding step, which the pipeline
+    // never does; the copy then degrades to theme labels the way it used to.
+    grounding = null,
   }) {
     const seed = hash(`${milestone.id}:${book.id}`);
-    const lines = sentences(book.content);
-    const line = lines.length > 0 ? pick(lines, seed) : book.title;
 
     // Padded so an angle can reference themes[3] on a book with fewer themes.
     const themes = [...book.themes];
     while (themes.length < 4) themes.push(themes[themes.length - 1] ?? 'the work');
+
+    const index = groundingIndex(grounding);
+    const claims = claimsFor(index, themes);
+    const line = quotableLine({ index, themes, book, seed });
 
     const years = anniversaryYears;
 
     return [
       {
         type: 'press_release',
-        ...pressRelease({ book, author, milestone, themes, line, years, awardOutcome, awardName }),
+        ...pressRelease({
+          book, author, milestone, themes, claims, line, years, awardOutcome, awardName,
+        }),
       },
-      { type: 'author_bio', ...authorBio({ book, author, themes, line }) },
+      { type: 'author_bio', ...authorBio({ book, author, themes, claims, index, line }) },
       {
         type: 'fact_sheet',
-        ...factSheet({ book, author, milestone, themes, years, awardOutcome, awardName }),
+        ...factSheet({
+          book, author, milestone, themes, claims, years, awardOutcome, awardName,
+        }),
       },
     ];
   },

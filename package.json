@@ -2,7 +2,7 @@
   "name": "author-launch-engine",
   "version": "0.1.0",
   "private": true,
-  "description": "Author Launch Engine — STORY-001: Draft and Schedule Social Media Content (Content Drafting Agent)",
+  "description": "Author Launch Engine \u2014 STORY-001: Draft and Schedule Social Media Content (Content Drafting Agent)",
   "type": "module",
   "workspaces": [
     "server",
@@ -14,6 +14,7 @@
     "db:reset": "npm run db:reset --workspace server",
     "dev:server": "npm run dev --workspace server",
     "dev:client": "npm run dev --workspace client",
+    "worker": "npm run worker --workspace server",
     "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
     "test": "npm run test --workspace server",
     "demo": "npm run demo --workspace server"

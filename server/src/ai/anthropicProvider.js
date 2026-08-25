@@ -9,27 +9,78 @@ const PLATFORM_BRIEF = {
   linkedin: 'professional but personal, a concrete takeaway, no hashtags',
 };
 
-function buildPrompt({ book, voiceProfile, history, platforms, count }) {
+/**
+ * The retrieved evidence, laid out per theme (STORY-009).
+ *
+ * The prompt used to carry four theme labels and the first 4,000 characters of
+ * the book and hope the model found the connection. It now carries what each
+ * theme claims and the book's own passages that argue it — the same grounding
+ * the post is scored against afterwards, so the model is asked for the thing it
+ * will be measured on rather than something adjacent to it.
+ */
+function groundingBrief(grounding) {
+  const themes = grounding?.themes ?? [];
+  if (themes.length === 0) return '';
+
+  return [
+    "What the book argues, theme by theme. Write from this, not from the theme names:",
+    ...themes.map((t) => {
+      const evidence = t.passages.map((p) => `    > ${p.content}`).join('\n');
+      return [
+        `- ${t.theme}`,
+        t.keyMessage ? `    claim: ${t.keyMessage}` : '    claim: (none recorded — do not invent one)',
+        evidence || '    (no passage in the book argues this theme)',
+      ].join('\n');
+    }),
+  ].join('\n');
+}
+
+/**
+ * The author's voice as counted off their own posts, not as described.
+ *
+ * Stated tone words go in too, but second: the drafts are scored against these
+ * measurements, so telling the model the numbers is telling it the target.
+ */
+function voiceBrief(voice, voiceProfile) {
+  const stated = `Stated voice: ${JSON.stringify(voiceProfile)}`;
+  if (!voice?.enforceable) return stated;
+
+  return [
+    stated,
+    'Measured from this author\'s own previous posts — match these:',
+    `- sentences average ${voice.meanSentenceWords.toFixed(1)} words`,
+    `- exclamation marks per 100 words: ${voice.exclamationsPer100.toFixed(2)}`,
+    `- marketing/hype words per 100 words: ${voice.hypePer100.toFixed(2)}`,
+    `- words in all caps per 100 words: ${voice.shoutedPer100.toFixed(2)}`,
+    'Copy that exceeds these rates is rejected before a human sees it.',
+  ].join('\n');
+}
+
+function buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count }) {
   const samples = history
     .slice(0, 8)
     .map((h) => `- (${h.platform}) ${h.content}`)
     .join('\n');
 
+  const brief = groundingBrief(grounding);
+
   return [
     `You draft social media posts promoting the book "${book.title}".`,
     '',
     `Book themes: ${book.themes.join(', ') || 'unspecified'}`,
-    `Author voice: ${JSON.stringify(voiceProfile)}`,
+    voiceBrief(voice, voiceProfile),
     '',
     samples ? `Previous posts by this author, for voice matching:\n${samples}` : '',
     '',
-    `Book excerpt:\n${book.content.slice(0, 4000)}`,
+    brief || `Book excerpt:\n${book.content.slice(0, 4000)}`,
     '',
     `Write exactly ${count} posts, distributed across these platforms: ${platforms.join(', ')}.`,
     'Per-platform style:',
     ...platforms.map((p) => `- ${p}: ${PLATFORM_BRIEF[p] ?? 'concise and natural'}`),
     '',
-    'Every post must be grounded in the book themes above and must sound like the author.',
+    'Each post makes one theme\'s argument using the book\'s own language for it.',
+    'Name only themes you actually write about: a theme you list and do not argue',
+    'scores zero, and a theme not in the list above scores zero however well written.',
     'Respond with JSON only, no prose, in exactly this shape:',
     '{"posts":[{"platform":"twitter","content":"...","themesUsed":["..."]}]}',
   ]
@@ -56,7 +107,7 @@ function parsePosts(text) {
 export const anthropicProvider = {
   name: 'anthropic',
 
-  async generateCandidates({ book, voiceProfile, history, platforms, count }) {
+  async generateCandidates({ book, voiceProfile, voice, grounding, history, platforms, count }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
@@ -72,7 +123,10 @@ export const anthropicProvider = {
         model: config.anthropicModel,
         max_tokens: 2000,
         messages: [
-          { role: 'user', content: buildPrompt({ book, voiceProfile, history, platforms, count }) },
+          {
+            role: 'user',
+            content: buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count }),
+          },
         ],
       }),
     });

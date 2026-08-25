@@ -1,3 +1,5 @@
+import { upsertUser } from '../services/auth.js';
+
 import { closePool, query } from './pool.js';
 
 // Posting windows are hours in UTC. Values reflect commonly cited engagement
@@ -34,6 +36,25 @@ unremarkable Tuesday when nothing was working and the sentences were bad.
 The hardest part of any long project is the middle, where the initial excitement has faded and the
 end is not yet visible. Craft is mostly a set of habits for surviving the middle without quitting.
 `.trim();
+
+// What the book argues, theme by theme (STORY-006). The themes array is the
+// author's list of labels; this is the claim behind each label, and it is what a
+// press draft has to reflect to count as on-message rather than name-checking.
+// Written by hand because it is an editorial judgement, not something to infer.
+const THEME_KEY_MESSAGES = {
+  'deep work':
+    'Deep work is not a productivity trick. It is a refusal of interruption as a default ' +
+    'condition, and it is quiet, unglamorous and almost entirely invisible to everyone but you.',
+  craft:
+    'Craft is the slow accumulation of decisions nobody claps for. Readers can always tell when ' +
+    'the hidden joints were done well, even when they cannot say why.',
+  attention:
+    'Attention is a muscle that adapts to the load you give it, and it is the only real currency ' +
+    'any of us spend. Give it fragments and it becomes good at fragments.',
+  resilience:
+    'Resilience is what remains when motivation has gone home for the evening. The people who ' +
+    'finish things are the ones who showed up on the unremarkable Tuesday when nothing worked.',
+};
 
 const HISTORY = [
   {
@@ -217,6 +238,24 @@ async function seed() {
   );
   console.log(`seeded book "${bookRows[0].title}" (id ${bookRows[0].id}), published ${PUBLISHED_ON}`);
 
+  // The theme rows and the retrieval passages are written by a trigger on
+  // books, so all that is left is the part no trigger can infer: the claim.
+  for (const [theme, keyMessage] of Object.entries(THEME_KEY_MESSAGES)) {
+    await query(
+      'UPDATE book_themes SET key_message = $3 WHERE book_id = $1 AND theme = $2',
+      [bookRows[0].id, theme, keyMessage],
+    );
+  }
+  const { rows: groundingRows } = await query(
+    `SELECT (SELECT count(*) FROM book_themes   WHERE book_id = $1) AS themes,
+            (SELECT count(*) FROM book_passages WHERE book_id = $1) AS passages`,
+    [bookRows[0].id],
+  );
+  console.log(
+    `indexed ${groundingRows[0].themes} themes with key messages over ` +
+      `${groundingRows[0].passages} retrievable passages`,
+  );
+
   await query('DELETE FROM social_history WHERE author_id = $1', [author.id]);
   for (const h of HISTORY) {
     const postedAt = new Date(Date.now() - h.daysAgo * 24 * 60 * 60 * 1000);
@@ -238,6 +277,53 @@ async function seed() {
     );
   }
   console.log(`seeded ${PRESS_CONTACTS.length} press contacts`);
+
+  // Logins (STORY-064). Passwords are seed values for a demo database and are
+  // printed below on purpose — there is no signup, and pretending these are
+  // secret would only mean nobody could run the demo. A real deployment sets
+  // JWT_SECRET and creates users out of band.
+  const authorLogin = await upsertUser({
+    email: 'mira@example.test',
+    name: 'Mira Kovač',
+    password: 'quiet-craft',
+    role: 'author',
+    authorId: authorRows[0].id,
+  });
+  const admin = await upsertUser({
+    email: 'ops@example.test',
+    name: 'Ops',
+    password: 'ops-password',
+    role: 'admin',
+  });
+
+  // A second tenant, so "you can only see your own data" is something the demo
+  // can actually demonstrate rather than assert. One author with one book and
+  // nothing else — enough to be visibly off-limits.
+  const { rows: otherAuthor } = await query(
+    `INSERT INTO authors (name, email, voice_profile) VALUES ($1,$2,$3)
+     ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING *`,
+    ['Tomas Beck', 'tomas@example.test', JSON.stringify({ tone: ['dry'] })],
+  );
+  await query('DELETE FROM books WHERE author_id = $1', [otherAuthor[0].id]);
+  await query(
+    `INSERT INTO books (author_id, title, content, themes)
+     VALUES ($1,'The Second Shelf','A book about maps and memory.',$2)`,
+    [otherAuthor[0].id, ['maps', 'memory']],
+  );
+  const otherUser = await upsertUser({
+    email: 'tomas@example.test',
+    name: 'Tomas Beck',
+    password: 'second-shelf',
+    role: 'author',
+    authorId: otherAuthor[0].id,
+  });
+
+  console.log(
+    `seeded ${[authorLogin, admin, otherUser].length} logins:\n` +
+      `  ${authorLogin.email} / quiet-craft      (author, tenant ${authorLogin.author_id})\n` +
+      `  ${otherUser.email} / second-shelf   (author, tenant ${otherUser.author_id})\n` +
+      `  ${admin.email} / ops-password      (admin, all tenants)`,
+  );
 
   // Milestones hang off the book, which is recreated above, so they are gone
   // already; insert rather than upsert.

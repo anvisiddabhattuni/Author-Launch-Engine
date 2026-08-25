@@ -100,7 +100,14 @@ describe('Scenario: Drafting social media content', () => {
         `themes ${draft.themes_used} all come from the book`,
       );
       assert.ok(Number(draft.confidence) > 0, 'draft carries a confidence score');
-      assert.match(draft.rationale, /grounding=/, 'confidence is explainable');
+      // `grounding=` was STORY-001's label-reuse measure; STORY-009 replaced it
+      // with `themes=` scored against retrieved evidence. Either satisfies what
+      // this criterion actually asks: the number has to be explainable.
+      assert.match(
+        draft.rationale,
+        /(themes|grounding)=.*voice=.*fit=/,
+        'confidence is explainable',
+      );
     }
   });
 

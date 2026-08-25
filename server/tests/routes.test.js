@@ -12,13 +12,16 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { createApp } from '../src/app.js';
+import { createApp, errorMessage } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
+import { upsertUser } from '../src/services/auth.js';
 
 let server;
 let baseUrl;
 let authorId;
 let bookId;
+/** Every request below is made as a signed-in author (STORY-064). */
+let token;
 
 /** Starts the real app on an ephemeral port so the tests use actual routing. */
 before(async () => {
@@ -37,6 +40,25 @@ before(async () => {
     [authorId, 'The Quiet Craft', 'Attention is a muscle. Craft is slow.', ['deep work', 'craft']],
   );
   bookId = bookRows[0].id;
+
+  await upsertUser({
+    email: `routes-user-${Date.now()}@example.test`,
+    name: 'Routes Test User',
+    password: 'routes-password',
+    role: 'author',
+    authorId,
+  });
+  const { rows: userRows } = await query(
+    'SELECT email FROM users WHERE author_id = $1 ORDER BY id DESC LIMIT 1',
+    [authorId],
+  );
+  const signIn = await fetch(`${baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: userRows[0].email, password: 'routes-password' }),
+  });
+  ({ token } = await signIn.json());
+  assert.ok(token, 'the routes suite could not sign in');
 });
 
 after(async () => {
@@ -45,16 +67,47 @@ after(async () => {
   await closePool();
 });
 
+const auth = () => ({ Authorization: `Bearer ${token}` });
+
 const get = async (path) => {
-  const response = await fetch(`${baseUrl}${path}`);
+  const response = await fetch(`${baseUrl}${path}`, { headers: auth() });
   const body = await response.json();
   return { status: response.status, body };
 };
+
+describe('the API never answers with an empty error', () => {
+  // A dropped database connection arrives as an AggregateError whose message is
+  // the empty string. Sent verbatim it rendered as no message at all, so a dead
+  // Postgres looked like a Sign in button that simply did nothing.
+  it('falls back to a code when the error carries no message', () => {
+    const dropped = Object.assign(new AggregateError([], ''), { code: 'ECONNREFUSED' });
+    assert.equal(errorMessage(dropped), 'ECONNREFUSED');
+  });
+
+  it('falls back to a name, then to a generic message, before ever returning nothing', () => {
+    assert.equal(errorMessage(new Error('')), 'Error');
+    assert.equal(errorMessage(Object.assign(new Error(''), { name: '' })), 'Internal server error');
+    assert.equal(errorMessage({}), 'Internal server error');
+    assert.equal(errorMessage(null), 'Internal server error');
+  });
+
+  it('leaves a real message exactly as it was written', () => {
+    assert.equal(
+      errorMessage(new Error('Email or password is incorrect')),
+      'Email or password is incorrect',
+    );
+  });
+
+  it('trims a message that is only whitespace rather than passing it through', () => {
+    assert.equal(errorMessage(Object.assign(new Error('   '), { code: 'ETIMEDOUT' })), 'ETIMEDOUT');
+  });
+});
 
 describe('GET /opportunities filters', () => {
   before(async () => {
     await fetch(`${baseUrl}/authors/${authorId}/books/${bookId}/opportunities/scout`, {
       method: 'POST',
+      headers: auth(),
     });
   });
 
@@ -132,4 +185,46 @@ describe('the other list routes respond', () => {
       assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
     });
   }
+
+  // STORY-007: the review read model and the address book. Driven over HTTP for
+  // the same reason as the one below — both assemble their own aggregate query,
+  // and that is exactly where the ambiguous-column and missing-GROUP-BY
+  // mistakes have both landed on this project.
+  it('GET /authors/:id/pending-review returns what is sitting on a human', async () => {
+    const { status, body } = await get(`/authors/${authorId}/pending-review`);
+    assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
+    assert.ok(Array.isArray(body.kits));
+    assert.equal(typeof body.materialsAwaitingReview, 'number');
+    assert.equal(typeof body.unreachable, 'boolean');
+  });
+
+  for (const path of ['/reviewers']) {
+    it(`GET /authors/:id${path} returns 200`, async () => {
+      const { status, body } = await get(`/authors/${authorId}${path}`);
+      assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
+      assert.ok(Array.isArray(body));
+    });
+  }
+
+  it('GET /notifications accepts an authorId filter', async () => {
+    const { status, body } = await get(`/notifications?authorId=${authorId}`);
+    assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
+    assert.ok(Array.isArray(body));
+  });
+
+  // STORY-006: the grounding read model. Driven over HTTP because the route
+  // assembles its own aggregate query, which is where the ambiguous-column
+  // mistake lived last time.
+  it('GET /books/:id/themes returns the grounding a draft would use', async () => {
+    const { status, body } = await get(`/books/${bookId}/themes`);
+    assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
+    assert.equal(body.bookId, Number(bookId));
+    assert.ok(Array.isArray(body.themes) && body.themes.length > 0, 'no themes were indexed');
+    assert.ok(
+      body.themes.every((t) => typeof t.passage_count === 'number'),
+      'each theme should report how much evidence backs it',
+    );
+    assert.ok(Array.isArray(body.ungrounded));
+    assert.ok(Array.isArray(body.withoutKeyMessage));
+  });
 });

@@ -1,123 +1,140 @@
-# Basecamp Updates — Formatting Rules
+# Basecamp Updates — Short & Clear
 
-This file governs how Claude drafts **every** Basecamp update in this folder. Match it exactly.
-Source of the format: Colaberry onboarding requires updates **tied to a specific task**, following
-**What → Progress → Decisions → Next**, with **screenshots**.
+**Who this is for:** This file instructs **Claude in Cursor** (where the Author Launch Engine code runs). After each task, Cursor's Claude does TWO things in this vault:
+1. **Writes a short Basecamp update** → `09 PM Curriculum/Author Launch Engine/Basecamp Updates/`
+2. **Updates the PM framework** → `09 PM Curriculum/Author Launch Engine/Product Management/`
 
-## Hard rules
-1. **Tie every update to ONE specific task** (a named backlog story / release / todo). No vague "worked on stuff."
-3. **Momentum > perfection.** "I'm stuck" only counts if it names the next concrete step.
-4. **Never post to Basecamp without my explicit permission.** Draft only. I post.
-5. **Every file ends with a Plain-English Recap** (see below). It is for me, not for Basecamp.
-6. **Before a ticket is closed, give a detailed stage report — never a terse summary.** The update must answer, in depth: *what did you do this stage, what were the results, and what are the deliverables?* Tell us what the code produced
+**Why both:** The vault's Claude (Anvi's PM tutor) reads the Product Management folder to teach PM fundamentals from Anvi's *real* project work. So every update must also leave PM material behind — not just a status report.
 
-## File naming
-`(C) YYYY-MM-DD — <ShortTaskName>.md` (e.g. `(C) 2026-07-12 — STORY-004 Daily Refresh Engine.md`)
-All Claude-drafted files keep the `(C)` prefix.
+**Goal of the update itself:** A normal person reads it in 30 seconds, understands exactly what got built.
 
-## Required frontmatter
+---
+
+## The goal (Colaberry's 4 questions)
+
+A good update lets the reader answer four things fast:
+1. **What did you work on?**
+2. **What progress did you make?**
+3. **What decisions did you make?**
+4. **What are you doing next?**
+
+Plus: **attach screenshots / artifacts** showing the real work whenever possible.
+
+## The 3 rules
+1. **Tie to ONE task.** Always name it: `STORY-001`, release, todo. No "worked on stuff."
+2. **Write short & plain.** Tell the story of what changed since the last update. No walls of text.
+3. **Never post without Anvi's OK.** Claude drafts. Anvi posts.
+
+---
+
+## Template (copy & paste)
+
+```
+# <Task Name> — YYYY-MM-DD
+
+**Task:** STORY-### or release name
+
+**Worked on:**
+[The specific thing you built/did this session — 1–2 plain sentences.]
+
+**Progress made:**
+[What you completed, changed, tested, or figured out. What a reviewer can now see or run.]
+
+**Decisions:**
+[The key approach or trade-off you made, and why — "chose X over Y because ___."]
+
+**Next steps:**
+[The one concrete thing you'll work on next.]
+
+**Evidence:**
+[Screenshots / artifacts / commit link showing the progress — caption each one.]
+```
+
+---
+
+## Rules for this template
+
+- **Worked on** = 1–2 sentences, plain English, tied to one named task.
+- **Progress made** = what actually changed and how a reviewer can verify it (test passed, screen to open, demo command).
+- **Decisions** = written as a trade-off ("chose X over Y because…"), never just "did X."
+- **Next steps** = name the next story/task, not "figuring it out."
+- **Evidence** = at least one captioned screenshot or artifact. Show, don't just tell.
+- **Keep it short** — it should tell the story of what changed since the last update, nothing more.
+
+---
+
+## Frontmatter (top of file)
+
 ```yaml
 ---
 type: basecamp-update
-project: Colaberry Internship
-sub-project: IPOS
-release: <e.g. R1 — Core Build>, correspond to the basecamp
 date: YYYY-MM-DD
-task: <STORY-### or milestone name>
-status: <draft | posted-ready | posted (comment #) — screenshots pending>
-tags: [colaberry, basecamp-update, ipos, <story/release slug>]
+task: STORY-### or release name
+status: draft
+tags: [colaberry, author-launch-engine]
 ---
 ```
 
-## Part 1 — The Basecamp update (copy-paste this part only)
+---
 
-```markdown
-# (C) Basecamp Update — <Task Short Name> (YYYY-MM-DD)
+## File naming
+`(C) YYYY-MM-DD — <Task Short Name>.md`
 
-> Format per Colaberry onboarding: tied to a specific task → **What → Progress → Decisions → Next**
-> + screenshots. Linked PM detail: [[...link to the relevant PM Layer / case-study note...]].
+Example: `(C) 2026-08-10 — STORY-001 Draft Social Posts.md`
+
+Save in: `09 PM Curriculum/Author Launch Engine/Basecamp Updates/`
 
 ---
 
-**📌 Task:** <STORY-### or milestone> · pushed to GitHub `main` (commit `<hash>` if applicable)
+## Plain-English Recap (for Anvi only)
 
-**✅ What I did**
-2–4 sentences, plain English, what got built/done end to end.
-
-**📈 Progress**
-- Bullet the concrete, verifiable results (tests passing, scenarios met, what a reviewer can see).
-- Bold the acceptance-criteria hits. Note any live-verified behavior.
-- Always surface the Trust-Before-Intelligence / audit-log evidence when relevant.
-
-**🧠 Decisions & trade-offs**
-- Each bullet = a decision + the *why* (the PM reasoning). This is the interview-gold section.
-- Include a **Traceability:** line mapping the work to REQ-### / STORY-###.
-
-**📦 Deliverables** *(required — what a reviewer can open right now)*
-- One bullet per artifact produced this stage, each with where to find it: e.g.
-  what code was commited, artifacts
-
-**➡️ Next**
-What unlocks next for us to accomplish
-
-
----
-
-## Demo notes / credentials (for reviewer)
-- Exact steps or logins so the reviewer can reproduce it in under a minute.
-```
-
-## Part 2 — Plain-English Recap (for me only, NEVER posted)
-
-Goes below a `<!-- NOT FOR BASECAMP -->` marker at the bottom of the file. Purpose: I should be
-able to read this and explain, out loud, exactly what got built without opening the code.
+Paste this at the bottom, below `<!-- NOT FOR BASECAMP -->`. Purpose: you can explain the work out loud without reading code.
 
 ```markdown
 <!-- NOT FOR BASECAMP -->
----
 
-## 🧾 Plain-English Recap
+**In one sentence:** [what this does, said to a friend]
 
-**In one sentence:** <what this change actually does, said like you'd say it to a friend>
+**How it works**
+1. [trigger/input]
+2. [what happens]
+3. [output/result]
 
-**Files touched**
-| File | What it does now | Why it changed |
-|---|---|---|
-| `path/to/file.py` | <one line, no jargon> | <one line> |
+**Files changed**
+- `path/to/file` — [what it does now in one line, why it changed in one line]
 
-**How it works, step by step**
-1. <trigger — what kicks this off>
-2. <what happens next, in order>
-3. <where the data ends up>
-
-**New words / concepts introduced**
-- **<term>** — <plain definition, one sentence, no other jargon inside it>
-
-**If it breaks, look here first:** <file or function + the most likely failure>
+**If it breaks:** [file or function to look at first]
 ```
 
-Rules for this section:
-- No jargon unless it's defined right there. Say "a background job that reruns every night," not "a cron-scheduled idempotent refresh."
-- Prefer analogies over precision when they conflict.
-- If Claude wrote code, every file it touched must appear in the table. No silent changes.
-- Keep it under ~250 words.
+Keep this under ~100 words. No jargon unless you define it.
 
-## Tone & length (Part 1 only)
-- **Concise, confident, specific.** Short sentences. No filler, no hype.
-- Show the reviewer can *verify* it (steps, credentials, commit hash, passing scenarios).
-- Bold the acceptance criteria and key decisions so a busy PM can scan in 15 seconds.
-- Write decisions as trade-offs ("chose X over Y because…"), never just "did X."
+---
 
-## Where to save these files
-- Save these files in Documents --> Anvi's Second Brain --> 02 Projects --> 05 Basecamp Updates
-
-## Before marking `posted-ready`
+## Before marking `ready-to-post`
+- [ ] Answers all 4 questions: worked on / progress / decisions / next steps
 - [ ] Tied to one named task
-- [ ] **Multiple captioned screenshots** listed in Attachments (≥1 per acceptance criterion / demo step) — not a single image
-- [ ] **Deliverables section present**, listing every artifact with where to find it (commit hash, test command + result, doc paths, demo login)
-- [ ] **Detailed stage report** — what I did / the results / the deliverables are all answered in depth, with evidence (commit, test output, live-verified behavior), not a terse summary
-- [ ] Decisions section has a Traceability line
-- [ ] Demo/repro steps included
-- [ ] Next step is concrete (not "figuring it out")
-- [ ] Plain-English Recap written, and it's below the `<!-- NOT FOR BASECAMP -->` marker
-- [ ] Every file Claude touched appears in the Recap table
+- [ ] Short — tells the story of what changed since last update, no walls of text
+- [ ] Decisions written as a trade-off ("chose X over Y because…")
+- [ ] Evidence attached — at least one captioned screenshot / artifact
+- [ ] Next steps names the actual next task
+- [ ] Plain-English Recap is short & jargon-free
+- [ ] Never posted to Basecamp yet (Anvi posts only)
+
+---
+
+## After each update — feed the PM framework (required, not optional)
+
+Cursor's Claude must do this every time, so the vault's Claude can teach from it:
+
+1. **Save the update** in `09 PM Curriculum/Author Launch Engine/Basecamp Updates/`.
+2. **Update the PM framework** in `09 PM Curriculum/Author Launch Engine/Product Management/` — add the decision + result to the right file:
+
+| What happened in the task | File to update |
+|---|---|
+| Scope, vision, or a strategic trade-off | `(C) 1. Product Strategy & Vision.md` |
+| Learned something about a user/persona | `(C) 2. Personas & Jobs-to-be-Done.md` |
+| A story shipped / roadmap moved | `(C) 3. Outcome Roadmap & Traceability.md` |
+| A metric was hit or defined | `(C) 4. Metrics — North Star & Inputs.md` |
+| A decision worth telling in an interview | `(C) 5. Progress → PM Story Bank.md` |
+
+Front door for the framework: [[09 PM Curriculum/Author Launch Engine/Product Management/(C) Author Launch Engine — Start Here.md]]

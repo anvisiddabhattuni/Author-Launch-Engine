@@ -10,18 +10,21 @@ export function OpportunitiesPage({ author }) {
   const [monthly, setMonthly] = useState([]);
   const [books, setBooks] = useState([]);
   const [typeFilter, setTypeFilter] = useState('');
+  const [rejections, setRejections] = useState([]);
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [o, m, b] = await Promise.all([
+    const [o, m, b, r] = await Promise.all([
       api.opportunities({ authorId: author.id }),
       api.monthlyOpportunities(author.id),
       api.books(author.id),
+      api.opportunityRejections(author.id),
     ]);
     setOpportunities(o);
     setMonthly(m);
     setBooks(b);
+    setRejections(r);
   }, [author.id]);
 
   useEffect(() => {
@@ -97,10 +100,20 @@ export function OpportunitiesPage({ author }) {
               () => api.scout(author.id, bookId),
               (r) =>
                 `Scanned ${r.scanned} listings: ${r.identified.length} new opportunities recorded, ` +
-                `${r.rejected.length} rejected as off-topic.`,
+                `${r.rejected.length} rejected.`,
             )
           }>
             Scan directories
+          </button>
+          <button className="ghost" disabled={busy || !bookId} onClick={() =>
+            run(
+              () => api.scout(author.id, bookId, ['speaking']),
+              (r) =>
+                `Searched the speaker bureaus only: ${r.scanned} listings, ` +
+                `${r.identified.length} new speaking opportunities recorded.`,
+            )
+          }>
+            Search speaking only
           </button>
           <button className="ghost" disabled={busy || !bookId} onClick={() =>
             run(
@@ -116,8 +129,10 @@ export function OpportunitiesPage({ author }) {
       <div className="card">
         <h2>Opportunities ({shown.length})</h2>
         <p className="hint">
-          Scored by keyword analysis against your book's themes. Listings below the relevance
-          threshold are never recorded, so this list stays worth reading.
+          Scored twice, because there are two reasons to say yes. <strong>Themes</strong> is how well
+          the listing matches what this book argues; <strong>author</strong> is how well it matches
+          you — your subjects across every book, and the fact that a published author is what an
+          author panel is looking for. A lead qualifies on either, and the column says which.
         </p>
 
         <label htmlFor="type">Filter by type</label>
@@ -139,8 +154,10 @@ export function OpportunitiesPage({ author }) {
                 <th>Type</th>
                 <th>Name</th>
                 <th>Host</th>
-                <th>Relevance</th>
-                <th>Matched themes</th>
+                <th>Themes</th>
+                <th>Author</th>
+                <th>Qualified by</th>
+                <th>Matched</th>
                 <th>Deadline</th>
                 <th>Outreach</th>
               </tr>
@@ -154,7 +171,18 @@ export function OpportunitiesPage({ author }) {
                   <td>{o.name}</td>
                   <td>{o.host}</td>
                   <td className="mono">{Number(o.relevance).toFixed(3)}</td>
-                  <td className="mono">{o.matched_themes.join(', ')}</td>
+                  <td className="mono">{Number(o.expertise ?? 0).toFixed(3)}</td>
+                  <td>
+                    <span
+                      className={`pill ${o.qualified_by === 'expertise' ? 'scheduled' : 'approved'}`}
+                      title={o.rationale}
+                    >
+                      {o.qualified_by === 'expertise' ? 'you, not the book' : o.qualified_by}
+                    </span>
+                  </td>
+                  <td className="mono">
+                    {[...(o.matched_themes ?? []), ...(o.expertise_matched ?? [])].join(', ') || '—'}
+                  </td>
                   <td className="mono">{o.deadline ? String(o.deadline).slice(0, 10) : '—'}</td>
                   <td>
                     {o.message_status ? (
@@ -163,6 +191,50 @@ export function OpportunitiesPage({ author }) {
                       <span className="mono">—</span>
                     )}
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Rejected by the filter ({rejections.length})</h2>
+        <p className="hint">
+          What the scan decided you should never see, and how close each came to a floor. This is the
+          part of the scan nobody could previously check: an identified lead is visible and can be
+          judged wrong, but one dropped for a bad reason used to leave no trace at all. Both floors
+          are stored with the verdict, so a call made under an older policy can be re-derived.
+        </p>
+        {rejections.length === 0 ? (
+          <div className="empty">Nothing rejected yet. Run a scan.</div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Name</th>
+                <th>Themes</th>
+                <th>Author</th>
+                <th>Topics</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rejections.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <span className="pill">{r.type}</span>
+                  </td>
+                  <td title={r.rationale}>{r.name}</td>
+                  <td className="mono">
+                    {Number(r.relevance).toFixed(3)}{' '}
+                    <span className="muted">/ {Number(r.relevance_floor).toFixed(2)}</span>
+                  </td>
+                  <td className="mono">
+                    {Number(r.expertise).toFixed(3)}{' '}
+                    <span className="muted">/ {Number(r.expertise_floor).toFixed(2)}</span>
+                  </td>
+                  <td className="mono">{(r.topics ?? []).join(', ')}</td>
                 </tr>
               ))}
             </tbody>

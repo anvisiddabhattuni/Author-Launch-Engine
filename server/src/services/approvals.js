@@ -30,11 +30,23 @@ const TARGETS = {
   },
 };
 
-async function decide({ target, id, decision, reviewer, notes = '' }) {
+/**
+ * @param {object} args
+ * @param {{id: number, name: string, role: string}} [args.user] The authenticated
+ *   decider (STORY-064). Supplied by the API on every request. Absent only when
+ *   trusted internal code — the demo, a test — calls the service directly; the
+ *   decision is still recorded, but marked on the audit log as unattributable so
+ *   it cannot be mistaken for one a real session stands behind.
+ */
+async function decide({ target, id, decision, reviewer, notes = '', user = null }) {
   const spec = TARGETS[target];
   if (!spec) throw new Error(`Unknown approval target "${target}"`);
 
-  if (!reviewer || !String(reviewer).trim()) {
+  // A signed-in decider names themselves. The free-text argument survives for
+  // internal callers, and because rewriting history is not this story's job.
+  const decidedBy = user?.name ?? reviewer;
+
+  if (!decidedBy || !String(decidedBy).trim()) {
     throw Object.assign(new Error('A reviewer name is required to record a decision'), { status: 400 });
   }
 
@@ -68,8 +80,9 @@ async function decide({ target, id, decision, reviewer, notes = '' }) {
     }
 
     await client.query(
-      `INSERT INTO approvals (${spec.column}, decision, reviewer, notes) VALUES ($1,$2,$3,$4)`,
-      [id, decision, reviewer, notes],
+      `INSERT INTO approvals (${spec.column}, decision, reviewer, notes, user_id)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [id, decision, decidedBy, notes, user?.id ?? null],
     );
 
     const { rows: updated } = await client.query(
@@ -79,14 +92,23 @@ async function decide({ target, id, decision, reviewer, notes = '' }) {
 
     await recordAction(
       {
-        actor: reviewer,
+        actor: decidedBy,
         action: `${spec.actionPrefix}.${decision}`,
         entityType: spec.entityType,
         entityId: id,
         authorId: record.author_id,
         before: record,
         after: updated[0],
-        metadata: { notes, escalated: record.status === 'escalated' },
+        metadata: {
+          notes,
+          escalated: record.status === 'escalated',
+          // The point of STORY-064: the log now says *who*, not just that
+          // somebody said they were who. A decision with no session behind it
+          // is marked as such rather than looking identical to one that has.
+          userId: user?.id ?? null,
+          role: user?.role ?? null,
+          attributable: Boolean(user),
+        },
       },
       client,
     );
@@ -95,20 +117,20 @@ async function decide({ target, id, decision, reviewer, notes = '' }) {
   });
 }
 
-export const approveDraft = ({ draftId, reviewer, notes }) =>
-  decide({ target: 'draft', id: draftId, decision: 'approved', reviewer, notes });
+export const approveDraft = ({ draftId, reviewer, notes, user }) =>
+  decide({ target: 'draft', id: draftId, decision: 'approved', reviewer, notes, user });
 
-export const rejectDraft = ({ draftId, reviewer, notes }) =>
-  decide({ target: 'draft', id: draftId, decision: 'rejected', reviewer, notes });
+export const rejectDraft = ({ draftId, reviewer, notes, user }) =>
+  decide({ target: 'draft', id: draftId, decision: 'rejected', reviewer, notes, user });
 
-export const approveOutreach = ({ messageId, reviewer, notes }) =>
-  decide({ target: 'outreach', id: messageId, decision: 'approved', reviewer, notes });
+export const approveOutreach = ({ messageId, reviewer, notes, user }) =>
+  decide({ target: 'outreach', id: messageId, decision: 'approved', reviewer, notes, user });
 
-export const rejectOutreach = ({ messageId, reviewer, notes }) =>
-  decide({ target: 'outreach', id: messageId, decision: 'rejected', reviewer, notes });
+export const rejectOutreach = ({ messageId, reviewer, notes, user }) =>
+  decide({ target: 'outreach', id: messageId, decision: 'rejected', reviewer, notes, user });
 
-export const approvePrMaterial = ({ materialId, reviewer, notes }) =>
-  decide({ target: 'prMaterial', id: materialId, decision: 'approved', reviewer, notes });
+export const approvePrMaterial = ({ materialId, reviewer, notes, user }) =>
+  decide({ target: 'prMaterial', id: materialId, decision: 'approved', reviewer, notes, user });
 
-export const rejectPrMaterial = ({ materialId, reviewer, notes }) =>
-  decide({ target: 'prMaterial', id: materialId, decision: 'rejected', reviewer, notes });
+export const rejectPrMaterial = ({ materialId, reviewer, notes, user }) =>
+  decide({ target: 'prMaterial', id: materialId, decision: 'rejected', reviewer, notes, user });

@@ -35,6 +35,12 @@ const countdown = (days) =>
  * themes and held for human review before the kit can be distributed.
  * STORY-004: an approaching milestone gets its kit drafted without being asked.
  * STORY-005: recording that an award was won is what drafts the win release.
+ * STORY-006: a draft is written from what the book argues about each theme, and
+ * checked against the same evidence — named and argued are shown separately.
+ * STORY-007: the review itself already existed; what was missing was telling a
+ * human that something is sitting on them.
+ * STORY-008: an independent check re-derives every escalation decision, so the
+ * agent that wrote the material is no longer the only judge of it.
  */
 export function PressPage({ author, book }) {
   const [milestones, setMilestones] = useState([]);
@@ -42,6 +48,12 @@ export function PressPage({ author, book }) {
   const [awaiting, setAwaiting] = useState(null);
   const [kits, setKits] = useState([]);
   const [contacts, setContacts] = useState([]);
+  const [grounding, setGrounding] = useState(null);
+  const [pending, setPending] = useState(null);
+  const [reviewers, setReviewers] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [newReviewer, setNewReviewer] = useState({ name: '', email: '', role: 'publisher' });
+  const [escalations, setEscalations] = useState(null);
   const [reviewer, setReviewer] = useState(author.name);
   const [notes, setNotes] = useState({});
   const [open, setOpen] = useState({});
@@ -49,19 +61,29 @@ export function PressPage({ author, book }) {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [m, a, w, k, c] = await Promise.all([
+    const [m, a, w, k, c, g, p, r, n, esc] = await Promise.all([
       api.milestones(author.id),
       api.approachingMilestones(author.id),
       api.awardsAwaitingOutcome(author.id),
       api.pressKits(author.id),
       api.pressContacts(),
+      book ? api.bookThemes(book.id) : Promise.resolve(null),
+      api.pendingReview(author.id),
+      api.reviewers(author.id),
+      api.notifications(author.id),
+      api.escalations(author.id),
     ]);
     setMilestones(m);
     setApproaching(a);
     setAwaiting(w);
     setKits(k);
     setContacts(c);
-  }, [author.id]);
+    setGrounding(g);
+    setPending(p);
+    setReviewers(r);
+    setNotifications(n);
+    setEscalations(esc);
+  }, [author.id, book]);
 
   useEffect(() => {
     refresh().catch((e) => setStatus({ kind: 'error', message: e.message }));
@@ -89,6 +111,169 @@ export function PressPage({ author, book }) {
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
+
+      {escalations && escalations.escalations.length > 0 && (
+        <div className="card">
+          <h2>
+            Escalated ({escalations.open} open
+            {escalations.raisedByMonitor > 0 && `, ${escalations.raisedByMonitor} raised by monitoring`})
+          </h2>
+          <p className="hint">
+            The Trust and Monitoring Agent re-derives every escalation decision from the stored
+            scores, so the agent that wrote a material is no longer the only judge of it. It can
+            raise a concern and never clear one. Current floors: confidence{' '}
+            {Number(escalations.thresholds.confidence).toFixed(2)}, theme alignment{' '}
+            {Number(escalations.thresholds.themeAlignment).toFixed(2)}.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Material</th>
+                <th>Raised for</th>
+                <th>Scores when judged</th>
+                <th>Caught by</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {escalations.escalations.map((e) => (
+                <tr key={e.id}>
+                  <td>
+                    {MATERIAL_LABELS[e.type] ?? e.type}
+                    <span className="mono"> · {e.milestone_title}</span>
+                  </td>
+                  <td>
+                    {e.reasons.length > 0 ? (
+                      e.reasons.map((r) => (
+                        <span key={r} className="pill escalated" style={{ marginRight: 4 }}>
+                          {r.replace('_', ' ')}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="mono">policy has since relaxed</span>
+                    )}
+                  </td>
+                  <td className="mono">
+                    conf {Number(e.confidence).toFixed(2)} · align{' '}
+                    {Number(e.theme_alignment).toFixed(2)}
+                  </td>
+                  <td>
+                    {e.detected_by === 'monitor' ? (
+                      <span className="pill escalated">monitoring</span>
+                    ) : (
+                      <span className="pill">the drafter</span>
+                    )}
+                    {!e.agreed && <span className="mono"> · disagreed</span>}
+                  </td>
+                  <td>
+                    <span className={`pill ${e.open ? 'pending_approval' : 'approved'}`}>
+                      {e.open ? 'awaiting a human' : e.material_status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="row" style={{ marginTop: 14 }}>
+            <button
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  const result = await api.scanEscalations(author.id);
+                  setStatus({
+                    kind: 'ok',
+                    message: `Examined ${result.examined}; raised ${result.raised.length}.`,
+                  });
+                }, 'Scan complete.')
+              }
+            >
+              Re-check now
+            </button>
+            <span className="hint">
+              The worker runs this on a schedule anyway — a floor raised today catches drafts written
+              yesterday that are still unapproved. Decide each material below as usual.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {pending && pending.kits.length > 0 && (
+        <div className="card">
+          <h2>
+            Awaiting your review ({pending.materialsAwaitingReview} material
+            {pending.materialsAwaitingReview === 1 ? '' : 's'} across {pending.kits.length} kit
+            {pending.kits.length === 1 ? '' : 's'})
+          </h2>
+          <p className="hint">
+            Nothing in a kit can be distributed until every material in it is approved. Reviewing is
+            what releases it — taking no action leaves it unsent, which is safe but not free.
+          </p>
+
+          {pending.unreachable && (
+            <div className="banner error">
+              Work is waiting and there is nobody to tell. Add a reviewer below — until then the
+              approval gate is holding drafts that no one has been asked to look at.
+            </div>
+          )}
+
+          <table>
+            <thead>
+              <tr>
+                <th>Milestone</th>
+                <th>Type</th>
+                <th>Awaiting</th>
+                <th>Escalated</th>
+                <th>Reviewers told</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.kits.map((kit) => (
+                <tr key={kit.id}>
+                  <td>{kit.milestone_title}</td>
+                  <td>
+                    <span className="pill">{kit.milestone_type}</span>
+                  </td>
+                  <td>{kit.pending_count}</td>
+                  <td>
+                    {kit.escalated_count > 0 ? (
+                      <span className="pill escalated">{kit.escalated_count}</span>
+                    ) : (
+                      <span className="mono">—</span>
+                    )}
+                  </td>
+                  <td>
+                    {kit.notified > 0 ? (
+                      <span className="pill approved">{kit.notified} notified</span>
+                    ) : (
+                      <span className="pill pending_approval">nobody told yet</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="row" style={{ marginTop: 14 }}>
+            <button
+              disabled={busy || reviewers.filter((r) => r.active).length === 0}
+              onClick={() =>
+                run(
+                  () => api.notifyPending(author.id),
+                  'Reviewers notified about everything still awaiting a decision.',
+                )
+              }
+            >
+              Notify reviewers of pending drafts
+            </button>
+            <span className="hint">
+              Safe to press twice — a reviewer already told about a kit is not mailed again. This is
+              what a scheduled worker would call; nothing runs on a timer yet.
+            </span>
+          </div>
+        </div>
+      )}
 
       {awaiting && awaiting.count > 0 && (
         <div className="card">
@@ -233,6 +418,52 @@ export function PressPage({ author, book }) {
         </div>
       )}
 
+      {grounding && (
+        <div className="card">
+          <h2>
+            What a draft is grounded in ({grounding.themes.length} themes ·{' '}
+            {grounding.passages} passages)
+          </h2>
+          <p className="hint">
+            Before a word is written, the agent retrieves what the book actually argues about each
+            theme and hands that to the drafter. A theme with no key message and no retrievable
+            passage is one the next press kit cannot argue — worth fixing while it is still cheap.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Theme</th>
+                <th>Key message</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grounding.themes.map((t) => (
+                <tr key={t.theme}>
+                  <td>
+                    <span className="pill">{t.theme}</span>
+                  </td>
+                  <td>
+                    {t.key_message || (
+                      <span className="mono">no key message — falls back to the passage</span>
+                    )}
+                  </td>
+                  <td>
+                    {t.passage_count > 0 ? (
+                      <span className="mono">
+                        {t.passage_count} passage{t.passage_count === 1 ? '' : 's'}
+                      </span>
+                    ) : (
+                      <span className="pill unnamed">the book never argues this</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <div className="card">
         <h2>Milestones ({milestones.length})</h2>
         <p className="hint">
@@ -306,7 +537,10 @@ export function PressPage({ author, book }) {
         <p className="hint">
           A kit goes out as one package, so distribution is refused until <em>every</em> material in
           it is approved. Theme alignment is scored separately from confidence: it is the acceptance
-          criterion, so it has to be readable on its own.
+          criterion, so it has to be readable on its own. Each theme is judged twice — whether the
+          draft <em>named</em> it, and whether it carried the argument behind it. Naming alone is
+          worth less than the escalation floor, so copy that name-checks every theme and argues none
+          reaches a human rather than a newsroom.
         </p>
 
         <label htmlFor="pr-reviewer">Reviewer</label>
@@ -331,6 +565,9 @@ export function PressPage({ author, book }) {
                   {kit.approved_count}/{kit.material_count} approved
                 </span>
                 <span>min alignment {Number(kit.min_theme_alignment).toFixed(2)}</span>
+                <span className="mono">
+                  grounded in {kit.grounded_themes} themes / {kit.grounded_passages} passages
+                </span>
               </div>
               {kit.status === 'superseded' && kit.superseded_reason && (
                 <p className="hint">{kit.superseded_reason}</p>
@@ -347,6 +584,27 @@ export function PressPage({ author, book }) {
                     <span>confidence {Number(material.confidence).toFixed(3)}</span>
                     <span className="mono">themes: {material.themes_used.join(', ') || 'none'}</span>
                   </div>
+
+                  {material.themes?.length > 0 && (
+                    <div className="meta" style={{ marginTop: 8 }}>
+                      {material.themes.map((t) => (
+                        <span
+                          key={t.theme}
+                          className={`pill ${
+                            !t.named ? 'unnamed' : t.score >= 0.7 ? 'argued' : 'named-only'
+                          }`}
+                          title={t.key_message || 'No key message recorded for this theme.'}
+                        >
+                          {t.theme} ·{' '}
+                          {!t.named
+                            ? 'missing'
+                            : t.score >= 0.7
+                              ? 'argued'
+                              : 'named, not argued'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   <div style={{ marginTop: 8 }}>
                     <strong>{material.headline}</strong>
@@ -456,6 +714,126 @@ export function PressPage({ author, book }) {
               )}
             </div>
           ))
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Reviewers ({reviewers.filter((r) => r.active).length} active)</h2>
+        <p className="hint">
+          Who gets told when press materials are waiting. This is an address book, not a permission
+          list — it decides who hears about pending work, not who is allowed to approve it. Sending
+          is mocked; no real mail leaves.
+        </p>
+
+        {reviewers.length === 0 ? (
+          <div className="empty">
+            No reviewers yet. Drafts will still be held at the gate — they will just sit there
+            unread.
+          </div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Email</th>
+                <th>Notified</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {reviewers.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.name}</td>
+                  <td>
+                    <span className="pill">{r.role}</span>
+                  </td>
+                  <td className="mono">{r.email}</td>
+                  <td className="mono">
+                    {notifications.filter((n) => n.reviewer_id === r.id && n.status === 'sent').length}
+                  </td>
+                  <td>
+                    <button
+                      className={r.active ? 'danger' : ''}
+                      disabled={busy}
+                      onClick={() =>
+                        run(
+                          () => api.setReviewerActive(r.id, { active: !r.active, actor: reviewer }),
+                          r.active
+                            ? `${r.name} will no longer be notified.`
+                            : `${r.name} will be notified again.`,
+                        )
+                      }
+                    >
+                      {r.active ? 'Stop notifying' : 'Notify again'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="row" style={{ marginTop: 14 }}>
+          <input
+            placeholder="Name"
+            value={newReviewer.name}
+            onChange={(e) => setNewReviewer({ ...newReviewer, name: e.target.value })}
+          />
+          <input
+            placeholder="email@example.test"
+            value={newReviewer.email}
+            onChange={(e) => setNewReviewer({ ...newReviewer, email: e.target.value })}
+          />
+          <input
+            placeholder="Role"
+            value={newReviewer.role}
+            onChange={(e) => setNewReviewer({ ...newReviewer, role: e.target.value })}
+          />
+          <button
+            disabled={busy || !newReviewer.name.trim() || !newReviewer.email.trim()}
+            onClick={() =>
+              run(async () => {
+                await api.addReviewer(author.id, { ...newReviewer, actor: reviewer });
+                setNewReviewer({ name: '', email: '', role: 'publisher' });
+              }, `${newReviewer.name} will be notified when press materials are waiting.`)
+            }
+          >
+            Add reviewer
+          </button>
+        </div>
+
+        {notifications.length > 0 && (
+          <>
+            <h2 style={{ marginTop: 22 }}>Notifications sent ({notifications.length})</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>To</th>
+                  <th>About</th>
+                  <th>Waiting</th>
+                  <th>Status</th>
+                  <th>Provider id</th>
+                </tr>
+              </thead>
+              <tbody>
+                {notifications.map((n) => (
+                  <tr key={n.id}>
+                    <td>
+                      {n.reviewer_name}
+                      <span className="mono"> · {n.reviewer_role}</span>
+                    </td>
+                    <td>{n.milestone_title ?? <span className="mono">—</span>}</td>
+                    <td className="mono">{n.pending_count}</td>
+                    <td>
+                      <span className={`pill ${n.status}`}>{n.status}</span>
+                    </td>
+                    <td className="mono">{n.external_id ?? n.error ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
 

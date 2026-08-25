@@ -210,8 +210,21 @@ export const directories = {
   },
 };
 
-/** Queries every configured directory. Real adapters would run in parallel too. */
-export async function searchAllDirectories({ from = new Date() } = {}) {
-  const results = await Promise.all(Object.values(directories).map((d) => d.search({ from })));
+/** The kinds of engagement the directories cover. */
+export const OPPORTUNITY_TYPES = ['speaking', 'podcast', 'event'];
+
+/**
+ * Queries the configured directories. Real adapters would run in parallel too.
+ *
+ * `types` narrows the scan to particular kinds of engagement (STORY-010): the
+ * story asks for a search *for speaking opportunities*, and a podcast is not a
+ * speaking engagement. Filtering at the adapter rather than after the fact
+ * matters for a live directory — asking a speaker bureau for its listings and
+ * discarding two thirds of them is a different thing from not asking.
+ */
+export async function searchAllDirectories({ from = new Date(), types = null } = {}) {
+  const wanted = types === null ? null : new Set(types);
+  const chosen = Object.values(directories).filter((d) => wanted === null || wanted.has(d.type));
+  const results = await Promise.all(chosen.map((d) => d.search({ from })));
   return results.flat();
 }
