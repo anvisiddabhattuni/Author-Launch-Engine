@@ -109,18 +109,48 @@ const slug = (theme) => theme.replace(/[^a-zA-Z0-9]+/g, '');
  * been since STORY-009: a caption assembled from a theme label is name-checking
  * the book, not making its argument.
  */
-const MEME_CAPTIONS = {
-  // The panels carry the joke; the caption is what actually gets posted beside
-  // the picture. Keeping them separate is not tidiness — joining them with a
-  // separator put a literal "|" in the tweet, and repeated in the post text the
-  // words the image was already showing.
-  'two-panel': (theme, s) => ({
-    panels: [`What everyone thinks ${theme} is`, s.claim],
-    caption: `On ${theme}, and what it actually costs.`,
-  }),
-  single: (theme, s) => ({ panels: [s.claim], caption: s.claim }),
-  quote: (theme, s) => ({ panels: [s.claim], caption: `From "${s.title}", on ${theme}.` }),
+/**
+ * How each named caption slot gets filled (STORY-067).
+ *
+ * STORY-066 had one hardcoded caption function per layout, which meant adding a
+ * template meant editing this file. Slots are named and carry their own role,
+ * so a new template composed of slots this map already knows needs no code at
+ * all — and one introducing a new slot name degrades to the book's claim rather
+ * than rendering empty.
+ */
+const SLOT_FILLERS = {
+  // The expectation the meme is about to overturn.
+  setup: ({ theme }) => `What everyone thinks ${theme} is`,
+  first: ({ theme }) => `What everyone thinks ${theme} is`,
+  left: ({ theme }) => `${theme}, as advertised`,
+  label: ({ theme }) => theme,
+  second: () => 'What it actually takes',
+  // The book's own argument.
+  turn: ({ claim }) => claim,
+  third: ({ claim }) => claim,
+  right: ({ claim }) => claim,
+  body: ({ claim }) => claim,
+  statement: ({ claim }) => claim,
+  quote: ({ claim }) => claim,
+  note: ({ claim }) => claim,
+  attribution: ({ title }) => `— ${title}`,
 };
+
+/** Fills every slot a template declares, in the template's own order. */
+function fillSlots(template, context) {
+  const captions = {};
+  for (const slot of template.captionSlots) {
+    const filler = SLOT_FILLERS[slot.name] ?? SLOT_FILLERS.statement;
+    const text = filler(context);
+    // Respect the slot's own limit rather than overflowing the artwork it was
+    // drawn to sit inside.
+    captions[slot.name] =
+      slot.maxChars && text.length > slot.maxChars
+        ? `${text.slice(0, Math.max(0, slot.maxChars - 1)).trimEnd()}…`
+        : text;
+  }
+  return captions;
+}
 
 export const stubProvider = {
   name: 'stub',
@@ -140,7 +170,11 @@ export const stubProvider = {
     weekOf,
     memeCount = 0,
     visualFirstPlatforms = [],
-    templates = [],
+    // Templates already chosen from the library by the agent, one per meme
+    // (STORY-067). The provider does not pick: selection is a decision with a
+    // reason and the reason gets written to the audit log, which is the
+    // agent's job rather than the content generator's.
+    memeTemplates = [],
   }) {
     // Prefer the grounded themes: they are the ones with evidence behind them.
     // `books.themes` remains the fallback for a book with no theme index.
@@ -198,23 +232,27 @@ export const stubProvider = {
       const claim = claimFor(entry);
       const line = lineFor(entry, book, seed >>> 3);
 
-      // Only templates whose licence we can actually point at. An unusable
-      // template is not a candidate the drafter should be producing; the rights
-      // check exists to catch what slips past this, not to be the only guard.
-      if (templates.length === 0) break;
-      const template = pick(templates, seed >>> 5);
-      const { panels, caption } = (MEME_CAPTIONS[template.layout] ?? MEME_CAPTIONS.single)(theme, {
+      // No licensed template, no meme. The library refuses at selection and
+      // logs why; there is nothing sensible to draft from here.
+      const template = memeTemplates[i];
+      if (!template) break;
+
+      const captions = fillSlots(template, {
+        theme,
         claim: claim ?? line,
         title: book.title,
       });
+      // What the picture says, in the template's own slot order.
+      const panels = template.captionSlots.map((slot) => captions[slot.name]).filter(Boolean);
 
       candidates.push({
         format: 'meme',
         platform,
-        content: caption,
+        content: `On ${theme}, and what it actually costs.`,
         themesUsed: [theme],
         groundedIn: (entry?.passages ?? []).map((p) => p.id),
         template,
+        captions,
         panels,
         // Alt text is written here, at generation, because the drafter is the
         // only thing that knows what the image was built to show — and what it

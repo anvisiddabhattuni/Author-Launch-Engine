@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011, and STORY-066), printed step by step.
+ * STORY-011, STORY-066 and STORY-067), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -34,7 +34,13 @@ import { retrieveThemeGrounding } from './services/themeRetrieval.js';
 import { deriveExpertise, scoreExpertise } from './services/authorExpertise.js';
 import { resourceFor } from './services/coordination.js';
 import { reviewMemeCandidate } from './services/brandSafety.js';
-import { TEMPLATES, provenanceFor, usableTemplates } from './services/memeTemplates.js';
+import {
+  addTemplate,
+  assessTemplate,
+  listTemplates,
+  retireTemplate,
+  selectTemplate,
+} from './services/memeLibrary.js';
 import { searchAllDirectories } from './services/directories.js';
 import { scoreOpportunity } from './services/keywordAnalysis.js';
 import { deriveVoice } from './services/voiceProfile.js';
@@ -1474,12 +1480,14 @@ console.log('\nRendered offline and deterministically, so the demo and the tests
 console.log('an image without a network call — the same constraint that kept retrieval lexical.');
 
 rule('77. What the drafter is allowed to build from');
-console.log('template                  commercial  terms            offered to the drafter?');
-for (const t of TEMPLATES) {
-  const usable = usableTemplates().some((u) => u.id === t.id);
+const libraryTemplates = await listTemplates();
+console.log('template                  slots                      terms            offered?');
+for (const t of libraryTemplates) {
+  const verdict = assessTemplate(t);
   console.log(
-    `  ${t.id.padEnd(24)} ${String(t.licence?.commercial ?? '—').padEnd(11)} ` +
-      `${String(t.licence?.terms ?? 'none recorded').padEnd(16)} ${usable ? 'yes' : 'NO'}`,
+    `  ${t.key.padEnd(24)} ${t.captionSlots.map((s) => s.name).join('/').padEnd(26)} ` +
+      `${String(t.licence?.terms ?? 'none recorded').padEnd(16)} ` +
+      `${verdict.usable ? 'yes' : `NO — ${verdict.reason}`}`,
   );
 }
 console.log('\nTwo are withheld before generation even starts. The rights check exists to catch');
@@ -1487,18 +1495,22 @@ console.log('what gets past this, not to be the only guard.');
 
 rule('78. A judgement escalates; a licence refuses');
 const safetyCases = [
-  ['clean caption, cc0 template', 'tmpl-single-caption', 'Attention is a muscle that adapts to the load you give it.', 'Caption on a dark field'],
-  ['no alt text', 'tmpl-single-caption', 'Attention is a muscle.', ''],
-  ['register the author never uses', 'tmpl-single-caption', 'This one weird trick is a guaranteed cure. Only idiots miss it.', 'x'],
-  ['editorial-only licence', 'tmpl-stock-photo', 'Attention is a muscle.', 'A photograph'],
-  ['no licence recorded', 'tmpl-community-remix', 'Attention is a muscle.', 'A remix'],
+  ['clean caption, cc0 template', 'single-statement', 'Attention is a muscle that adapts to the load you give it.', 'Caption on a dark field'],
+  ['no alt text', 'single-statement', 'Attention is a muscle.', ''],
+  ['register the author never uses', 'single-statement', 'This one weird trick is a guaranteed cure. Only idiots miss it.', 'x'],
+  ['editorial-only licence', 'stock-photo-overlay', 'Attention is a muscle.', 'A photograph'],
+  ['no licence recorded', 'community-remix', 'Attention is a muscle.', 'A remix'],
 ];
 console.log('case                            rights      publishable  findings');
 for (const [label, id, caption, altText] of safetyCases) {
-  const tmpl = TEMPLATES.find((t) => t.id === id);
+  const tmpl = libraryTemplates.find((t) => t.key === id);
   const review = reviewMemeCandidate({
     caption,
-    media: { imageRef: 'x', altText, provenance: provenanceFor(tmpl) },
+    media: {
+      imageRef: 'x',
+      altText,
+      provenance: { source: 'template', templateId: tmpl.key, licence: tmpl.licence },
+    },
     maxChars: 280,
   });
   console.log(
@@ -1550,9 +1562,95 @@ for (const entry of memeLog
 console.log('\nProvenance is on the append-only log, not only on the row: a meme whose licence');
 console.log('is questioned later has to be answerable from the record.');
 
+
+// ── STORY-067 ────────────────────────────────────────────────────────────────
+// The template library. STORY-066's five templates were an array in a source
+// file; these are rows an author can browse, add to and retire.
+
+rule('81. A library, not an array in a source file');
+const lib = await listTemplates();
+console.log(`${lib.length} templates · ${lib.filter((t) => assessTemplate(t).usable).length} the generator may use\n`);
+console.log('template                  layout        slots                       licence');
+for (const t of lib) {
+  console.log(
+    `  ${t.key.padEnd(24)} ${t.layout.padEnd(13)} ` +
+      `${t.captionSlots.map((sl) => sl.name).join('/').padEnd(27)} ` +
+      `${t.licence?.terms ?? 'none recorded'}`,
+  );
+}
+console.log('\nEach slot is named and says what it is for, so a template can be added without a');
+console.log('code change to go with it. STORY-066 had a hardcoded caption function per layout.');
+
+rule('82. The refusals are on the log, not swallowed by a filter');
+const pick = await selectTemplate({ authorId: author.id, seed: 3 });
+console.log(`chose: ${pick.template.key} (${pick.template.licence.terms}, ${pick.template.licence.holder})`);
+console.log(`refused ${pick.rejected.length} on the way there:\n`);
+for (const r of pick.rejected) {
+  console.log(`  ${r.key.padEnd(24)} ${r.reason.padEnd(32)} ${r.detail ?? ''}`);
+}
+console.log('\nSTORY-066 filtered these out with a helper that returned an array and said');
+console.log('nothing — the same silence STORY-010 found in the opportunity scanner. The half');
+console.log('of a filter nobody can check is the half it hides.');
+
+rule('83. Adding one nobody can licence');
+try {
+  await addTemplate({
+    key: 'demo-unlicensed',
+    name: 'Found on the internet',
+    layout: 'single',
+    caption_slots: [{ name: 'statement', role: 'one line', maxChars: 80, x: 200, y: 150, size: 30 }],
+    image_ref: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+    source: 'Someone sent it to me',
+    licence: null,
+  });
+  console.log('UNEXPECTED: an unlicensed template was accepted');
+} catch (error) {
+  console.log(`refused at the door: ${error.message}`);
+}
+console.log('\nRefused when it is added, not filtered later. A library that accepts unusable');
+console.log('templates and hides them at selection is a library whose count means nothing.');
+
+rule('84. Retiring one, without stranding what already shipped');
+const retiredTemplate = await retireTemplate({
+  key: 'quiet-field',
+  reason: 'the layout reads as empty at thumbnail size',
+  user: { name: 'Anvi Siddabhattuni' },
+});
+console.log(`retired ${retiredTemplate.key} — "${retiredTemplate.retiredReason}"`);
+const afterRetire = assessTemplate(await listTemplates().then((all) => all.find((t) => t.key === 'quiet-field')));
+console.log(`generator may use it now? ${afterRetire.usable} (${afterRetire.reason})`);
+const { rows: usedIt } = await query(
+  `SELECT COUNT(*)::int n FROM drafts d JOIN meme_templates t ON t.id = d.meme_template_id
+    WHERE t.key = 'quiet-field'`,
+);
+console.log(`drafts still pointing at it: ${usedIt[0].n} — the row survives so their provenance does`);
+
+rule('85. The library trail');
+const libLog = await listAuditLog({ limit: 400 });
+for (const entry of libLog
+  .slice()
+  .reverse()
+  .filter((e) => e.action.startsWith('meme_template.'))
+  .slice(-8)) {
+  const m = entry.metadata ?? {};
+  const detail =
+    entry.action === 'meme_template.rejected'
+      ? m.reason
+      : entry.action === 'meme_template.selected'
+        ? `${m.licence?.terms} · passed over ${m.rejected}`
+        : entry.action === 'meme_template.retired'
+          ? m.reason
+          : `${(m.slots ?? []).join('/')} · ${m.licence?.terms ?? 'none'}`;
+  console.log(
+    `${entry.created_at.toISOString()}  ${entry.action.padEnd(26)} ${String(entry.entity_id).padEnd(24)} ${detail}`,
+  );
+}
+console.log('\nEvery template added, selected, refused and retired. "An unlicensed image can');
+console.log('never reach a draft" is now something you can check rather than take on trust.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-066 complete — a meme is a draft with a picture, held by the same gate,');
-console.log('and no image goes out on a licence nobody can point at\n');
+console.log('\nSTORY-067 complete — the templates are a library an author owns, and every one');
+console.log('the generator was refused is on the record\n');
 await closePool();
 

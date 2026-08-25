@@ -11,6 +11,7 @@ import { ReviewPage } from './pages/ReviewPage.jsx';
 import { SchedulePage } from './pages/SchedulePage.jsx';
 import { UploadPage } from './pages/UploadPage.jsx';
 import { WorkerPage } from './pages/WorkerPage.jsx';
+import { TemplatesPage } from './pages/TemplatesPage.jsx';
 
 export function App() {
   const [user, setUser] = useState(null);
@@ -101,6 +102,7 @@ export function App() {
           ['/outreach', 'Outreach'],
           ['/press', 'Press'],
           ['/worker', 'Worker'],
+          ['/templates', 'Meme templates'],
           ['/audit', 'Audit log'],
         ].map(([to, label]) => (
           <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
@@ -121,6 +123,7 @@ export function App() {
           <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/press" element={<PressPage author={author} book={book} />} />
           <Route path="/worker" element={<WorkerPage />} />
+          <Route path="/templates" element={<TemplatesPage user={user} />} />
           <Route path="/audit" element={<AuditPage author={author} />} />
         </Routes>
       )}

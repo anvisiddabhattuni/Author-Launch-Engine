@@ -5,7 +5,7 @@ import { recordAction } from '../services/auditLog.js';
 import { assess } from '../services/escalationPolicy.js';
 import { checkVoice, deriveVoice } from '../services/voiceProfile.js';
 import { RIGHTS, reviewMemeCandidate } from '../services/brandSafety.js';
-import { provenanceFor, renderMeme, usableTemplates } from '../services/memeTemplates.js';
+import { composeFromTemplate, selectTemplate } from '../services/memeLibrary.js';
 import {
   ACTOR as CONTENT_AGENT,
   alignToThemes,
@@ -332,6 +332,22 @@ export async function draftWeeklyPosts({
       client,
     );
 
+    // Templates come from the library now (STORY-067), chosen one per meme with
+    // every refusal written to the audit log. Selection happens here rather than
+    // inside the provider because it is a decision with a reason, and the reason
+    // belongs to the agent that made it.
+    const chosenTemplates = [];
+    let templateRejections = [];
+    for (let i = 0; i < memeCount; i += 1) {
+      const { template, rejected } = await selectTemplate(
+        { authorId, seed: Number(`${book.id}${i}`) },
+        client,
+      );
+      if (i === 0) templateRejections = rejected;
+      if (!template) break;
+      chosenTemplates.push(template);
+    }
+
     const candidates = await provider.generateCandidates({
       book,
       author,
@@ -346,7 +362,7 @@ export async function draftWeeklyPosts({
       // floor the drafter is asked for rather than an average it may miss.
       memeCount,
       visualFirstPlatforms: visualFirst,
-      templates: usableTemplates(),
+      memeTemplates: chosenTemplates,
     });
 
     const saved = [];
@@ -384,18 +400,28 @@ export async function draftWeeklyPosts({
       const isMeme = candidate.format === 'meme';
       const media = isMeme
         ? {
-            imageRef: renderMeme({
+            imageRef: composeFromTemplate({
               template: candidate.template,
-              caption: candidate.content,
-              panels: candidate.panels,
-              bookTitle: book.title,
+              captions: candidate.captions,
             }),
             altText: candidate.altText ?? '',
-            template: candidate.template.id,
+            template: candidate.template.key,
             layout: candidate.template.layout,
+            // The provenance a post goes out with, copied onto the draft. The
+            // foreign key below says which row it came from; this says what that
+            // row held at the time, which is what a later question about a
+            // published meme actually needs.
+            source: candidate.template.source,
             // What the picture says, kept beside the caption it sits next to.
             panels: candidate.panels ?? [candidate.content],
-            provenance: provenanceFor(candidate.template),
+            provenance: {
+              source: 'template',
+              templateId: candidate.template.key,
+              templateName: candidate.template.name,
+              origin: candidate.template.source,
+              generator: 'composeFromTemplate/svg',
+              licence: candidate.template.licence,
+            },
           }
         : null;
 
@@ -419,8 +445,8 @@ export async function draftWeeklyPosts({
         `INSERT INTO drafts
            (author_id, book_id, platform, content, themes_used, confidence, rationale, status,
             week_of, provider, theme_alignment, voice_score, voice_violations, grounded_passages,
-            format, media, safety_findings, image_rights)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+            format, media, safety_findings, image_rights, meme_template_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
          RETURNING *`,
         [
           authorId,
@@ -443,6 +469,7 @@ export async function draftWeeklyPosts({
           media ? JSON.stringify(media) : null,
           review.findings,
           review.rights,
+          isMeme ? candidate.template.id : null,
         ],
       );
       const draft = rows[0];
@@ -496,7 +523,7 @@ export async function draftWeeklyPosts({
             // to be answerable from the append-only record.
             ...(isMeme
               ? {
-                  template: candidate.template.id,
+                  template: candidate.template.key,
                   provenance: media.provenance,
                   imageRights: review.rights,
                   imageRightsReason: review.rightsReason,
@@ -516,6 +543,10 @@ export async function draftWeeklyPosts({
       saved.push(draft);
     }
 
+    // The refusals travel with the batch so a caller — the demo, the API — can
+    // show what the generator was not allowed to use, rather than only what it
+    // chose. They are on the audit log either way.
+    saved.templateRejections = templateRejections;
     return saved;
   });
 }

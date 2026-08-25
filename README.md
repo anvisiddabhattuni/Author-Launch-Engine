@@ -21,6 +21,7 @@ Implemented so far:
 - **STORY-010 — PR and Outreach Agent Identifies Speaking Opportunities** (PR and Outreach Agent), fulfilling `REQ-002` and `REQ-004`
 - **STORY-011 — Coordination and Governance Agent Manages Agent Tasks** (Coordination and Governance Agent), fulfilling `REQ-003` and `REQ-004`
 - **STORY-066 — Generate Meme Content for Social Platforms** (AI Content Generation Agent), fulfilling `REQ-001`
+- **STORY-067 — Meme Template Library** (AI Content Generation Agent), fulfilling `REQ-001`
 
 ## What works today
 
@@ -622,6 +623,55 @@ generation starts — the rights check exists to catch what gets past that, not 
 > other check in this codebase escalates to a human because a human is the final authority. This one
 > does not, because on this question they are not.
 
+### STORY-067 — the half of a filter nobody could check
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `meme_templates` table | `015_meme_template_library.sql` |
+| 2. Seed an initial set with recorded provenance | `server/src/db/memeTemplateSeed.js` — 10 templates, 8 usable |
+| 3. Selection service that filters out templates lacking rights | `services/memeLibrary.js` — and logs every refusal |
+| 4. Compose a meme by filling a chosen template | `composeFromTemplate`, `stubProvider.js` slot fillers |
+| 5. Admin view to browse, add and retire | `client/src/pages/TemplatesPage.jsx` |
+
+Added after Ram asked for memes to be *"a significant theme"*, not a single story. STORY-066 shipped
+five templates as a hardcoded array and drew the whole picture at draft time from a colour palette —
+fine for proving the idea, wrong for owning one. An author cannot add a template to a source file,
+cannot retire one that has stopped working, and cannot see what the generator is choosing from.
+
+**A template is now artwork that exists before the caption.** Each row carries a stored image, a
+recorded source, a licence, and **named caption slots** the drafter fills. A slot says what it is
+*for* — `setup` is "the expectation", `turn` is "what the book actually says" — so a template can be
+added without a code change to go with it. STORY-066 had one hardcoded caption function per layout,
+which meant every new format was a code change.
+
+**The refusals are on the audit log, and that is the point of the story.** STORY-066 filtered
+unlicensed templates out with `usableTemplates()`, which returned an array and said nothing. That is
+the exact silence STORY-010 found in the opportunity scanner: a filter deciding what nobody would
+ever see, keeping no record of having decided. The second acceptance clause asks for *"the attempt
+is logged"*, and that clause is what turns "an unlicensed image can never reach a draft" from a claim
+into something you can check. Every template reached for and refused gets its own `meme_template.rejected`
+row with a named reason — never a count.
+
+**Refused at the door, not filtered later.** `addTemplate` rejects a template nobody can licence
+rather than accepting it and hiding it at selection time. A library that holds unusable templates is
+a library whose count means nothing.
+
+**Retiring, not deleting.** A meme drafted last month points at its template with a foreign key, and
+deleting the row would strand the provenance on a post that has already gone out. Retiring sets
+`active = false` with a timestamp and a reason, and the generator stops offering it. Demo stage 84
+retires one and shows the three drafts still pointing at it.
+
+**The rights question is asked in one place.** `assessTemplate` calls STORY-066's `checkImageRights`
+rather than restating its rules — the licence question is the same question whether it is asked of a
+finished draft or of a template about to be chosen, and two copies of it would be free to disagree.
+The hardcoded `memeTemplates.js` was deleted rather than left beside the table it was replaced by.
+
+> **The same lesson, third time, and it keeps being about silence.** STORY-008 found a producer
+> grading its own work. STORY-010 found a scanner discarding leads with no record. This found a
+> filter withholding templates the same way. The pattern underneath all three: **a system's outputs
+> are the part everyone reviews, and its refusals are the part nobody does — so refusals need to be
+> written down more carefully than results, not less.**
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -667,7 +717,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 80 stages with evidence at each one.
+Prints 85 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -731,6 +781,10 @@ Prints 80 stages with evidence at each one.
   the five safety and rights outcomes side by side, an approved meme refused at publication because
   its rights are unresolved, and the meme trail with provenance.
 
+- **Stages 81–85, STORY-067:** the library with every template's slots and licence, the two refusals
+  written to the log rather than swallowed by a filter, an unlicensed template refused at the door,
+  a template retired without stranding the drafts that used it, and the library trail.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -741,7 +795,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-312 tests across 78 suites. For each story the leading suites map one-to-one onto its Gherkin
+332 tests across 82 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -825,6 +879,9 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/scheduled-posts/publish-due` | Publish through mocked adapters |
 | `POST` | `/api/authors/:id/books/:bookId/opportunities/scout` | Scan directories; `{"types":["speaking"]}` narrows the search |
 | `GET` | `/api/authors/:id/opportunity-rejections` | The leads the filter hid, and how close each came |
+| `GET` | `/api/meme-templates` | The library, with the usability verdict on each row |
+| `POST` | `/api/meme-templates` | Add a template (admin; refuses one with no licence) |
+| `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/opportunities?authorId=&type=` | List opportunities |
 | `GET` | `/api/authors/:id/monthly-opportunities` | Monthly cadence proof, by type |
 | `POST` | `/api/authors/:id/books/:bookId/outreach/draft` | Draft outreach messages |
@@ -877,9 +934,14 @@ These are deliberate deferrals, not oversights:
 - Social platform, directory, email and press-list adapters are all mocked; no live credentials are
   involved. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
   tested that an image of this size and type would be accepted by a real platform.
-- Meme images are SVG rendered from a fixed catalogue of five templates. There is no image *model*
-  here and no stock provider — "generated or template-based" from the story is template-based only,
-  and a generated image would need its own provenance shape and its own rights answer.
+- Meme images are SVG **drawn**, not generated. As of STORY-067 the artwork lives in the database as
+  a licensed asset rather than being composed from a palette at draft time, which is what makes
+  replacing it with a photograph a data change rather than a code change — but there is still no
+  image model and no stock provider behind it. A generated image would need its own provenance shape
+  and its own rights answer, and that is its own story.
+- Every template's artwork is house-drawn or press-drawn. Nothing here exercises a third-party
+  licence that is *satisfiable but demanding* — a share-alike term, or an attribution that has to
+  appear in the post text rather than in the provenance record.
 - Brand safety is a readable list of terms plus two structural checks, not a classifier. It will
   miss an off-key joke that uses none of those words, which is the same class of blind spot
   STORY-010 named — inspectable on purpose, because it decides what a person is asked to look at.

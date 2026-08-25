@@ -1,4 +1,7 @@
+import { addTemplate } from '../services/memeLibrary.js';
 import { upsertUser } from '../services/auth.js';
+
+import { TEMPLATE_SEED } from './memeTemplateSeed.js';
 
 import { closePool, query } from './pool.js';
 
@@ -270,6 +273,18 @@ async function seed() {
     );
   }
   console.log(`seeded ${HISTORY.length} prior posts`);
+
+  // The meme template library (STORY-067). `force` because two of these are
+  // deliberately unusable — one licence forbids commercial use and one has no
+  // licence at all — so the rejection path has something real to reject.
+  for (const template of TEMPLATE_SEED) {
+    await addTemplate(template, { force: true });
+  }
+  const usableCount = TEMPLATE_SEED.filter((t) => t.licence?.commercial === true).length;
+  console.log(
+    `seeded ${TEMPLATE_SEED.length} meme templates (${usableCount} licensed for use, ` +
+      `${TEMPLATE_SEED.length - usableCount} deliberately not)`,
+  );
 
   for (const c of PRESS_CONTACTS) {
     await query(

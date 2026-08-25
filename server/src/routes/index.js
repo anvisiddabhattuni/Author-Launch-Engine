@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { assertOwns, authenticate, enforceTenant, tenantParam } from '../middleware/auth.js';
+import { assertOwns, authenticate, enforceTenant, requireRole, tenantParam } from '../middleware/auth.js';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
@@ -34,6 +34,12 @@ import { enqueue, retryJob, tick } from '../jobs/queue.js';
 import { login, publicUser } from '../services/auth.js';
 import { thresholds } from '../services/escalationPolicy.js';
 import { publishDue, scheduleDraft } from '../services/scheduler.js';
+import {
+  addTemplate,
+  assessTemplate,
+  listTemplates,
+  retireTemplate,
+} from '../services/memeLibrary.js';
 import { retrieveThemeGrounding } from '../services/themeRetrieval.js';
 import { MIN_POSTS_FOR_TRAIT, deriveVoice } from '../services/voiceProfile.js';
 
@@ -1000,6 +1006,55 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Meme template library (STORY-067 / REQ-001) ---
+
+/**
+ * Browse the library, with the verdict on each template rather than only the row.
+ *
+ * `usable` is computed here rather than stored, so the answer always reflects
+ * the rule in force now: a licence that stops permitting commercial use is a
+ * change to the row, and every reader should see the consequence immediately.
+ */
+router.get('/meme-templates', asyncRoute(async (_req, res) => {
+  const templates = await listTemplates();
+  res.json(
+    templates.map((template) => {
+      const verdict = assessTemplate(template);
+      return { ...template, usable: verdict.usable, reason: verdict.reason, detail: verdict.detail };
+    }),
+  );
+}));
+
+/**
+ * Adding and retiring are admin-only.
+ *
+ * The library is global rather than per-author: one tenant retiring a template
+ * changes what every other tenant's generator can reach for, which is exactly
+ * the kind of decision the operator role exists for. Browsing stays open.
+ */
+router.post('/meme-templates', requireRole('admin'), asyncRoute(async (req, res) => {
+  const body = req.body ?? {};
+  for (const field of ['key', 'name', 'layout', 'image_ref']) {
+    if (!body[field]) return res.status(400).json({ error: `${field} is required` });
+  }
+  if (!Array.isArray(body.caption_slots) || body.caption_slots.length === 0) {
+    return res.status(400).json({ error: 'caption_slots must be a non-empty array' });
+  }
+  // The service refuses a template nobody can licence; the route does not
+  // second-guess it, and does not offer a way around it either.
+  return res.status(201).json(await addTemplate(body, { user: req.user }));
+}));
+
+router.post('/meme-templates/:key/retire', requireRole('admin'), asyncRoute(async (req, res) => {
+  res.json(
+    await retireTemplate({
+      key: req.params.key,
+      reason: req.body?.reason ?? '',
+      user: req.user,
+    }),
+  );
 }));
 
 /** Put a dead letter back in the queue. The only thing a human does to a job. */

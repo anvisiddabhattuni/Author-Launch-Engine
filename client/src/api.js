@@ -172,6 +172,15 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-067 — the meme template library
+  memeTemplates: () => request('/meme-templates'),
+
+  addMemeTemplate: (template) =>
+    request('/meme-templates', { method: 'POST', body: template }),
+
+  retireMemeTemplate: (key, reason) =>
+    request(`/meme-templates/${key}/retire`, { method: 'POST', body: { reason } }),
+
   // STORY-065 — background worker run health
   jobs: () => request('/jobs'),
   runWorkerCycle: () => request('/jobs/tick', { method: 'POST' }),

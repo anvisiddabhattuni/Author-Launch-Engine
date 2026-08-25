@@ -30,12 +30,11 @@ import {
 } from '../src/services/brandSafety.js';
 import { REASONS, assess } from '../src/services/escalationPolicy.js';
 import {
-  TEMPLATES,
-  provenanceFor,
-  renderMeme,
-  templateById,
-  usableTemplates,
-} from '../src/services/memeTemplates.js';
+  assessTemplate,
+  composeFromTemplate,
+  getTemplate,
+  listTemplates,
+} from '../src/services/memeLibrary.js';
 import { scheduleDraft } from '../src/services/scheduler.js';
 
 const BOOK_THEMES = ['deep work', 'craft', 'attention', 'resilience'];
@@ -56,11 +55,23 @@ const KEY_MESSAGES = {
   resilience: 'Resilience is what remains when motivation has gone home for the evening.',
 };
 
-const mediaFrom = (templateId, altText = 'A caption over a dark field') => ({
+/** Templates are library rows now (STORY-067), so they are loaded once up front. */
+const library = new Map();
+
+const provenanceOf = (template) => ({
+  source: 'template',
+  templateId: template.key,
+  templateName: template.name,
+  origin: template.source,
+  generator: 'composeFromTemplate/svg',
+  licence: template.licence,
+});
+
+const mediaFrom = (key, altText = 'A caption over a dark field') => ({
   imageRef: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
   altText,
-  template: templateId,
-  provenance: provenanceFor(templateById(templateId)),
+  template: key,
+  provenance: provenanceOf(library.get(key)),
 });
 
 let authorId;
@@ -98,6 +109,8 @@ before(async () => {
       [authorId, content],
     );
   }
+
+  for (const template of await listTemplates()) library.set(template.key, template);
 });
 
 after(async () => {
@@ -218,18 +231,18 @@ describe('STORY-066: the same approval gate as text', () => {
 
 describe('STORY-066: brand-safety and image-rights checks', () => {
   it('clears a template whose licence permits commercial use', () => {
-    const result = checkImageRights({ media: mediaFrom('tmpl-single-caption') });
+    const result = checkImageRights({ media: mediaFrom('single-statement') });
     assert.equal(result.rights, RIGHTS.CLEARED);
   });
 
   it('refuses an editorial-only licence outright', () => {
-    const result = checkImageRights({ media: mediaFrom('tmpl-stock-photo') });
+    const result = checkImageRights({ media: mediaFrom('stock-photo-overlay') });
     assert.equal(result.rights, RIGHTS.REFUSED);
     assert.match(result.reason, /does not permit commercial use/);
   });
 
   it('leaves an image with no licence unresolved rather than assuming one', () => {
-    const result = checkImageRights({ media: mediaFrom('tmpl-community-remix') });
+    const result = checkImageRights({ media: mediaFrom('community-remix') });
     assert.equal(result.rights, RIGHTS.UNRESOLVED);
   });
 
@@ -240,7 +253,7 @@ describe('STORY-066: brand-safety and image-rights checks', () => {
   });
 
   it('will not clear a cc-by licence that names nobody to attribute', () => {
-    const media = mediaFrom('tmpl-quote-card');
+    const media = mediaFrom('quote-card');
     media.provenance.licence = { ...media.provenance.licence, attribution: null };
     assert.equal(checkImageRights({ media }).rights, RIGHTS.UNRESOLVED);
   });
@@ -248,7 +261,7 @@ describe('STORY-066: brand-safety and image-rights checks', () => {
   it('flags a caption in a register the author would not use', () => {
     const { findings } = checkBrandSafety({
       caption: 'This one weird trick is a guaranteed cure. Only idiots miss it.',
-      media: mediaFrom('tmpl-single-caption'),
+      media: mediaFrom('single-statement'),
     });
     assert.ok(findings.includes(SAFETY_FINDINGS.UNSAFE_REGISTER));
   });
@@ -256,7 +269,7 @@ describe('STORY-066: brand-safety and image-rights checks', () => {
   it('flags an image nobody can describe', () => {
     const { findings } = checkBrandSafety({
       caption: 'Attention is a muscle.',
-      media: mediaFrom('tmpl-single-caption', ''),
+      media: mediaFrom('single-statement', ''),
     });
     assert.ok(findings.includes(SAFETY_FINDINGS.NO_ALT_TEXT));
   });
@@ -264,7 +277,7 @@ describe('STORY-066: brand-safety and image-rights checks', () => {
   it('passes a grounded caption on a licensed template with no findings', () => {
     const review = reviewMemeCandidate({
       caption: 'Attention is a muscle that adapts to the load you give it.',
-      media: mediaFrom('tmpl-single-caption'),
+      media: mediaFrom('single-statement'),
       maxChars: 280,
     });
     assert.deepEqual(review.findings, []);
@@ -320,51 +333,48 @@ describe('A judgement escalates; a licence refuses', () => {
 });
 
 describe('The template library and its images', () => {
-  it('offers only commercially licensed templates to the drafter', () => {
-    const usable = usableTemplates();
-    assert.ok(usable.length > 0);
+  it('offers only commercially licensed templates to the drafter', async () => {
+    const all = await listTemplates();
+    const usable = all.filter((t) => assessTemplate(t).usable);
+    assert.ok(usable.length >= 8, `${usable.length} usable templates`);
     assert.ok(usable.every((t) => t.licence?.commercial === true));
-    assert.ok(!usable.some((t) => t.id === 'tmpl-stock-photo'), 'editorial-only is not offered');
-    assert.ok(!usable.some((t) => t.id === 'tmpl-community-remix'), 'unlicensed is not offered');
+    assert.ok(!usable.some((t) => t.key === 'stock-photo-overlay'), 'editorial-only is not offered');
+    assert.ok(!usable.some((t) => t.key === 'community-remix'), 'unlicensed is not offered');
   });
 
-  it('shrinks the type to fit rather than dropping lines', () => {
-    // Silent truncation was the first thing the rendered preview exposed: a
-    // long panel simply stopped mid-sentence and nothing said so.
+  it('shrinks the type to fit rather than dropping lines', async () => {
     const long =
       'Resilience is what remains when motivation has gone home for the evening, and the ' +
       'people who finish things are the ones who showed up on the unremarkable Tuesday.';
-    const uri = renderMeme({
-      template: templateById('tmpl-two-panel'),
-      caption: 'On resilience.',
-      panels: ['What everyone thinks resilience is', long],
-      bookTitle: 'The Quiet Craft',
+    const uri = composeFromTemplate({
+      template: await getTemplate('two-panel-contrast'),
+      captions: { setup: 'What everyone thinks resilience is', turn: long },
     });
     const svg = Buffer.from(uri.split(',')[1], 'base64').toString('utf8');
     const lastWord = long.split(' ').pop().replace('.', '');
     assert.ok(svg.includes(lastWord), 'the end of the sentence is in the picture');
   });
 
-  it('renders the same bytes for the same inputs', () => {
-    const args = { template: TEMPLATES[0], caption: 'a | b', bookTitle: 'The Quiet Craft' };
-    assert.equal(renderMeme(args), renderMeme(args));
+  it('renders the same bytes for the same inputs', async () => {
+    const template = await getTemplate('single-statement');
+    const args = { template, captions: { statement: 'Attention is a muscle.' } };
+    assert.equal(composeFromTemplate(args), composeFromTemplate(args));
   });
 
-  it('escapes caption text into the image rather than injecting it', () => {
-    const uri = renderMeme({
-      template: TEMPLATES[1],
-      caption: '<script>alert(1)</script>',
-      bookTitle: 'T',
+  it('escapes caption text into the image rather than injecting it', async () => {
+    const uri = composeFromTemplate({
+      template: await getTemplate('single-statement'),
+      captions: { statement: '<script>alert(1)</script>' },
     });
     const svg = Buffer.from(uri.split(',')[1], 'base64').toString('utf8');
     assert.ok(!svg.includes('<script>'), 'the tag is escaped, not embedded');
     assert.ok(svg.includes('&lt;script&gt;'));
   });
 
-  it('records provenance at generation, carrying the licence with it', () => {
-    const p = provenanceFor(templateById('tmpl-quote-card'));
+  it('records provenance carrying the licence with it', async () => {
+    const p = provenanceOf(await getTemplate('quote-card'));
     assert.equal(p.source, 'template');
-    assert.equal(p.templateId, 'tmpl-quote-card');
+    assert.equal(p.templateId, 'quote-card');
     assert.equal(p.licence.terms, 'cc-by');
   });
 });
