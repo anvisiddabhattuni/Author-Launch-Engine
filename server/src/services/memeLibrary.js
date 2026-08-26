@@ -15,6 +15,7 @@
 import { pool } from '../db/pool.js';
 import { recordAction } from './auditLog.js';
 import { RIGHTS, checkImageRights } from './brandSafety.js';
+import { scoreIdentity } from './visualIdentity.js';
 
 /** The story names the AI Content Generation Agent as the owner. */
 export const ACTOR = 'AIContentGenerationAgent';
@@ -94,7 +95,10 @@ export function assessTemplate(template) {
  *
  * @returns {Promise<{template: object|null, rejected: Array<object>}>}
  */
-export async function selectTemplate({ authorId = null, seed = 0, layout = null }, client = pool) {
+export async function selectTemplate(
+  { authorId = null, seed = 0, layout = null, identity = null },
+  client = pool,
+) {
   const all = await listTemplates({}, client);
   const candidates = layout ? all.filter((t) => t.layout === layout) : all;
 
@@ -136,7 +140,20 @@ export async function selectTemplate({ authorId = null, seed = 0, layout = null 
     return { template: null, rejected };
   }
 
-  const template = usable[Math.abs(seed) % usable.length];
+  // On-identity templates first (STORY-068). The guide shapes what gets *made*,
+  // not only what gets caught — the same both-sides-of-generation pattern as
+  // theme grounding in STORY-009. Without this the library's five off-accent
+  // templates would send most memes to a human for a fault the system chose.
+  let pool_ = usable;
+  let onIdentity = [];
+  if (identity) {
+    onIdentity = usable.filter(
+      (t) => scoreIdentity({ imageRef: t.imageRef, identity }).score >= 1,
+    );
+    if (onIdentity.length > 0) pool_ = onIdentity;
+  }
+
+  const template = pool_[Math.abs(seed) % pool_.length];
 
   await recordAction(
     {
@@ -151,6 +168,8 @@ export async function selectTemplate({ authorId = null, seed = 0, layout = null 
         licence: template.licence,
         source: template.source,
         consideredUsable: usable.length,
+        onIdentity: identity ? onIdentity.length : null,
+        identityVersion: identity?.version ?? null,
         rejected: rejected.length,
       },
     },

@@ -6,6 +6,7 @@ import { assess } from '../services/escalationPolicy.js';
 import { checkVoice, deriveVoice } from '../services/voiceProfile.js';
 import { RIGHTS, reviewMemeCandidate } from '../services/brandSafety.js';
 import { composeFromTemplate, selectTemplate } from '../services/memeLibrary.js';
+import { deriveIdentity, getActiveIdentity, saveIdentity, scoreIdentity } from '../services/visualIdentity.js';
 import {
   ACTOR as CONTENT_AGENT,
   alignToThemes,
@@ -332,6 +333,24 @@ export async function draftWeeklyPosts({
       client,
     );
 
+    // The visual identity in force right now (STORY-068). Derived on first use
+    // rather than requiring onboarding to have run: a book with no guide yet
+    // gets one inferred from its own words, recorded as an inference, and the
+    // author revises it from there.
+    let identity = memeCount > 0 ? await getActiveIdentity({ bookId }, client) : null;
+    if (memeCount > 0 && !identity) {
+      identity = await saveIdentity(
+        {
+          authorId,
+          bookId,
+          guide: deriveIdentity({ book, voiceProfile: author.voice_profile }),
+          createdBy: 'system',
+          note: 'derived on first meme',
+        },
+        client,
+      );
+    }
+
     // Templates come from the library now (STORY-067), chosen one per meme with
     // every refusal written to the audit log. Selection happens here rather than
     // inside the provider because it is a decision with a reason, and the reason
@@ -340,7 +359,7 @@ export async function draftWeeklyPosts({
     let templateRejections = [];
     for (let i = 0; i < memeCount; i += 1) {
       const { template, rejected } = await selectTemplate(
-        { authorId, seed: Number(`${book.id}${i}`) },
+        { authorId, seed: Number(`${book.id}${i}`), identity },
         client,
       );
       if (i === 0) templateRejections = rejected;
@@ -429,6 +448,14 @@ export async function draftWeeklyPosts({
         ? reviewMemeCandidate({ caption: candidate.content, media, maxChars })
         : { findings: [], rights: RIGHTS.NOT_APPLICABLE, rightsReason: '', attribution: null };
 
+      // Judged against the guide it was generated under, and against that
+      // version specifically — a revision applies to later memes and must not
+      // reinterpret this one.
+      const identityCheck =
+        isMeme && identity
+          ? scoreIdentity({ imageRef: media.imageRef, caption: candidate.content, identity })
+          : null;
+
       // Four independent reasons to escalate. Theme alignment and voice are
       // separate floors rather than blended into confidence, because REQ-001
       // asks for both specifically: copy that argues the book perfectly in a
@@ -439,14 +466,16 @@ export async function draftWeeklyPosts({
         themeAlignment,
         voice: voiceScore,
         safetyFindings: review.findings,
+        identity: identityCheck ? identityCheck.score : null,
       });
 
       const { rows } = await client.query(
         `INSERT INTO drafts
            (author_id, book_id, platform, content, themes_used, confidence, rationale, status,
             week_of, provider, theme_alignment, voice_score, voice_violations, grounded_passages,
-            format, media, safety_findings, image_rights, meme_template_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            format, media, safety_findings, image_rights, meme_template_id,
+            identity_version, identity_score, identity_findings)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
          RETURNING *`,
         [
           authorId,
@@ -470,6 +499,9 @@ export async function draftWeeklyPosts({
           review.findings,
           review.rights,
           isMeme ? candidate.template.id : null,
+          identityCheck ? identity.version : null,
+          identityCheck ? identityCheck.score : null,
+          identityCheck ? identityCheck.findings : [],
         ],
       );
       const draft = rows[0];
@@ -529,6 +561,10 @@ export async function draftWeeklyPosts({
                   imageRightsReason: review.rightsReason,
                   safetyFindings: review.findings,
                   publishable: review.publishable,
+                  identityVersion: identity?.version ?? null,
+                  identityScore: identityCheck?.score ?? null,
+                  identityFindings: identityCheck?.findings ?? [],
+                  identitySummary: identityCheck?.summary ?? '',
                 }
               : {}),
             reason:

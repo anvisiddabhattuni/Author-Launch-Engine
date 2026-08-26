@@ -24,6 +24,11 @@ export const config = {
   // criterion is "at least one meme candidate is produced per batch", so one is
   // a floor the drafter has to meet rather than an average it may miss.
   minMemesPerBatch: number(process.env.MIN_MEMES_PER_BATCH, 1),
+  // How close a meme has to sit to the book's recorded visual identity
+  // (STORY-068). Set so a single wrong accent is caught: the library's eight
+  // licensed templates carry five different accents, and an identity that
+  // tolerated that would not be an identity.
+  minIdentityMatch: number(process.env.MIN_IDENTITY_MATCH, 0.75),
   relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
   // How well a listing has to fit the *author* — as opposed to the book — to be
   // worth a human's attention (STORY-010). Its own floor because it is an

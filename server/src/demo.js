@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011, STORY-066 and STORY-067), printed step by step.
+ * STORY-011, and STORY-066 to STORY-068), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -41,6 +41,12 @@ import {
   retireTemplate,
   selectTemplate,
 } from './services/memeLibrary.js';
+import {
+  getActiveIdentity,
+  listVersions,
+  saveIdentity,
+  scoreIdentity,
+} from './services/visualIdentity.js';
 import { searchAllDirectories } from './services/directories.js';
 import { scoreOpportunity } from './services/keywordAnalysis.js';
 import { deriveVoice } from './services/voiceProfile.js';
@@ -1648,9 +1654,102 @@ for (const entry of libLog
 console.log('\nEvery template added, selected, refused and retired. "An unlicensed image can');
 console.log('never reach a draft" is now something you can check rather than take on trust.');
 
+
+// ── STORY-068 ────────────────────────────────────────────────────────────────
+// A running visual identity the memes are generated against and scored against.
+
+rule('86. Eight licensed templates, five accent colours');
+const identityGuide = await getActiveIdentity({ bookId: book.id });
+console.log(
+  `identity v${identityGuide.version}: ground ${identityGuide.palette.ground} · ` +
+    `accent ${identityGuide.palette.accent} · ${identityGuide.palette.mode}`,
+);
+console.log(`derived: ${identityGuide.derivedFrom.confidence}\n`);
+console.log('template                  accent(s)          score  verdict');
+for (const t of (await listTemplates()).filter((x) => x.licence?.commercial === true)) {
+  const scored = scoreIdentity({ imageRef: t.imageRef, caption: 'Attention is a muscle.', identity: identityGuide });
+  const accents = [...new Set((Buffer.from(t.imageRef.split(',')[1], 'base64').toString('utf8').match(/#[0-9a-f]{6}/gi) ?? []))]
+    .filter((h) => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+      return Math.max(r, g, b) - Math.min(r, g, b) >= 40;
+    });
+  console.log(
+    `  ${t.key.padEnd(24)} ${(accents.join(' ') || '—').padEnd(18)} ` +
+      `${String(scored.score).padEnd(6)} ${scored.findings.join(',') || 'on identity'}`,
+  );
+}
+console.log('\nSTORY-067 gave every one of these a licence and a slot structure and nothing');
+console.log('more. Every template legal, on-message and reusable. Together, a feed.');
+
+rule('87. The guide shapes what gets made, not only what gets caught');
+const chosen = await selectTemplate({ authorId: author.id, seed: 7, identity: identityGuide });
+console.log(`chose ${chosen.template.key} — on identity, so nothing needed a human`);
+console.log('\nSelection prefers on-identity templates and the score gates what slips past:');
+console.log('the same evidence on both sides of generation that STORY-009 used for themes.');
+console.log('Without it the library\'s off-accent templates would send most memes to a');
+console.log('person for a fault the system itself chose.');
+
+rule('88. The author disagrees, and the guide is versioned');
+const revised = await saveIdentity({
+  authorId: author.id,
+  bookId: book.id,
+  guide: {
+    palette: { ...identityGuide.palette, accent: '#5fbf95' },
+    typography: identityGuide.typography,
+    tone_words: identityGuide.toneWords,
+    do_not_use: identityGuide.doNotUse,
+    derived_from: { ...identityGuide.derivedFrom, confidence: 'set by the author' },
+  },
+  createdBy: 'Anvi Siddabhattuni',
+  note: 'the cover is green; blue was inferred from the text',
+});
+console.log(`v${revised.version} saved by ${revised.createdBy} — "${revised.note}"`);
+const afterRevision = await selectTemplate({ authorId: author.id, seed: 7, identity: revised });
+console.log(`the same seed now chooses ${afterRevision.template.key}, because the accent moved`);
+
+rule('89. A revision applies to later memes and reinterprets no earlier one');
+const memeAfter = await draftWeeklyPosts({
+  authorId: author.id,
+  bookId: book.id,
+  count: 1,
+  weekOf: weekStart(new Date(Date.now() + 28 * 86400000)),
+});
+const newMeme = memeAfter.find((d) => d.format === 'meme');
+console.log(`new meme judged against v${newMeme.identity_version}, score ${newMeme.identity_score}`);
+const { rows: byVersion } = await query(
+  `SELECT identity_version v, COUNT(*)::int n, ARRAY_AGG(DISTINCT media->>'template') t
+     FROM drafts WHERE format = 'meme' AND identity_version IS NOT NULL
+    GROUP BY identity_version ORDER BY identity_version`,
+);
+for (const r of byVersion) {
+  console.log(`  v${r.v}: ${r.n} meme(s) — ${r.t.join(', ')}`);
+}
+console.log('\nThe rules a human approved something under do not change underneath them.');
+console.log('Same instinct as retiring a template instead of deleting it (STORY-067).');
+
+rule('90. The identity trail');
+for (const v of await listVersions({ bookId: book.id })) {
+  console.log(
+    `  v${v.version}${v.active ? ' (active)' : '        '}  ${v.palette.accent}  ` +
+      `${String(v.createdBy).padEnd(22)} ${v.note || v.derivedFrom.confidence}`,
+  );
+}
+const identityLog = await listAuditLog({ authorId: author.id, limit: 400 });
+console.log();
+for (const entry of identityLog
+  .slice()
+  .reverse()
+  .filter((e) => e.action.startsWith('visual_identity.'))) {
+  const m = entry.metadata ?? {};
+  console.log(
+    `${entry.created_at.toISOString()}  ${entry.action.padEnd(26)} v${m.version} ` +
+      `${m.palette?.accent ?? ''} by ${m.createdBy}`,
+  );
+}
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-067 complete — the templates are a library an author owns, and every one');
-console.log('the generator was refused is on the record\n');
+console.log('\nSTORY-068 complete — the book has a look, the memes are made against it and');
+console.log('measured against it, and the author can change their mind without rewriting\n');
 await closePool();
 

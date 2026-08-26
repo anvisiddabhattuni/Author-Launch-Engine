@@ -14,8 +14,10 @@ import { api } from '../api.js';
  * story on the same point about opportunities: an offered template is visible
  * and can be judged wrong, and a withheld one used to leave no trace at all.
  */
-export function TemplatesPage({ user }) {
+export function TemplatesPage({ user, author, book }) {
   const [templates, setTemplates] = useState([]);
+  const [identity, setIdentity] = useState(null);
+  const [edit, setEdit] = useState(null);
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [reasons, setReasons] = useState({});
@@ -24,7 +26,16 @@ export function TemplatesPage({ user }) {
 
   const refresh = useCallback(async () => {
     setTemplates(await api.memeTemplates());
-  }, []);
+    if (author?.id && book?.id) {
+      const guide = await api.visualIdentity(author.id, book.id);
+      setIdentity(guide);
+      setEdit(
+        guide.active
+          ? { ...guide.active.palette, doNotUse: guide.active.doNotUse.join('\n'), note: '' }
+          : null,
+      );
+    }
+  }, [author?.id, book?.id]);
 
   useEffect(() => {
     refresh().catch((e) => setStatus({ kind: 'error', message: e.message }));
@@ -44,12 +55,146 @@ export function TemplatesPage({ user }) {
     }
   }
 
+  async function revise() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const saved = await api.reviseVisualIdentity(author.id, book.id, {
+        palette: { ground: edit.ground, ink: edit.ink, accent: edit.accent, mode: edit.mode },
+        doNotUse: edit.doNotUse.split('\n').map((r) => r.trim()).filter(Boolean),
+        note: edit.note,
+      });
+      setStatus({
+        kind: 'ok',
+        message: `Saved as version ${saved.version}. Memes drafted from now on are judged against it; earlier ones keep the version they were made under.`,
+      });
+      await refresh();
+    } catch (error) {
+      setStatus({ kind: 'error', message: error.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const usable = templates.filter((t) => t.usable);
   const withheld = templates.filter((t) => !t.usable);
+  const active = identity?.active;
 
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
+
+      {active && edit && (
+        <div className="card">
+          <h2>Visual identity — version {active.version}</h2>
+          <p className="hint">
+            What every meme is generated against and scored against, so the output looks like one
+            book rather than one feed. {active.derivedFrom?.confidence}. Editing writes a new
+            version: later memes are judged against it, and memes already drafted keep pointing at
+            the version they were made to satisfy.
+          </p>
+
+          <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            {['ground', 'ink', 'accent'].map((key) => (
+              <div key={key}>
+                <label htmlFor={`c-${key}`}>{key}</label>
+                <div className="row" style={{ alignItems: 'center' }}>
+                  <span
+                    style={{
+                      width: 26,
+                      height: 26,
+                      borderRadius: 6,
+                      border: '1px solid #333',
+                      background: edit[key],
+                      display: 'inline-block',
+                    }}
+                  />
+                  <input
+                    id={`c-${key}`}
+                    value={edit[key]}
+                    onChange={(e) => setEdit({ ...edit, [key]: e.target.value })}
+                    style={{ width: 120 }}
+                  />
+                </div>
+              </div>
+            ))}
+            <div>
+              <label htmlFor="c-mode">mode</label>
+              <select
+                id="c-mode"
+                value={edit.mode}
+                onChange={(e) => setEdit({ ...edit, mode: e.target.value })}
+              >
+                <option value="dark">dark</option>
+                <option value="light">light</option>
+              </select>
+            </div>
+          </div>
+
+          <label htmlFor="dnu" style={{ marginTop: 12 }}>
+            Do not use — one rule per line. These are the half with teeth: a meme breaking one is
+            withheld and sent to you.
+          </label>
+          <textarea
+            id="dnu"
+            rows={4}
+            value={edit.doNotUse}
+            onChange={(e) => setEdit({ ...edit, doNotUse: e.target.value })}
+          />
+
+          <input
+            placeholder="Why are you changing it? (goes on the audit log)"
+            value={edit.note}
+            onChange={(e) => setEdit({ ...edit, note: e.target.value })}
+            style={{ marginTop: 8 }}
+          />
+
+          <div className="row" style={{ marginTop: 12 }}>
+            <button onClick={revise} disabled={busy}>
+              Save as version {active.version + 1}
+            </button>
+          </div>
+
+          <h3>History</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Version</th>
+                <th>Accent</th>
+                <th>Mode</th>
+                <th>Set by</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {identity.versions.map((v) => (
+                <tr key={v.version}>
+                  <td className="mono">
+                    v{v.version}
+                    {v.active && <span className="pill approved" style={{ marginLeft: 6 }}>active</span>}
+                  </td>
+                  <td className="mono">
+                    <span
+                      style={{
+                        width: 12,
+                        height: 12,
+                        borderRadius: 3,
+                        background: v.palette.accent,
+                        display: 'inline-block',
+                        marginRight: 6,
+                      }}
+                    />
+                    {v.palette.accent}
+                  </td>
+                  <td className="mono">{v.palette.mode}</td>
+                  <td>{v.createdBy}</td>
+                  <td>{v.note || <span className="mono">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="card">
         <h2>Withheld from the generator ({withheld.length})</h2>

@@ -22,6 +22,7 @@ Implemented so far:
 - **STORY-011 — Coordination and Governance Agent Manages Agent Tasks** (Coordination and Governance Agent), fulfilling `REQ-003` and `REQ-004`
 - **STORY-066 — Generate Meme Content for Social Platforms** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-067 — Meme Template Library** (AI Content Generation Agent), fulfilling `REQ-001`
+- **STORY-068 — Book Visual Identity Guide** (AI Content Generation Agent), fulfilling `REQ-001`
 
 ## What works today
 
@@ -672,6 +673,57 @@ The hardcoded `memeTemplates.js` was deleted rather than left beside the table i
 > are the part everyone reviews, and its refusals are the part nobody does — so refusals need to be
 > written down more carefully than results, not less.**
 
+### STORY-068 — eight licensed templates, five accent colours
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `visual_identity` table, versioned per tenant | `016_visual_identity.sql` |
+| 2. Derive an initial guide from themes and cover art | `services/visualIdentity.js` — `deriveIdentity` |
+| 3. Expose it in the React UI for human editing | `client/src/pages/TemplatesPage.jsx` |
+| 4. Content agent reads the active version at generation | `contentDraftingAgent.js`, `selectTemplate` |
+| 5. Score each candidate against the guide and gate on it | `scoreIdentity`, `escalationPolicy` |
+
+STORY-067 gave every template a licence and a slot structure, and nothing more. Reading the finished
+library back is what made the gap concrete: **eight licensed templates carrying five different accent
+colours** — blue, green, amber, purple, red — and one of them light while the rest are dark. Every
+template legal, on-message and reusable. Together they are a feed rather than a book. Demo stage 86
+scores all eight against the guide; three fit.
+
+**The guide is derived from evidence, and says when it is guessing.** With cover art the palette is
+*observed*; without it, inferred from the book's own words and recorded as `inferred from the book's
+words — no cover art supplied`. Presenting an inference with the confidence of an observation is the
+failure STORY-009 found in the hand-written voice profile, and the UI shows which it is. The
+do-not-use rules inherit whatever the author's voice profile already avoids, so the verbal identity
+and the visual one cannot contradict each other.
+
+**Tone words describe; do-not-use rules refuse.** The same split as safety and rights in STORY-066.
+A guide that only described would be a claim nothing verifies.
+
+**The guide shapes what gets made, not only what gets caught.** Selection prefers on-identity
+templates and the score gates whatever slips past — the same evidence on both sides of generation
+that STORY-009 used for themes. Without that, the library's five off-accent templates would send most
+memes to a human for a fault the system itself chose.
+
+**Versioned, because a revision must not reinterpret what came before.** The story asks that an
+author's edit apply to *later* memes; the half it does not say is that memes already judged are
+already judged. A revision writes a new version and retires the previous one, drafts store the
+version they were scored against, and a database partial index enforces exactly one active version
+per book — "the rules in force" is a question that must have one answer. Demo stage 88 changes the
+accent to green and the same seed picks a different template; stage 89 shows the older memes still
+pointing at v1.
+
+**Identity escalates; rights refuse.** A drifting meme reaches a human who may approve it anyway —
+the author is the authority on what their book looks like. That is deliberately unlike STORY-066's
+image rights, which no approval can override, because they are not the authority on whether we hold
+a licence.
+
+> **The check that could not fail, found by running it against real data.** The first version of the
+> palette check only looked at large filled rectangles, and every off-brand template scored a clean
+> 1.00 — because a template's accent is almost always a hairline rule, a stroke or a line, all far
+> below any sensible area threshold. **Size is not what makes a colour deliberate; saturation is.**
+> The check existed, passed its own tests, and measured nothing until it was pointed at the library
+> it was written for.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -717,7 +769,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 85 stages with evidence at each one.
+Prints 90 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -785,6 +837,11 @@ Prints 85 stages with evidence at each one.
   written to the log rather than swallowed by a filter, an unlicensed template refused at the door,
   a template retired without stranding the drafts that used it, and the library trail.
 
+- **Stages 86–90, STORY-068:** all eight licensed templates scored against the guide with three
+  fitting, selection preferring an on-identity template, the author revising the accent and the same
+  seed choosing differently, older memes still pointing at the version they were judged under, and
+  the identity trail.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -795,7 +852,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-332 tests across 82 suites. For each story the leading suites map one-to-one onto its Gherkin
+355 tests across 86 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -818,6 +875,7 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `SOCIAL_MESSAGE_TERM_TARGET` | `3` | The same target's floor for a social post; the bar scales with the post's own length |
 | `MIN_VOICE_MATCH` | `0.5` | Below this match against the author's previous posts, a social draft escalates |
 | `MIN_MEMES_PER_BATCH` | `1` | Meme candidates every batch of social content must include |
+| `MIN_IDENTITY_MATCH` | `0.75` | Below this fit against the book's visual identity, a meme escalates |
 | `EXPERTISE_THRESHOLD` | `0.5` | Below this fit against the *author*, a listing does not qualify on expertise |
 | `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
 | `JWT_SECRET` | dev-only default | Session signing key. The server refuses to start with the default when `NODE_ENV=production` |
@@ -882,6 +940,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `GET` | `/api/meme-templates` | The library, with the usability verdict on each row |
 | `POST` | `/api/meme-templates` | Add a template (admin; refuses one with no licence) |
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
+| `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
+| `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
 | `GET` | `/api/opportunities?authorId=&type=` | List opportunities |
 | `GET` | `/api/authors/:id/monthly-opportunities` | Monthly cadence proof, by type |
 | `POST` | `/api/authors/:id/books/:bookId/outreach/draft` | Draft outreach messages |
@@ -942,6 +1002,15 @@ These are deliberate deferrals, not oversights:
 - Every template's artwork is house-drawn or press-drawn. Nothing here exercises a third-party
   licence that is *satisfiable but demanding* — a share-alike term, or an attribution that has to
   appear in the post text rather than in the provenance record.
+- The visual identity checks colour and forbidden terms. It says nothing about composition, weight,
+  spacing or whether the typography it records is the typography the artwork actually uses — a
+  template could declare Georgia, render in something else, and score a clean 1.00.
+- `MIN_IDENTITY_MATCH` is one number over a weighted sum. A meme with the right accent in the wrong
+  mode and a meme with two accents in the right mode can land on the same score for very different
+  reasons; the findings say which, but the threshold cannot be tuned per finding.
+- Nothing re-scores existing drafts when the guide is revised. That is deliberate — a revision must
+  not reinterpret a decision a human already made — but it does mean a queue can hold memes judged
+  under three different versions with nothing surfacing that fact to the reviewer.
 - Brand safety is a readable list of terms plus two structural checks, not a classifier. It will
   miss an off-key joke that uses none of those words, which is the same class of blind spot
   STORY-010 named — inspectable on purpose, because it decides what a person is asked to look at.

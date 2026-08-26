@@ -172,6 +172,13 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-068 — the book's versioned visual identity
+  visualIdentity: (authorId, bookId) =>
+    request(`/authors/${authorId}/books/${bookId}/visual-identity`),
+
+  reviseVisualIdentity: (authorId, bookId, body) =>
+    request(`/authors/${authorId}/books/${bookId}/visual-identity`, { method: 'POST', body }),
+
   // STORY-067 — the meme template library
   memeTemplates: () => request('/meme-templates'),
 

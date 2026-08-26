@@ -19,6 +19,7 @@ export const REASONS = {
   THEME_ALIGNMENT: 'theme_alignment',
   VOICE: 'voice',
   BRAND_SAFETY: 'brand_safety',
+  IDENTITY: 'visual_identity',
 };
 
 /** Statuses a human is still able to act on, and so a monitor may still change. */
@@ -42,6 +43,7 @@ export function assess({
   themeAlignment = null,
   voice = null,
   safetyFindings = [],
+  identity = null,
 }) {
   const reasons = [];
 
@@ -61,6 +63,12 @@ export function assess({
   if (safetyFindings.length > 0) {
     reasons.push(REASONS.BRAND_SAFETY);
   }
+  // Drifting from the book's recorded look is a judgement the author can
+  // overrule — they may want this one off-brand — so it escalates rather than
+  // blocking, exactly like brand safety and unlike image rights (STORY-068).
+  if (identity !== null && Number(identity) < config.minIdentityMatch) {
+    reasons.push(REASONS.IDENTITY);
+  }
 
   return {
     status: reasons.length > 0 ? 'escalated' : 'pending_approval',
@@ -73,4 +81,5 @@ export const thresholds = () => ({
   confidence: config.confidenceEscalationThreshold,
   themeAlignment: config.minThemeAlignment,
   voice: config.minVoiceMatch,
+  identity: config.minIdentityMatch,
 });

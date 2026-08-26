@@ -123,7 +123,10 @@ export function App() {
           <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/press" element={<PressPage author={author} book={book} />} />
           <Route path="/worker" element={<WorkerPage />} />
-          <Route path="/templates" element={<TemplatesPage user={user} />} />
+          <Route
+            path="/templates"
+            element={<TemplatesPage user={user} author={author} book={book} />}
+          />
           <Route path="/audit" element={<AuditPage author={author} />} />
         </Routes>
       )}

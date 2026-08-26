@@ -41,6 +41,12 @@ import {
   retireTemplate,
 } from '../services/memeLibrary.js';
 import { retrieveThemeGrounding } from '../services/themeRetrieval.js';
+import {
+  deriveIdentity,
+  getActiveIdentity,
+  listVersions,
+  saveIdentity,
+} from '../services/visualIdentity.js';
 import { MIN_POSTS_FOR_TRAIT, deriveVoice } from '../services/voiceProfile.js';
 
 export const router = Router();
@@ -1006,6 +1012,74 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Visual identity (STORY-068 / REQ-001) ---
+
+/**
+ * The guide in force, and every version behind it.
+ *
+ * History is returned alongside the active version rather than on its own
+ * endpoint, because the useful question is almost always "what changed and who
+ * changed it" rather than "what is version 2".
+ */
+router.get('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async (req, res) => {
+  const bookId = Number(req.params.bookId);
+  const versions = await listVersions({ bookId });
+  res.json({
+    active: versions.find((v) => v.active) ?? null,
+    versions,
+    floor: config.minIdentityMatch,
+  });
+}));
+
+/**
+ * Revise the guide. Always a new version, never an edit in place.
+ *
+ * The author is the authority on what their book looks like, so this takes
+ * whatever they send rather than re-deriving — but it records that a human set
+ * it, which is the difference between a guide with evidence behind it and one
+ * with an opinion behind it, and the UI shows which.
+ */
+router.post('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async (req, res) => {
+  const authorId = Number(req.params.authorId);
+  const bookId = Number(req.params.bookId);
+  const current = await getActiveIdentity({ bookId });
+
+  const { rows: books } = await query('SELECT * FROM books WHERE id = $1 AND author_id = $2', [
+    bookId,
+    authorId,
+  ]);
+  if (books.length === 0) return res.status(404).json({ error: 'Book not found for this author' });
+
+  const body = req.body ?? {};
+  const base = current ?? deriveIdentity({ book: books[0] });
+
+  const palette = { ...(current?.palette ?? base.palette), ...(body.palette ?? {}) };
+  for (const key of ['ground', 'ink', 'accent']) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(String(palette[key] ?? ''))) {
+      return res.status(400).json({ error: `palette.${key} must be a #rrggbb colour` });
+    }
+  }
+
+  return res.status(201).json(
+    await saveIdentity({
+      authorId,
+      bookId,
+      guide: {
+        palette,
+        typography: body.typography ?? current?.typography ?? base.typography,
+        tone_words: body.toneWords ?? current?.toneWords ?? base.tone_words,
+        do_not_use: body.doNotUse ?? current?.doNotUse ?? base.do_not_use,
+        derived_from: {
+          ...(current?.derivedFrom ?? base.derived_from),
+          confidence: 'set by the author',
+        },
+      },
+      createdBy: req.user?.name ?? 'author',
+      note: body.note ?? '',
+    }),
+  );
 }));
 
 // --- Meme template library (STORY-067 / REQ-001) ---
