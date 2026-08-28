@@ -2,6 +2,7 @@ import { query } from '../db/pool.js';
 import { draftApproachingKits } from '../services/milestoneWatcher.js';
 import { sendOutreachMessage } from '../services/outreachSender.js';
 import { notifyPendingReviews, notifyRaisedEscalations } from '../services/reviewNotifier.js';
+import { notifyAwaitingApproval } from '../agents/approvalNotificationAgent.js';
 import { monitorPressMaterials } from '../agents/trustMonitoringAgent.js';
 import { publishDue } from '../services/scheduler.js';
 
@@ -42,6 +43,11 @@ export const RECURRING = [
     kind: 'trust.monitor_escalations',
     scope: 'author',
     describe: (job) => `re-check escalation decisions for author ${job.author_id}`,
+  },
+  {
+    kind: 'approvals.notify_waiting',
+    scope: 'author',
+    describe: (job) => `tell reviewers what is waiting on them for author ${job.author_id}`,
   },
 ];
 
@@ -87,6 +93,24 @@ export const HANDLERS = {
       confirmed: scan.confirmed.length,
       producerStricter: scan.producerStricter.length,
       notified: alerts.notified.length,
+    };
+  },
+
+  /**
+   * STORY-012's approval notifier.
+   *
+   * Everything a human has to decide except press kits, which STORY-007 already
+   * mails about — two agents emailing about one kit is the drift STORY-008
+   * removed. One digest per reviewer per sweep, and an item announced once is
+   * never announced again however often this runs.
+   */
+  'approvals.notify_waiting': async ({ job }) => {
+    const result = await notifyAwaitingApproval({ authorId: Number(job.author_id) });
+    return {
+      notified: result.notified.length,
+      waiting: result.queue.total,
+      alreadyKnown: result.skipped.length,
+      unreachable: result.unreachable,
     };
   },
 

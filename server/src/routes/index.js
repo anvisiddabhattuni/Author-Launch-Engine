@@ -3,6 +3,10 @@ import { Router } from 'express';
 import { assertOwns, authenticate, enforceTenant, requireRole, tenantParam } from '../middleware/auth.js';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
+import {
+  findAwaitingApproval,
+  notifyAwaitingApproval,
+} from '../agents/approvalNotificationAgent.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
@@ -1019,6 +1023,30 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     pollSeconds: config.workerPollSeconds,
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
+  });
+}));
+
+// --- Everything waiting on a human (STORY-012 / REQ-005) ---
+
+/**
+ * One queue across all four things a human decides.
+ *
+ * A read-model, not a table: "what is waiting" is a question the status columns
+ * already answer, and a second copy of that state would be free to disagree
+ * with them.
+ */
+router.get('/authors/:authorId/awaiting-approval', asyncRoute(async (req, res) => {
+  res.json(await findAwaitingApproval({ authorId: Number(req.params.authorId) }));
+}));
+
+/** Runs the notification sweep on demand. Tells people; decides nothing. */
+router.post('/authors/:authorId/awaiting-approval/notify', asyncRoute(async (req, res) => {
+  const result = await notifyAwaitingApproval({ authorId: Number(req.params.authorId) });
+  res.status(201).json({
+    notified: result.notified,
+    alreadyKnown: result.skipped.length,
+    unreachable: result.unreachable,
+    waiting: result.queue.total,
   });
 }));
 

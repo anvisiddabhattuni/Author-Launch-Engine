@@ -172,6 +172,12 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-012 — one queue across everything a human has to decide
+  awaitingApproval: (authorId) => request(`/authors/${authorId}/awaiting-approval`),
+
+  notifyAwaiting: (authorId) =>
+    request(`/authors/${authorId}/awaiting-approval/notify`, { method: 'POST' }),
+
   // STORY-069 — meme vs text, and the mix proposals that follow from it
   formatPerformance: (authorId) => request(`/authors/${authorId}/format-performance`),
 

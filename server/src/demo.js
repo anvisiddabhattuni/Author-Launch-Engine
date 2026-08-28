@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011, and STORY-066 to STORY-069), printed step by step.
+ * STORY-011, STORY-012 and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -13,6 +13,10 @@ import {
   recommendMix,
 } from './agents/trustMonitoringAgent.js';
 import { collectEngagement, compareFormats } from './services/engagement.js';
+import {
+  findAwaitingApproval,
+  notifyAwaitingApproval,
+} from './agents/approvalNotificationAgent.js';
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
@@ -1907,9 +1911,100 @@ for (const entry of perfLog
 console.log('\n"formatEffect" is on the log because a reader of these numbers is entitled to');
 console.log('know they came from a mock, and whether that mock had a thumb on the scale.');
 
+
+// ── STORY-012 ────────────────────────────────────────────────────────────────
+// The Approval and Notification Agent. Half of this shipped with STORY-001; the
+// other half is the word "and".
+
+rule('96. Held, in every case — that half has worked since STORY-001');
+const approvalQueue = await findAwaitingApproval({ authorId: author.id });
+console.log(`${approvalQueue.total} items are waiting on a human right now, ${approvalQueue.escalated} of them escalated\n`);
+for (const [kind, n] of Object.entries(approvalQueue.byKind)) {
+  console.log(`  ${String(n).padStart(3)} ${kind}`);
+}
+console.log('\nFour kinds of work, one gate. scheduleDraft, sendOutreachMessage and');
+console.log('distributePressKit each refuse unapproved work, and the gate has grown to four');
+console.log('targets without being forked once.');
+
+const notifiableNow = approvalQueue.items.filter((i) => i.notifiable).length;
+rule(`97. And nobody could ever be told about ${notifiableNow} of them`);
+console.log('Until this story the notifications table could not reference a draft. Its own');
+console.log('constraint said so:\n');
+console.log("    CHECK (num_nonnulls(pr_kit_id) = 1)\n");
+console.log('Not a bug in the notifier — an absence in the schema. A social post could sit');
+console.log('in pending_approval for a week and there was no mechanism by which anyone');
+console.log('could be told.');
+const { rows: reviewerCount } = await query(
+  'SELECT COUNT(*)::int n FROM reviewers WHERE author_id = $1 AND active',
+  [author.id],
+);
+console.log(`\nactive reviewers configured: ${reviewerCount[0].n}`);
+
+rule('98. Work waiting, and nobody to tell');
+await query('UPDATE reviewers SET active = FALSE WHERE author_id = $1', [author.id]);
+const unreachable = await notifyAwaitingApproval({ authorId: author.id });
+console.log(`unreachable: ${unreachable.unreachable} — ${unreachable.queue.total} items waiting`);
+console.log('\nRecorded on the audit log rather than passed over in silence. A queue with');
+console.log('nobody to tell is a different state from an empty queue, and STORY-007 made');
+console.log('that distinction for press kits; it is no less true here.');
+
+rule('99. One digest, not one email per item');
+await query('UPDATE reviewers SET active = TRUE WHERE author_id = $1', [author.id]);
+const firstSweep = await notifyAwaitingApproval({ authorId: author.id });
+for (const n of firstSweep.notified) {
+  console.log(`  ${n.reviewer.padEnd(34)} ${n.items} items in one email  (${n.externalId ?? n.failed})`);
+}
+if (firstSweep.skipped.length > 0) {
+  console.log(
+    `\n  (${firstSweep.skipped.length} item/reviewer pairs were already announced — the background ` +
+      'worker\n   ran this same sweep earlier in the demo, which is REQ-004 doing its job)',
+  );
+}
+const { rows: digest } = await query(
+  `SELECT subject, body FROM notifications
+    WHERE author_id = $1 AND draft_id IS NOT NULL ORDER BY id DESC LIMIT 1`,
+  [author.id],
+);
+if (digest[0]) {
+  console.log(`\n  subject: ${digest[0].subject}`);
+  console.log(digest[0].body.split('\n').slice(0, 8).map((l) => `  ${l}`).join('\n'));
+}
+console.log('\nSTORY-007 mails once per press kit, which is right for a kit: they are rare and');
+console.log('each is its own decision. Social drafts arrive four at a time every week, and');
+console.log('that model there is four emails a week — which a reviewer stops reading.');
+
+rule('100. Told once, ever');
+const secondSweep = await notifyAwaitingApproval({ authorId: author.id });
+console.log(`second sweep → notified ${secondSweep.notified.length}, already known ${secondSweep.skipped.length}`);
+const { rows: statuses } = await query(
+  `SELECT status, COUNT(*)::int n FROM drafts WHERE author_id = $1 GROUP BY status ORDER BY status`,
+  [author.id],
+);
+console.log(`draft statuses unchanged by notifying: ${statuses.map((r) => `${r.status} ${r.n}`).join(' · ')}`);
+console.log('\nRows are per item, so the guarantee is per item: announced once to a reviewer,');
+console.log('never again however often the sweep runs. And notifying is not deciding — not');
+console.log('one status moved.');
+
+rule('101. The approval trail');
+const approvalLog = await listAuditLog({ authorId: author.id, limit: 500 });
+for (const entry of approvalLog
+  .slice()
+  .reverse()
+  .filter((e) => e.action.startsWith('approval.'))
+  .slice(-6)) {
+  const m = entry.metadata ?? {};
+  const detail =
+    entry.action === 'approval.notified'
+      ? `${m.reviewer} · ${m.items} items · decided=${m.decided}`
+      : entry.action === 'approval.unreachable'
+        ? `${m.waiting} waiting · ${m.reason}`
+        : `waiting ${m.waiting}, notified ${m.notified}, already known ${m.alreadyKnown}`;
+  console.log(`${entry.created_at.toISOString()}  ${entry.action.padEnd(28)} ${detail}`);
+}
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-069 complete — the premise the meme stories rest on is now falsifiable,');
-console.log('and on real data the honest answer is still "not yet"\n');
+console.log('\nSTORY-012 complete — everything held for a human is now something a human can');
+console.log('be told about, once\n');
 await closePool();
 

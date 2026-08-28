@@ -47,6 +47,10 @@ export const PRIORITIES = {
   // anything the monitor escalated in this same window rather than missing it
   // by one sweep.
   'reviews.notify_pending': 20,
+  // The same reasoning, for everything that is not a press kit (STORY-012).
+  // A shade lower so the two notifiers have a defined order rather than a tie
+  // broken by whichever row happened to be inserted first.
+  'approvals.notify_waiting': 19,
 };
 
 /** Anything unclassified sits between outbound work and housekeeping. */
@@ -68,6 +72,10 @@ export const RESOURCES = {
   'press.draft_approaching': (job) => `author:${job.author_id}:press`,
   'trust.monitor_escalations': (job) => `author:${job.author_id}:press`,
   'reviews.notify_pending': (job) => `author:${job.author_id}:press`,
+  // Its own resource rather than sharing the press pipeline's: it reads drafts,
+  // outreach and recommendations, none of which the press stages touch, and
+  // serialising it behind them would delay telling somebody for no benefit.
+  'approvals.notify_waiting': (job) => `author:${job.author_id}:approvals`,
   // One global publisher. Two of these at once would race for the same due
   // posts; the idempotency key already prevents two existing, and this makes
   // the guarantee independent of that.

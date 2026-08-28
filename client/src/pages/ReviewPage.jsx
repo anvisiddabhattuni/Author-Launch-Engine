@@ -9,6 +9,7 @@ export function ReviewPage({ author, book }) {
   const [drafts, setDrafts] = useState([]);
   const [coverage, setCoverage] = useState([]);
   const [grounding, setGrounding] = useState(null);
+  const [waiting, setWaiting] = useState(null);
   const [reviewer, setReviewer] = useState(author.name);
   const [notes, setNotes] = useState({});
   const [status, setStatus] = useState(null);
@@ -24,6 +25,7 @@ export function ReviewPage({ author, book }) {
     if (book?.id) {
       setGrounding(await api.voiceGrounding(author.id, book.id));
     }
+    setWaiting(await api.awaitingApproval(author.id));
   }, [author.id, book?.id]);
 
   useEffect(() => {
@@ -56,6 +58,88 @@ export function ReviewPage({ author, book }) {
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
+
+      {waiting && (
+        <div className="card">
+          <h2>Waiting on you ({waiting.total})</h2>
+          <p className="hint">
+            Everything held for a decision, across all four kinds of work — not just the social
+            drafts on this page. Nothing here has been published and nothing will be until you
+            decide. {waiting.escalated > 0 && (
+              <>
+                <strong>{waiting.escalated}</strong> of these were escalated: something checked them
+                and asked for a person rather than letting them through.
+              </>
+            )}
+          </p>
+
+          {waiting.total === 0 ? (
+            <div className="empty">Nothing is waiting on you.</div>
+          ) : (
+            <>
+              <div className="meta">
+                {Object.entries(waiting.byKind).map(([kind, n]) => (
+                  <span className="pill" key={kind}>
+                    {n} {kind === 'mixRecommendation' ? 'mix change' : kind}
+                    {n === 1 ? '' : 's'}
+                  </span>
+                ))}
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>What</th>
+                    <th>Detail</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {waiting.items.slice(0, 12).map((item) => (
+                    <tr key={`${item.kind}-${item.id}`}>
+                      <td>{item.label}</td>
+                      <td className="mono">{item.detail}</td>
+                      <td>
+                        <span className={`pill ${item.escalated ? 'escalated' : 'pending_approval'}`}>
+                          {item.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
+          <div className="row" style={{ marginTop: 12 }}>
+            <button
+              className="ghost"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setStatus(null);
+                try {
+                  const r = await api.notifyAwaiting(author.id);
+                  setStatus({
+                    kind: r.unreachable ? 'error' : 'ok',
+                    message: r.unreachable
+                      ? `${r.waiting} items are waiting and no active reviewer is configured to tell. Recorded rather than passed over.`
+                      : r.notified.length === 0
+                        ? `Nothing new to announce — all ${r.waiting} were already sent to their reviewers.`
+                        : `Told ${r.notified.length} reviewer(s). One digest each, covering only what they had not already been sent.`,
+                  });
+                  await refresh();
+                } catch (error) {
+                  setStatus({ kind: 'error', message: error.message });
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Tell the reviewers
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h2>Weekly cadence</h2>

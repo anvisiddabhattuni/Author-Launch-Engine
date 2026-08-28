@@ -24,6 +24,7 @@ Implemented so far:
 - **STORY-067 — Meme Template Library** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-068 — Book Visual Identity Guide** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-069 — Meme vs Text Performance Tracking** (Trust and Monitoring Agent), fulfilling `REQ-001`
+- **STORY-012 — Approval and Notification Agent Handles Approvals** (Approval and Notification Agent), fulfilling `REQ-005` and `REQ-004`
 
 ## What works today
 
@@ -771,6 +772,59 @@ a recommendation drawn from an inconclusive comparison would launder noise into 
 > report that it is not yet measurable.** A dashboard that always finds a difference will always be
 > believed, and will usually be wrong.
 
+### STORY-012 — the word "and"
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Hold drafts in PostgreSQL until approved | already built by STORY-001 — the gate lives in the services |
+| 2. Approval and Notification Agent module | `server/src/agents/approvalNotificationAgent.js` |
+| 3. Notify users of pending approvals | `018_approval_notifications.sql`, `notifyAwaitingApproval` |
+| 4. Runs unattended | `approvals.notify_waiting` on the STORY-065 worker |
+| 5. One queue a reviewer can see | `GET /api/authors/:id/awaiting-approval`, the Review tab |
+
+Half of this story has worked since STORY-001. Nothing reaches a platform without a human decision —
+`scheduleDraft`, `sendOutreachMessage` and `distributePressKit` each refuse unapproved work, and the
+gate has grown to four targets without being forked once.
+
+**The other half is the word "and".** The clause is that the agent holds the draft *and sends a
+notification*, and notification existed for exactly one of the four things a human approves. The
+`notifications` table said so itself:
+
+```sql
+CONSTRAINT notifications_exactly_one_target CHECK (num_nonnulls(pr_kit_id) = 1)
+```
+
+There was no column for a draft. A social post could sit in `pending_approval` for a week and there
+was no mechanism by which anyone could be told — not a bug in the notifier, an **absence in the
+schema**. On a freshly seeded database with five social drafts and three outreach messages waiting,
+the number of notifications ever sent about any of them was zero, and could not have been anything
+else.
+
+**One digest per reviewer, not one email per item.** STORY-007's model is one email per press kit,
+which is right for a kit: they are rare and each is its own decision. Social drafts arrive four at a
+time every week, and that model there is four emails a week per reviewer — which a reviewer stops
+reading, at which point the notification is worse than none. Rows are still written **per item**, so
+the idempotency guarantee holds: announced once to a reviewer, never again however often the sweep
+runs. `batch_id` is what lets one email carry many rows.
+
+**It does not notify about press kits, deliberately.** STORY-007 already does, with kit-specific
+content this has no business duplicating — two agents emailing about the same kit is the drift
+STORY-008 spent a story removing. Kits appear in the queue, because a reviewer should see one list,
+and the sweep logs `deferredToReviewNotifier` so the omission is visible rather than looking like a
+miss.
+
+**Work waiting and nobody to tell is still recorded.** The state STORY-007 named for kits is no less
+true here, and `approval.unreachable` says so rather than the sweep passing over in silence.
+
+**Notifying is not deciding.** There is a test asserting no status moves when the sweep runs.
+
+> **A migration that dropped a constraint someone else had grown.** Redefining
+> `notifications_exactly_one_target` meant restating every target it accepts, and the first draft of
+> this migration copied the version from STORY-007 — silently removing the `escalation_id` STORY-008
+> had added in between. The suite caught it in one run. **A constraint that has grown must be read
+> from the live schema, not from the migration that first created it**, and `DROP CONSTRAINT … ADD
+> CONSTRAINT` is a rewrite pretending to be an edit.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -816,7 +870,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 95 stages with evidence at each one.
+Prints 101 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -894,6 +948,11 @@ Prints 95 stages with evidence at each one.
   recommendation that changes nothing, a rejection that changes nothing and an approval that moves
   the next batch, and the measurement trail with the simulation flag on it.
 
+- **Stages 96–101, STORY-012:** everything held for a human in one queue, the constraint that made
+  notifying about most of it impossible, work waiting with nobody to tell, one digest per reviewer
+  covering many items, a second sweep announcing nothing and moving no status, and the approval
+  trail.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -904,7 +963,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-374 tests across 90 suites. For each story the leading suites map one-to-one onto its Gherkin
+391 tests across 93 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -996,6 +1055,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/authors/:id/awaiting-approval` | One queue across all four things a human decides |
+| `POST` | `/api/authors/:id/awaiting-approval/notify` | Tell reviewers what is newly waiting on them |
 | `GET` | `/api/authors/:id/format-performance` | Meme vs text per platform, with what it cannot conclude |
 | `POST` | `/api/authors/:id/engagement/collect` | Run a collection pass (mocked adapters) |
 | `POST` | `/api/authors/:id/mix-recommendations/scan` | Ask for a proposal; it proposes, never applies |
@@ -1134,7 +1195,13 @@ These are deliberate deferrals, not oversights:
   for having written nothing yet. The consequence is real: an author who uploads no history gets a
   neutral 0.6 and the voice floor never bites.
 - Dead-lettered jobs are surfaced and retryable, but nobody is *told* about them. STORY-007 built
-  notification for pending reviews; work the system has given up on has no equivalent alert yet.
+  notification for pending reviews and STORY-012 extended it to the other three approval targets;
+  work the system has given up on still has no equivalent alert.
+- Notification is email only, and one channel means one failure mode. A reviewer who does not read
+  email is a reviewer who is not notified, and nothing escalates a digest that was never opened.
+- A digest is sent once per item per reviewer and never repeated. That is the right default against
+  noise and the wrong one against neglect: an item nobody decides is announced once and then never
+  mentioned again, and nothing chases it.
 - Reviewers are still an address book, not accounts, and that is intended: a publicist who gets
   emailed about a pending kit does not need a login. `reviewers.user_id` links the two where the same
   person is both. Approving now requires a session (STORY-064); being notified does not.
