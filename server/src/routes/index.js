@@ -6,7 +6,11 @@ import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
-import { listEscalations, monitorPressMaterials } from '../agents/trustMonitoringAgent.js';
+import {
+  listEscalations,
+  monitorPressMaterials,
+  recommendMix,
+} from '../agents/trustMonitoringAgent.js';
 import { draftOutreachMessages } from '../agents/prOutreachAgent.js';
 import { config, PLATFORMS } from '../config.js';
 import { query } from '../db/pool.js';
@@ -17,8 +21,11 @@ import {
   rejectDraft,
   rejectOutreach,
   rejectPrMaterial,
+  approveMixRecommendation,
+  rejectMixRecommendation,
 } from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
+import { collectEngagement, compareFormats } from '../services/engagement.js';
 import { recordAwardOutcome } from '../services/awardOutcome.js';
 import { AWARD_OUTCOMES, findAwardsAwaitingOutcome, outcomeOf } from '../services/awards.js';
 import { anniversaryYears, findApproachingMilestones } from '../services/milestones.js';
@@ -1013,6 +1020,72 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Meme vs text performance (STORY-069 / REQ-001) ---
+
+/**
+ * The comparison, and the open recommendations behind it.
+ *
+ * Returned together because a reader looking at "memes lead on twitter" needs
+ * to see in the same breath whether anything has been proposed off the back of
+ * it — and whether it was approved.
+ */
+router.get('/authors/:authorId/format-performance', asyncRoute(async (req, res) => {
+  const authorId = Number(req.params.authorId);
+  const comparison = await compareFormats({ authorId });
+  const { rows: recommendations } = await query(
+    `SELECT * FROM mix_recommendations WHERE author_id = $1 ORDER BY created_at DESC LIMIT 20`,
+    [authorId],
+  );
+  const { rows: authors } = await query('SELECT memes_per_batch FROM authors WHERE id = $1', [
+    authorId,
+  ]);
+  res.json({
+    ...comparison,
+    recommendations,
+    // What the drafter is actually doing right now, so the page can show that an
+    // unapproved recommendation has changed nothing.
+    memesPerBatch: authors[0]?.memes_per_batch ?? config.minMemesPerBatch,
+  });
+}));
+
+/** Runs a collection pass. Mocked adapters; the audit log says so. */
+router.post('/authors/:authorId/engagement/collect', asyncRoute(async (req, res) => {
+  const collected = await collectEngagement({
+    authorId: Number(req.params.authorId),
+    // Exposed so the demo can simulate a world where memes lead, out loud. It
+    // defaults to 0 and the audit log records whatever was used.
+    formatEffect: Number(req.body?.formatEffect ?? 0),
+  });
+  res.status(201).json({ collected: collected.length });
+}));
+
+/** Asks the Trust and Monitoring Agent for a proposal. It proposes; it does not apply. */
+router.post('/authors/:authorId/mix-recommendations/scan', asyncRoute(async (req, res) => {
+  res.status(201).json(await recommendMix({ authorId: Number(req.params.authorId) }));
+}));
+
+router.post('/mix-recommendations/:id/approve', asyncRoute(async (req, res) => {
+  res.json(
+    await approveMixRecommendation({
+      recommendationId: Number(req.params.id),
+      reviewer: req.body?.reviewer,
+      notes: req.body?.notes,
+      user: req.user,
+    }),
+  );
+}));
+
+router.post('/mix-recommendations/:id/reject', asyncRoute(async (req, res) => {
+  res.json(
+    await rejectMixRecommendation({
+      recommendationId: Number(req.params.id),
+      reviewer: req.body?.reviewer,
+      notes: req.body?.notes,
+      user: req.user,
+    }),
+  );
 }));
 
 // --- Visual identity (STORY-068 / REQ-001) ---

@@ -141,18 +141,22 @@ describe('STORY-066: meme drafting grounded in the book', () => {
     }
   });
 
-  it('draws the caption from the book themes, not from a theme label', () => {
+  it('draws the words from the book themes, not from a theme label', () => {
+    // Checked against caption *and* panels, because that is what a reader sees
+    // and what the scorer measures. An earlier version of this test looked at
+    // the caption alone and passed only when the seed happened to pick a theme
+    // whose name is longer than five characters — green for the wrong reason.
     for (const meme of batch.filter((d) => d.format === 'meme')) {
       assert.ok(meme.themes_used.length > 0);
-      const claims = Object.values(KEY_MESSAGES);
-      const carried = claims.some((claim) =>
+      const read = [meme.content, ...(meme.media.panels ?? [])].join(' ').toLowerCase();
+      const carried = Object.values(KEY_MESSAGES).some((claim) =>
         claim
           .toLowerCase()
           .split(/\W+/)
           .filter((w) => w.length > 5)
-          .some((word) => meme.content.toLowerCase().includes(word)),
+          .some((word) => read.includes(word)),
       );
-      assert.ok(carried, `caption carries the book's own words: ${meme.content}`);
+      assert.ok(carried, `meme carries the book's own words: ${read}`);
     }
   });
 

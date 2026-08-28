@@ -28,6 +28,24 @@ const TARGETS = {
     entityType: 'pr_material',
     actionPrefix: 'pr_material',
   },
+  // The fourth thing a human approves (STORY-069). A mix recommendation is
+  // advisory: approving it is what moves `authors.memes_per_batch`, and not
+  // approving it leaves the drafter reading exactly what it read before.
+  mixRecommendation: {
+    table: 'mix_recommendations',
+    column: 'mix_recommendation_id',
+    entityType: 'mix_recommendation',
+    actionPrefix: 'mix_recommendation',
+    // Approval is not the whole of the decision here — it is the point at which
+    // a suggestion becomes a setting. Run inside the same transaction so the
+    // record and the effect cannot disagree.
+    onApprove: async (record, client) => {
+      await client.query('UPDATE authors SET memes_per_batch = $2 WHERE id = $1', [
+        record.author_id,
+        record.suggested_memes,
+      ]);
+    },
+  },
 };
 
 /**
@@ -90,6 +108,13 @@ async function decide({ target, id, decision, reviewer, notes = '', user = null 
       [decision, id],
     );
 
+    // Some approvals do something beyond recording the decision. Run inside the
+    // same transaction so the record and its effect cannot disagree — and only
+    // on approval, so a rejection is genuinely inert (STORY-069).
+    if (decision === 'approved' && spec.onApprove) {
+      await spec.onApprove(updated[0], client);
+    }
+
     await recordAction(
       {
         actor: decidedBy,
@@ -131,6 +156,26 @@ export const rejectOutreach = ({ messageId, reviewer, notes, user }) =>
 
 export const approvePrMaterial = ({ materialId, reviewer, notes, user }) =>
   decide({ target: 'prMaterial', id: materialId, decision: 'approved', reviewer, notes, user });
+
+export const approveMixRecommendation = ({ recommendationId, reviewer, notes, user }) =>
+  decide({
+    target: 'mixRecommendation',
+    id: recommendationId,
+    decision: 'approved',
+    reviewer,
+    notes,
+    user,
+  });
+
+export const rejectMixRecommendation = ({ recommendationId, reviewer, notes, user }) =>
+  decide({
+    target: 'mixRecommendation',
+    id: recommendationId,
+    decision: 'rejected',
+    reviewer,
+    notes,
+    user,
+  });
 
 export const rejectPrMaterial = ({ materialId, reviewer, notes, user }) =>
   decide({ target: 'prMaterial', id: materialId, decision: 'rejected', reviewer, notes, user });

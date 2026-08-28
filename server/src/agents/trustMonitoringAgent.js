@@ -1,5 +1,7 @@
-import { withTransaction } from '../db/pool.js';
+import { config } from '../config.js';
+import { query, withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { DECIDABLE, assess, thresholds } from '../services/escalationPolicy.js';
 
 /**
@@ -227,4 +229,125 @@ export async function listEscalations({ authorId, openOnly = false }) {
 
   const all = rows.map((r) => ({ ...r, open: Boolean(r.open) }));
   return openOnly ? all.filter((r) => r.open) : all;
+}
+
+/**
+ * Proposes a change to the meme/text mix — as a proposal, and nothing else
+ * (STORY-069).
+ *
+ * The story's third clause is that a recommendation "never silently changes what
+ * gets published". That is enforced structurally rather than by intention: this
+ * writes a row with `status = 'pending_approval'`, and the drafting agent reads
+ * `authors.memes_per_batch`, which only an approval moves. An unapproved
+ * recommendation is a suggestion sitting in a table that nothing consults.
+ *
+ * It only proposes where the comparison actually reached a verdict. On a
+ * platform the data cannot separate, staying quiet is the correct output — a
+ * recommendation drawn from an inconclusive comparison would launder noise into
+ * an instruction, which is the failure this whole story exists to avoid.
+ */
+export async function recommendMix({ authorId, now = new Date() }) {
+  const comparison = await compareFormats({ authorId });
+  const { rows: authors } = await query('SELECT * FROM authors WHERE id = $1', [authorId]);
+  const author = authors[0];
+  if (!author) throw Object.assign(new Error('Author not found'), { status: 404 });
+
+  const currentMemes = author.memes_per_batch ?? config.minMemesPerBatch;
+  const proposed = [];
+  const skipped = [];
+
+  for (const platform of comparison.platforms) {
+    const decisive =
+      platform.verdict === VERDICTS.MEME || platform.verdict === VERDICTS.TEXT;
+
+    if (!decisive) {
+      skipped.push({ platform: platform.platform, verdict: platform.verdict, because: platform.because });
+      continue;
+    }
+
+    const favours = platform.verdict === VERDICTS.MEME ? 'meme' : 'text';
+    // One step at a time. A measured difference is evidence that the mix should
+    // move, not evidence of how far — and a proposal a human can sanity-check in
+    // one glance is likelier to get a real decision than a recalculated ratio.
+    const suggested = favours === 'meme' ? currentMemes + 1 : Math.max(0, currentMemes - 1);
+
+    if (suggested === currentMemes) {
+      skipped.push({
+        platform: platform.platform,
+        verdict: platform.verdict,
+        because: 'already at the floor for that direction',
+      });
+      continue;
+    }
+
+    const { rows } = await query(
+      `INSERT INTO mix_recommendations
+         (author_id, platform, favours, current_memes, suggested_memes, evidence)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (author_id, platform) WHERE status = 'pending_approval'
+       DO UPDATE SET favours = EXCLUDED.favours,
+                     current_memes = EXCLUDED.current_memes,
+                     suggested_memes = EXCLUDED.suggested_memes,
+                     evidence = EXCLUDED.evidence,
+                     updated_at = now()
+       RETURNING *`,
+      [
+        authorId,
+        platform.platform,
+        favours,
+        currentMemes,
+        suggested,
+        JSON.stringify({
+          // Frozen at the moment it was made: a recommendation read next month
+          // has to be answerable from itself rather than re-derived against data
+          // that has since moved.
+          meme: platform.meme,
+          text: platform.text,
+          lift: platform.lift,
+          because: platform.because,
+          minSample: comparison.minSample,
+          maturityHours: comparison.maturityHours,
+          measuredAt: now.toISOString(),
+        }),
+      ],
+    );
+
+    await recordAction({
+      actor: ACTOR,
+      action: 'mix.recommended',
+      entityType: 'mix_recommendation',
+      entityId: rows[0].id,
+      authorId,
+      after: rows[0],
+      metadata: {
+        platform: platform.platform,
+        favours,
+        from: currentMemes,
+        to: suggested,
+        lift: platform.lift,
+        // Said plainly on the log: this is a proposal and nothing has changed.
+        applied: false,
+        requiresApproval: true,
+      },
+    });
+
+    proposed.push(rows[0]);
+  }
+
+  await recordAction({
+    actor: ACTOR,
+    action: 'mix.scan_completed',
+    entityType: 'author',
+    entityId: authorId,
+    authorId,
+    metadata: {
+      platforms: comparison.platforms.length,
+      proposed: proposed.length,
+      skipped: skipped.length,
+      conclusive: comparison.conclusive,
+      totalMeasured: comparison.totalMeasured,
+    },
+  });
+
+  return { proposed, skipped, comparison };
 }

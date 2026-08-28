@@ -101,9 +101,12 @@ export async function scheduleDraft({ draftId, from = new Date() }) {
       });
 
       const { rows: scheduled } = await client.query(
-        `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for)
-         VALUES ($1,$2,$3,$4) RETURNING *`,
-        [draftId, draft.author_id, draft.platform, slot.toISOString()],
+        // Format is copied onto the published record rather than joined from
+        // the draft (STORY-069). Engagement is about what actually went out, and
+        // an edit to the draft afterwards must not move what it was published as.
+        `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, format)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [draftId, draft.author_id, draft.platform, slot.toISOString(), draft.format ?? 'text'],
       );
 
       const { rows: updated } = await client.query(

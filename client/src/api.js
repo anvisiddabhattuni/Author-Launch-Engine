@@ -172,6 +172,18 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-069 — meme vs text, and the mix proposals that follow from it
+  formatPerformance: (authorId) => request(`/authors/${authorId}/format-performance`),
+
+  collectEngagement: (authorId, formatEffect = 0) =>
+    request(`/authors/${authorId}/engagement/collect`, { method: 'POST', body: { formatEffect } }),
+
+  scanMixRecommendations: (authorId) =>
+    request(`/authors/${authorId}/mix-recommendations/scan`, { method: 'POST' }),
+
+  approveMix: (id, body) => request(`/mix-recommendations/${id}/approve`, { method: 'POST', body }),
+  rejectMix: (id, body) => request(`/mix-recommendations/${id}/reject`, { method: 'POST', body }),
+
   // STORY-068 — the book's versioned visual identity
   visualIdentity: (authorId, bookId) =>
     request(`/authors/${authorId}/books/${bookId}/visual-identity`),

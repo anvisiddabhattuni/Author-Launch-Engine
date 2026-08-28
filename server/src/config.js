@@ -29,6 +29,14 @@ export const config = {
   // licensed templates carry five different accents, and an identity that
   // tolerated that would not be an identity.
   minIdentityMatch: number(process.env.MIN_IDENTITY_MATCH, 0.75),
+  // Posts of each format, on one platform, before the comparison will say
+  // anything at all (STORY-069). The number doing the real work in that story:
+  // below this, the ratio of two averages is noise wearing a decimal point.
+  minSamplePerCell: number(process.env.MIN_SAMPLE_PER_CELL, 8),
+  // How long a post must have been live before its metrics count. A meme
+  // measured an hour after publishing against a three-week-old text post is
+  // measuring age, not format.
+  engagementMaturityHours: number(process.env.ENGAGEMENT_MATURITY_HOURS, 48),
   relevanceThreshold: number(process.env.RELEVANCE_THRESHOLD, 0.5),
   // How well a listing has to fit the *author* — as opposed to the book — to be
   // worth a human's attention (STORY-010). Its own floor because it is an

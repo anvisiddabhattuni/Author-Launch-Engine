@@ -23,6 +23,7 @@ Implemented so far:
 - **STORY-066 — Generate Meme Content for Social Platforms** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-067 — Meme Template Library** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-068 — Book Visual Identity Guide** (AI Content Generation Agent), fulfilling `REQ-001`
+- **STORY-069 — Meme vs Text Performance Tracking** (Trust and Monitoring Agent), fulfilling `REQ-001`
 
 ## What works today
 
@@ -724,6 +725,52 @@ a licence.
 > The check existed, passed its own tests, and measured nothing until it was pointed at the library
 > it was written for.
 
+### STORY-069 — a dashboard whose main job is saying "not yet"
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Format discriminator carried through publishing | `017_engagement.sql` — `scheduled_posts.format` |
+| 2. Collect engagement per published item (mocked) | `services/engagement.js` — `collectEngagement` |
+| 3. Aggregate by format and platform | `compareFormats` |
+| 4. React comparison view with a small-sample warning | `client/src/pages/PerformancePage.jsx` |
+| 5. Mix recommendation as an approval-gated suggestion | `trustMonitoringAgent.recommendMix`, `approvals.js` |
+
+The last of the four meme stories, and the one that closes the loop on why the other three exist.
+Ram's note was *"on platforms like X, memes might get more traction than text"*. STORY-066 made memes,
+067 gave them a library, 068 gave them a look, and not one of them could say whether the premise
+holds.
+
+**It would have been easy to divide two averages and print a winner.** At the sample sizes this
+system will realistically have for months, that ratio is noise wearing a decimal point. A verdict
+here requires `MIN_SAMPLE_PER_CELL` posts of *both* formats on a platform **and** 95% intervals that
+do not overlap — and when it cannot conclude, it says which of those two failed, by name: *"0 memes
+and 3 text posts — 8 of each needed before this can say anything"*. There is no `lift` field unless a
+verdict was reached; a headline number nobody should act on is not reported at all.
+
+**The mocked collector is format-blind, and there is a test pinning that.** This is the obvious place
+to quietly make the premise come true, and a generator tuned so memes win would turn the demo into a
+claim about the world rather than a demonstration of the apparatus. `mockMetrics` produces byte-identical
+output for a meme and a text post; a caller may pass `formatEffect` to *simulate* a world where memes
+lead, and the audit log records whatever value was used. Demo stage 92 does exactly that, out loud.
+
+**Posts too young to have settled are excluded, not averaged in.** A meme measured an hour after
+publishing against a three-week-old text post is measuring age. `hours_live` is stored on every
+reading so the maturity window is applied to the measurement rather than assumed.
+
+**A recommendation is a proposal, enforced structurally.** The drafting agent reads
+`authors.memes_per_batch`; a pending recommendation is a row in a table nothing consults. Approving
+it moves the setting inside the same transaction as the decision; rejecting it is genuinely inert.
+Demo stage 94 rejects one and shows the mix unmoved, then approves the next and shows the following
+batch drafting more memes. It stays quiet entirely on a platform whose data cannot separate the two —
+a recommendation drawn from an inconclusive comparison would launder noise into an instruction.
+
+> **The deliverable is a dashboard that usually refuses to answer.** Every instinct in building this
+> pulls the other way: a comparison view that shows a winner feels finished, and one that says "not
+> enough data" feels broken. But the premise four stories rest on is exactly the kind of thing an
+> organisation talks itself into, and **the value of measuring it is entirely in being willing to
+> report that it is not yet measurable.** A dashboard that always finds a difference will always be
+> believed, and will usually be wrong.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -769,7 +816,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 90 stages with evidence at each one.
+Prints 95 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -842,6 +889,11 @@ Prints 90 stages with evidence at each one.
   seed choosing differently, older memes still pointing at the version they were judged under, and
   the identity trail.
 
+- **Stages 91–95, STORY-069:** the honest answer on real data (nothing measurable yet), a constructed
+  history in a simulated world where memes lead so the verdict path has something to act on, a
+  recommendation that changes nothing, a rejection that changes nothing and an approval that moves
+  the next batch, and the measurement trail with the simulation flag on it.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -852,7 +904,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-355 tests across 86 suites. For each story the leading suites map one-to-one onto its Gherkin
+374 tests across 90 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -876,6 +928,8 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `MIN_VOICE_MATCH` | `0.5` | Below this match against the author's previous posts, a social draft escalates |
 | `MIN_MEMES_PER_BATCH` | `1` | Meme candidates every batch of social content must include |
 | `MIN_IDENTITY_MATCH` | `0.75` | Below this fit against the book's visual identity, a meme escalates |
+| `MIN_SAMPLE_PER_CELL` | `8` | Posts of each format, per platform, before the comparison says anything |
+| `ENGAGEMENT_MATURITY_HOURS` | `48` | How long a post must be live before its metrics count |
 | `EXPERTISE_THRESHOLD` | `0.5` | Below this fit against the *author*, a listing does not qualify on expertise |
 | `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
 | `JWT_SECRET` | dev-only default | Session signing key. The server refuses to start with the default when `NODE_ENV=production` |
@@ -942,6 +996,10 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/authors/:id/format-performance` | Meme vs text per platform, with what it cannot conclude |
+| `POST` | `/api/authors/:id/engagement/collect` | Run a collection pass (mocked adapters) |
+| `POST` | `/api/authors/:id/mix-recommendations/scan` | Ask for a proposal; it proposes, never applies |
+| `POST` | `/api/mix-recommendations/:id/approve` · `/reject` | The only thing that moves the mix |
 | `GET` | `/api/opportunities?authorId=&type=` | List opportunities |
 | `GET` | `/api/authors/:id/monthly-opportunities` | Monthly cadence proof, by type |
 | `POST` | `/api/authors/:id/books/:bookId/outreach/draft` | Draft outreach messages |
@@ -992,7 +1050,15 @@ These are deliberate deferrals, not oversights:
   (`draftApproachingKits`), but something still has to call it — the UI button, the demo, or a cron
   entry. Nothing runs on a timer yet.
 - Social platform, directory, email and press-list adapters are all mocked; no live credentials are
-  involved. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
+  involved. **Engagement metrics are mocked too**, which is the largest caveat in this README:
+  STORY-069 builds the apparatus for answering "do memes outperform text" and cannot answer it. The
+  collector is deliberately format-blind so no demo can imply otherwise.
+- The comparison uses a normal-approximation interval, not a t-test, and no correction for testing
+  four platforms at once. At `MIN_SAMPLE_PER_CELL` = 8 the minimum-sample rule is doing nearly all
+  the work and the interval very little; both would need revisiting before this drove a real
+  decision.
+- Engagement is one snapshot per post, not a time series, so nothing can show how a post accumulated
+  or distinguish a fast-fading meme from a slow-burning essay. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
   tested that an image of this size and type would be accepted by a real platform.
 - Meme images are SVG **drawn**, not generated. As of STORY-067 the artwork lives in the database as
   a licensed asset rather than being composed from a palette at draft time, which is what makes

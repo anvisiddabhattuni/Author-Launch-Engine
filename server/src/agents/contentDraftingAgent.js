@@ -262,7 +262,7 @@ export async function draftWeeklyPosts({
   platforms = PLATFORMS,
   providerName = config.aiProvider,
   weekOf = weekStart(),
-  memeCount = config.minMemesPerBatch,
+  memeCount = null,
 }) {
   const provider = getProvider(providerName);
 
@@ -276,6 +276,11 @@ export async function draftWeeklyPosts({
 
     const { rows: authorRows } = await client.query('SELECT * FROM authors WHERE id = $1', [authorId]);
     const author = authorRows[0];
+
+    // How many memes this batch wants. The author's own setting wins, and the
+    // only thing that moves it is an *approved* mix recommendation (STORY-069) —
+    // an unapproved one sits in its table and is never read from here.
+    const memes = memeCount ?? author?.memes_per_batch ?? config.minMemesPerBatch;
 
     const { rows: history } = await client.query(
       'SELECT platform, content FROM social_history WHERE author_id = $1 ORDER BY posted_at DESC NULLS LAST',
@@ -337,8 +342,8 @@ export async function draftWeeklyPosts({
     // rather than requiring onboarding to have run: a book with no guide yet
     // gets one inferred from its own words, recorded as an inference, and the
     // author revises it from there.
-    let identity = memeCount > 0 ? await getActiveIdentity({ bookId }, client) : null;
-    if (memeCount > 0 && !identity) {
+    let identity = memes > 0 ? await getActiveIdentity({ bookId }, client) : null;
+    if (memes > 0 && !identity) {
       identity = await saveIdentity(
         {
           authorId,
@@ -357,7 +362,7 @@ export async function draftWeeklyPosts({
     // belongs to the agent that made it.
     const chosenTemplates = [];
     let templateRejections = [];
-    for (let i = 0; i < memeCount; i += 1) {
+    for (let i = 0; i < memes; i += 1) {
       const { template, rejected } = await selectTemplate(
         { authorId, seed: Number(`${book.id}${i}`), identity },
         client,
@@ -379,7 +384,7 @@ export async function draftWeeklyPosts({
       weekOf,
       // At least one meme per batch is the acceptance criterion, so it is a
       // floor the drafter is asked for rather than an average it may miss.
-      memeCount,
+      memeCount: memes,
       visualFirstPlatforms: visualFirst,
       memeTemplates: chosenTemplates,
     });

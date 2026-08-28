@@ -1,13 +1,18 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011, and STORY-066 to STORY-068), printed step by step.
+ * STORY-011, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
 import jwt from 'jsonwebtoken';
 
 import { alignToThemes } from './agents/contentAlignmentAgent.js';
-import { listEscalations, monitorPressMaterials } from './agents/trustMonitoringAgent.js';
+import {
+  listEscalations,
+  monitorPressMaterials,
+  recommendMix,
+} from './agents/trustMonitoringAgent.js';
+import { collectEngagement, compareFormats } from './services/engagement.js';
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
@@ -17,7 +22,13 @@ import { createApp } from './app.js';
 import { closePool, query } from './db/pool.js';
 import { HANDLERS } from './jobs/handlers.js';
 import { ensureRecurringJobs, enqueue, reapStaleJobs, retryJob, runOnce, tick } from './jobs/queue.js';
-import { approveDraft, approveOutreach, approvePrMaterial } from './services/approvals.js';
+import {
+  approveDraft,
+  approveMixRecommendation,
+  approveOutreach,
+  approvePrMaterial,
+  rejectMixRecommendation,
+} from './services/approvals.js';
 import { listAuditLog } from './services/auditLog.js';
 import { findApproachingMilestones } from './services/milestones.js';
 import { draftApproachingKits } from './services/milestoneWatcher.js';
@@ -1747,9 +1758,158 @@ for (const entry of identityLog
   );
 }
 
+
+// ── STORY-069 ────────────────────────────────────────────────────────────────
+// Does a meme actually outperform a text post? The story that makes the premise
+// the other three rest on falsifiable.
+
+rule('91. The honest answer, on the data we actually have');
+await collectEngagement({ authorId: author.id });
+const realComparison = await compareFormats({ authorId: author.id });
+console.log(
+  `${realComparison.totalMeasured} posts measured · ` +
+    `${realComparison.excludedTooYoung} excluded as too young (< ${realComparison.maturityHours}h) · ` +
+    `needs ${realComparison.minSample} of each format per platform\n`,
+);
+const { rows: publishedSoFar } = await query(
+  "SELECT COUNT(*)::int n FROM scheduled_posts WHERE status = 'published' AND author_id = $1",
+  [author.id],
+);
+if (realComparison.platforms.length === 0) {
+  console.log(
+    `nothing to compare: ${publishedSoFar[0].n} post(s) have been published in this run and ` +
+      `every one is younger than the ${realComparison.maturityHours}h window.`,
+  );
+  console.log('An empty table is the right output here — it is what a new account looks like.');
+} else {
+  console.log('platform    memes          text           verdict');
+  for (const p of realComparison.platforms) {
+    console.log(
+      `  ${p.platform.padEnd(10)} n=${String(p.meme.n).padEnd(12)} n=${String(p.text.n).padEnd(12)} ${p.verdict}`,
+    );
+    console.log(`             ${p.because}`);
+  }
+}
+console.log(`\nconclusive: ${realComparison.conclusive}`);
+console.log('\nFour stories rest on the premise that memes earn more traction. This is the');
+console.log('first thing that can check it, and on real data it says "not yet" — which is');
+console.log('the correct output, not a failure of the dashboard.');
+
+rule('92. What it takes to make it say anything at all');
+// A constructed history, in a simulated world where memes really do lead. Said
+// out loud: the collector is format-blind by default, and this is asking it to
+// pretend otherwise so the recommendation path has something to act on.
+const simBase = Date.now() - 200 * 86400000;
+for (let i = 0; i < 40; i += 1) {
+  const fmt = i % 2 ? 'meme' : 'text';
+  const { rows: sd } = await query(
+    `INSERT INTO drafts (author_id, book_id, platform, content, confidence, week_of, status,
+                         format, media, image_rights)
+     VALUES ($1,$2,'twitter',$3,0.9,'2026-07-06','approved',$4,$5,$6) RETURNING id`,
+    [
+      author.id,
+      book.id,
+      `simulated post ${i}`,
+      fmt,
+      fmt === 'meme' ? JSON.stringify({ imageRef: 'x', altText: 'y' }) : null,
+      fmt === 'meme' ? 'cleared' : 'not_applicable',
+    ],
+  );
+  await query(
+    `INSERT INTO scheduled_posts
+       (draft_id, author_id, platform, scheduled_for, status, external_id, published_at, format)
+     VALUES ($1,$2,'twitter',$3,'published',$4,$3,$5)`,
+    [sd[0].id, author.id, new Date(simBase + i * 3600000).toISOString(), `sim-${i}`, fmt],
+  );
+}
+console.log('added 20 memes and 20 text posts on twitter, and asked the mocked collector');
+console.log('to simulate a world where memes do 60% better. The collector does not do this');
+console.log('on its own — a generator quietly tilted would make this demo a lie.\n');
+await collectEngagement({ authorId: author.id, formatEffect: 0.6 });
+const simulated = await compareFormats({ authorId: author.id });
+const tw = simulated.platforms.find((p) => p.platform === 'twitter');
+console.log(`twitter  memes n=${tw.meme.n} ${(tw.meme.mean * 100).toFixed(2)}% [${(tw.meme.low * 100).toFixed(2)}–${(tw.meme.high * 100).toFixed(2)}]`);
+console.log(`         text  n=${tw.text.n} ${(tw.text.mean * 100).toFixed(2)}% [${(tw.text.low * 100).toFixed(2)}–${(tw.text.high * 100).toFixed(2)}]`);
+console.log(`         → ${tw.verdict}, lift ${(tw.lift * 100).toFixed(0)}% — ${tw.because}`);
+console.log('\nOnly now does it report a number. Below eight of each, or with the intervals');
+console.log('overlapping, there is no lift to report and it says so instead.');
+
+rule('93. A recommendation is a proposal, and nothing else');
+const mix = await recommendMix({ authorId: author.id });
+console.log(`proposed ${mix.proposed.length}, stayed quiet on ${mix.skipped.length} platform(s)`);
+for (const skip of mix.skipped) {
+  console.log(`  ${skip.platform.padEnd(10)} silent — ${skip.verdict}`);
+}
+const proposal = mix.proposed[0];
+console.log(
+  `\n  ${proposal.platform}: favours ${proposal.favours}, ` +
+    `${proposal.current_memes} → ${proposal.suggested_memes} memes per batch  [${proposal.status}]`,
+);
+const { rows: beforeApproval } = await query('SELECT memes_per_batch FROM authors WHERE id = $1', [
+  author.id,
+]);
+console.log(`  author's mix right now: ${beforeApproval[0].memes_per_batch ?? '(default)'} — unchanged`);
+console.log('\nThe drafter reads authors.memes_per_batch. A pending recommendation is a row in');
+console.log('a table nothing consults, which is how "never silently changes what gets');
+console.log('published" is enforced rather than merely intended.');
+
+rule('94. Rejecting one changes nothing; approving one changes the mix');
+await rejectMixRecommendation({
+  recommendationId: proposal.id,
+  reviewer: 'Anvi Siddabhattuni',
+  notes: 'not yet — one platform is not the whole strategy',
+});
+const { rows: afterReject } = await query('SELECT memes_per_batch FROM authors WHERE id = $1', [
+  author.id,
+]);
+console.log(`rejected → mix is ${afterReject[0].memes_per_batch ?? '(default)'}`);
+
+const secondScan = await recommendMix({ authorId: author.id });
+const reproposed = secondScan.proposed[0];
+await approveMixRecommendation({
+  recommendationId: reproposed.id,
+  reviewer: 'Anvi Siddabhattuni',
+  notes: 'the evidence holds; try it for a month',
+});
+const { rows: afterApprove } = await query('SELECT memes_per_batch FROM authors WHERE id = $1', [
+  author.id,
+]);
+console.log(`approved → mix is ${afterApprove[0].memes_per_batch} memes per batch`);
+const nextBatch = await draftWeeklyPosts({
+  authorId: author.id,
+  bookId: book.id,
+  count: 3,
+  weekOf: weekStart(new Date(Date.now() + 42 * 86400000)),
+});
+console.log(
+  `the next batch drafted ${nextBatch.filter((d) => d.format === 'meme').length} meme(s) — ` +
+    'the approval is what moved it',
+);
+
+rule('95. The measurement trail');
+const perfLog = await listAuditLog({ authorId: author.id, limit: 500 });
+for (const entry of perfLog
+  .slice()
+  .reverse()
+  .filter((e) => e.action.startsWith('engagement.') || e.action.startsWith('mix.'))
+  .slice(-8)) {
+  const m = entry.metadata ?? {};
+  const detail =
+    entry.action === 'engagement.collected'
+      ? `${m.posts} posts · ${m.source} · formatEffect=${m.formatEffect}`
+      : entry.action === 'mix.recommended'
+        ? `${m.platform} ${m.from}→${m.to} applied=${m.applied}`
+        : `proposed ${m.proposed}, skipped ${m.skipped}, conclusive=${m.conclusive}`;
+  console.log(
+    `${entry.created_at.toISOString()}  ${entry.action.padEnd(24)} ${detail}`,
+  );
+}
+console.log('\n"formatEffect" is on the log because a reader of these numbers is entitled to');
+console.log('know they came from a mock, and whether that mock had a thumb on the scale.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-068 complete — the book has a look, the memes are made against it and');
-console.log('measured against it, and the author can change their mind without rewriting\n');
+console.log('\nSTORY-069 complete — the premise the meme stories rest on is now falsifiable,');
+console.log('and on real data the honest answer is still "not yet"\n');
 await closePool();
 
