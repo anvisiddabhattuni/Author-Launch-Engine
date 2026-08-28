@@ -172,6 +172,10 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-013 — is the audit log still what it said it was?
+  auditIntegrity: () => request('/audit-integrity'),
+  verifyAuditIntegrity: () => request('/audit-integrity/verify', { method: 'POST' }),
+
   // STORY-012 — one queue across everything a human has to decide
   awaitingApproval: (authorId) => request(`/authors/${authorId}/awaiting-approval`),
 

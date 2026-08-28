@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011, STORY-012 and STORY-066 to STORY-069), printed step by step.
+ * STORY-011 to STORY-013, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -17,6 +17,7 @@ import {
   findAwaitingApproval,
   notifyAwaitingApproval,
 } from './agents/approvalNotificationAgent.js';
+import { sealAuditLog, verifyAuditLog } from './agents/auditSecurityAgent.js';
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
@@ -2002,9 +2003,88 @@ for (const entry of approvalLog
   console.log(`${entry.created_at.toISOString()}  ${entry.action.padEnd(28)} ${detail}`);
 }
 
+
+// ── STORY-013 ────────────────────────────────────────────────────────────────
+// The Audit and Security Agent. "Logs all actions" was already true; the other
+// half of that name had nothing behind it.
+
+rule('102. Every action is logged, and the log refuses to be rewritten');
+const { rows: logSize } = await query('SELECT COUNT(*)::int n FROM audit_log');
+const { rows: actors } = await query(
+  'SELECT actor, COUNT(*)::int n FROM audit_log GROUP BY actor ORDER BY n DESC LIMIT 6',
+);
+console.log(`${logSize[0].n} rows written by every agent in the system:\n`);
+for (const a of actors) console.log(`  ${String(a.n).padStart(4)}  ${a.actor}`);
+console.log();
+for (const [label, sql] of [
+  ['UPDATE', "UPDATE audit_log SET action='x' WHERE id=1"],
+  ['DELETE', 'DELETE FROM audit_log WHERE id=1'],
+  ['TRUNCATE', 'TRUNCATE audit_log'],
+]) {
+  try {
+    await query(sql);
+    console.log(`  ${label.padEnd(9)} UNEXPECTEDLY ALLOWED`);
+  } catch (error) {
+    console.log(`  ${label.padEnd(9)} rejected — ${error.message.split(';')[0]}`);
+  }
+}
+
+rule('103. But append-only here is a policy, and a policy can be switched off');
+await sealAuditLog({});
+console.log('sealed the log so far.\n');
+const beforeTamper = await query('SELECT actor, action FROM audit_log WHERE id = 3');
+console.log(`row 3 as written : ${beforeTamper.rows[0].actor} / ${beforeTamper.rows[0].action}`);
+await query('ALTER TABLE audit_log DISABLE TRIGGER ALL');
+await query("UPDATE audit_log SET actor='SomebodyElse', action='draft.approved' WHERE id=3");
+await query('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+const afterTamper = await query('SELECT actor, action FROM audit_log WHERE id = 3');
+console.log(`row 3 now        : ${afterTamper.rows[0].actor} / ${afterTamper.rows[0].action}`);
+try {
+  await query("UPDATE audit_log SET action='x' WHERE id=1");
+} catch (error) {
+  console.log(`\ntriggers are back on: ${error.message.split(';')[0]}`);
+}
+console.log('The log still refuses every ordinary write, and history has been rewritten.');
+console.log('Before this story, nothing in the system could tell.');
+
+rule('104. Now it can');
+const caught = await verifyAuditLog({});
+console.log(`status: ${caught.status}`);
+for (const b of caught.breaks) {
+  console.log(`  checkpoint ${b.checkpoint}, rows ${b.range[0]}–${b.range[1]}`);
+  console.log(`  sealed ${b.rowsSealed} rows, ${b.rowsNow} there now`);
+  console.log(`  ${b.finding}`);
+}
+console.log('\nThe digest covers metadata too — the thresholds a decision was judged against,');
+console.log('whose session stood behind it. A seal that ignored those would be believed.');
+
+rule('105. Rows removed are caught the same way');
+await query('ALTER TABLE audit_log DISABLE TRIGGER ALL');
+await query("UPDATE audit_log SET actor=$1, action=$2 WHERE id=3", [
+  beforeTamper.rows[0].actor,
+  beforeTamper.rows[0].action,
+]);
+await query('DELETE FROM audit_log WHERE id IN (4, 5)');
+await query('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+const removed = await verifyAuditLog({});
+console.log(`status: ${removed.status}`);
+console.log(
+  `  sealed ${removed.breaks[0].rowsSealed} rows, ${removed.breaks[0].rowsNow} there now — ${removed.breaks[0].finding}`,
+);
+console.log('\nRow counts are stored at seal time rather than derived from the id range:');
+console.log('sequence gaps are normal, so (to_id - from_id + 1) never was the count.');
+
+rule('106. What it cannot do, said plainly');
+console.log('Anyone who can disable the log\'s triggers can disable the checkpoints\' triggers');
+console.log('too, and re-seal a doctored range into a consistent chain. What this buys is that');
+console.log('tampering now takes rewriting two structures in step instead of one, and that');
+console.log('anything short of that is caught. Publishing digests somewhere this database');
+console.log('cannot reach is the next step, and it is a deployment decision, not a schema one.');
+console.log('\nAnd a detection is not a repair: the verdict is logged with needsHuman.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-012 complete — everything held for a human is now something a human can');
-console.log('be told about, once\n');
+console.log('\nSTORY-013 complete — the append-only claim is now something you can check');
+console.log('rather than something you take on trust\n');
 await closePool();
 

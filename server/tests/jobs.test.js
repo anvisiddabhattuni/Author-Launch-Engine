@@ -152,7 +152,12 @@ describe('STORY-065: re-running is safe', () => {
   });
 
   it('runs a recurring sweep once per window, not once per tick', async () => {
-    const now = new Date();
+    // Mid-window on purpose. With a real `now` this asserted that the current
+    // instant is not within a second of a window boundary, which is true about
+    // 299 times in 300 — a latent flake that only showed up once the suite was
+    // run twenty times in a row. The comment below already knew about this
+    // hazard for the ticks; the key comparison needed it too.
+    const now = new Date('2026-01-01T12:02:30.000Z');
     const a = recurringKey({ kind: 'posts.publish_due', authorId: null, now, everySeconds: 300 });
     const b = recurringKey({
       kind: 'posts.publish_due',

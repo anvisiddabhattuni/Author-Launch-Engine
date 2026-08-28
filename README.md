@@ -25,6 +25,7 @@ Implemented so far:
 - **STORY-068 — Book Visual Identity Guide** (AI Content Generation Agent), fulfilling `REQ-001`
 - **STORY-069 — Meme vs Text Performance Tracking** (Trust and Monitoring Agent), fulfilling `REQ-001`
 - **STORY-012 — Approval and Notification Agent Handles Approvals** (Approval and Notification Agent), fulfilling `REQ-005` and `REQ-004`
+- **STORY-013 — Audit and Security Agent Logs All Actions** (Audit and Security Agent), fulfilling `REQ-006` and `REQ-004`
 
 ## What works today
 
@@ -825,6 +826,66 @@ true here, and `approval.unreachable` says so rather than the sweep passing over
 > from the live schema, not from the migration that first created it**, and `DROP CONSTRAINT … ADD
 > CONSTRAINT` is a rewrite pretending to be an edit.
 
+### STORY-013 — prevention is not detection
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Log every agent action | already built by STORY-001 — `services/auditLog.js` |
+| 2. Append-only in PostgreSQL | already built — UPDATE, DELETE and TRUNCATE triggers |
+| 3. Audit and Security Agent module | `server/src/agents/auditSecurityAgent.js` |
+| 4. Integrity that can be checked | `019_audit_integrity.sql` — `audit_checkpoints` |
+| 5. Runs unattended | `audit.seal_and_verify` on the STORY-065 worker |
+
+The audit half of that agent's name was already true, and I checked rather than assumed: an
+inventory of every file that mutates state against every file that writes an audit row comes back
+clean, and the table really does refuse UPDATE, DELETE and TRUNCATE.
+
+**The security half had nothing behind it.** Append-only here is a *policy* — a trigger — and a
+policy can be switched off:
+
+```sql
+ALTER TABLE audit_log DISABLE TRIGGER ALL;
+UPDATE audit_log SET actor = 'SomebodyElse', action = 'draft.approved' WHERE id = 3;
+DELETE FROM audit_log WHERE id IN (4, 5);
+ALTER TABLE audit_log ENABLE TRIGGER ALL;
+```
+
+Run against this database that rewrote who approved what and removed two rows, and afterwards the
+log still refused every ordinary mutation and **nothing in the system could tell**. Prevention with
+no detection: the guarantee held exactly as long as nobody with table rights decided otherwise, and
+left no evidence either way. Demo stages 103–105 do it and catch it.
+
+**Checkpoints, not a per-row hash chain.** Chaining at insert time means serialising every audit
+write in the system behind a lock on the previous row, and every action here writes one. Sealing
+ranges periodically costs nothing on the write path and detects the same three things: a row
+altered, a row removed, a row inserted after the fact.
+
+**The digest covers `metadata`.** That is where the thresholds a decision was judged against and the
+session behind it live. A seal that ignored them would let someone rewrite *why* a draft was approved
+while the digest still matched — a worse guarantee than none, because it would be believed.
+
+**Row counts are stored, not derived.** Sequence gaps are normal: a rolled-back transaction consumes
+an id without leaving a row, so `to_id - from_id + 1` never was the count. Storing the real count at
+seal time is what makes a later deletion — or an insertion into a gap — detectable.
+
+**Sealing does not feed on itself.** The seal writes its own receipt into the log, so the next run
+always finds something; without a rule it would seal that receipt, forever, one empty checkpoint per
+sweep. A range containing only this agent's own bookkeeping is not sealed, and those rows are swept
+into the next checkpoint that covers real activity.
+
+**What it cannot do, in the README rather than only in my head.** Anyone who can disable the log's
+triggers can disable the checkpoints' triggers and re-seal a doctored range into a consistent chain.
+What this buys is that tampering now takes rewriting two structures in step rather than one, and
+that anything short of that is caught. Publishing digests somewhere this database cannot reach is
+the next step, and it is a deployment decision rather than a schema one.
+
+> **A guarantee nobody can check is a promise.** The audit log was described in this README as
+> append-only for twelve stories, and it was — under the assumption that the triggers stay on. That
+> assumption was never stated and never tested, and the whole value of an audit log is that it does
+> not rest on assumptions about the people who can reach it. **Ask of any control: what does it look
+> like after it has failed? If the answer is "exactly the same", the control is prevention with no
+> detection.**
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -870,7 +931,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 101 stages with evidence at each one.
+Prints 106 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -953,6 +1014,10 @@ Prints 101 stages with evidence at each one.
   covering many items, a second sweep announcing nothing and moving no status, and the approval
   trail.
 
+- **Stages 102–106, STORY-013:** every agent's rows and the three mutations the table refuses, the
+  triggers switched off and history rewritten while the log still refuses ordinary writes, the seal
+  catching the edit, the same catch for removed rows, and what the checkpoints still cannot do.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -963,7 +1028,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-391 tests across 93 suites. For each story the leading suites map one-to-one onto its Gherkin
+412 tests across 99 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -1055,6 +1120,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/audit-integrity` | Whether the log still says what it said when written |
+| `POST` | `/api/audit-integrity/verify` | Seal what is new and re-check every seal (admin) |
 | `GET` | `/api/authors/:id/awaiting-approval` | One queue across all four things a human decides |
 | `POST` | `/api/authors/:id/awaiting-approval/notify` | Tell reviewers what is newly waiting on them |
 | `GET` | `/api/authors/:id/format-performance` | Meme vs text per platform, with what it cannot conclude |
@@ -1197,6 +1264,13 @@ These are deliberate deferrals, not oversights:
 - Dead-lettered jobs are surfaced and retryable, but nobody is *told* about them. STORY-007 built
   notification for pending reviews and STORY-012 extended it to the other three approval targets;
   work the system has given up on still has no equivalent alert.
+- Audit checkpoints live in the same database as the log they seal. Anyone who can disable one set
+  of triggers can disable the other and re-seal a doctored range; detection survives everything short
+  of that. Publishing digests off-box is the real answer and is a deployment decision.
+- A detected break says a range changed, not which row. Narrowing it would mean per-row hashes, which
+  is the write-path cost the checkpoint design exists to avoid.
+- Nothing is *notified* when tampering is found — the verdict is logged with `needsHuman: true` and
+  surfaced in the worker's run health, but the STORY-012 digest does not carry it.
 - Notification is email only, and one channel means one failure mode. A reviewer who does not read
   email is a reviewer who is not notified, and nothing escalates a digest that was never opened.
 - A digest is sent once per item per reviewer and never repeated. That is the right default against

@@ -7,6 +7,7 @@ import {
   findAwaitingApproval,
   notifyAwaitingApproval,
 } from '../agents/approvalNotificationAgent.js';
+import { sealAndVerify, verifyAuditLog } from '../agents/auditSecurityAgent.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
@@ -1024,6 +1025,33 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Audit integrity (STORY-013 / REQ-006) ---
+
+/**
+ * Whether the log still says what it said when it was written.
+ *
+ * Read-only, and available to anyone signed in: the point of an audit log is
+ * that its integrity is checkable, and a check only an administrator can run is
+ * a check most people have to take on trust.
+ */
+router.get('/audit-integrity', asyncRoute(async (_req, res) => {
+  const verification = await verifyAuditLog({});
+  const { rows: checkpoints } = await query(
+    `SELECT id, from_id, to_id, row_count, LEFT(digest, 16) AS digest, sealed_at
+       FROM audit_checkpoints ORDER BY id DESC LIMIT 20`,
+  );
+  const { rows: unsealed } = await query(
+    `SELECT COUNT(*)::int AS n FROM audit_log
+      WHERE id > COALESCE((SELECT MAX(to_id) FROM audit_checkpoints), 0)`,
+  );
+  res.json({ ...verification, checkpoints, unsealed: unsealed[0].n });
+}));
+
+/** Seals what is new and re-checks every seal. Detects; it cannot repair. */
+router.post('/audit-integrity/verify', requireRole('admin'), asyncRoute(async (_req, res) => {
+  res.status(201).json(await sealAndVerify({}));
 }));
 
 // --- Everything waiting on a human (STORY-012 / REQ-005) ---

@@ -51,6 +51,10 @@ export const PRIORITIES = {
   // A shade lower so the two notifiers have a defined order rather than a tie
   // broken by whichever row happened to be inserted first.
   'approvals.notify_waiting': 19,
+  // Lowest. It reads history rather than producing or reacting to work, and
+  // sealing a few rows later costs nothing — where delaying an approved email
+  // or a publish costs something to somebody (STORY-013).
+  'audit.seal_and_verify': 10,
 };
 
 /** Anything unclassified sits between outbound work and housekeeping. */
@@ -80,6 +84,9 @@ export const RESOURCES = {
   // posts; the idempotency key already prevents two existing, and this makes
   // the guarantee independent of that.
   'posts.publish_due': () => 'global:scheduled_posts',
+  // One log, one sealer. Two of these at once would seal overlapping ranges and
+  // produce two chains claiming to describe the same rows.
+  'audit.seal_and_verify': () => 'global:audit_log',
   // Per message, not per author: two different approved emails have no reason
   // to wait for each other.
   'outreach.send': (job) => `outreach:${job.payload?.messageId}`,

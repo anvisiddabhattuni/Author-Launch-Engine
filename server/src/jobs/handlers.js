@@ -3,6 +3,7 @@ import { draftApproachingKits } from '../services/milestoneWatcher.js';
 import { sendOutreachMessage } from '../services/outreachSender.js';
 import { notifyPendingReviews, notifyRaisedEscalations } from '../services/reviewNotifier.js';
 import { notifyAwaitingApproval } from '../agents/approvalNotificationAgent.js';
+import { sealAndVerify } from '../agents/auditSecurityAgent.js';
 import { monitorPressMaterials } from '../agents/trustMonitoringAgent.js';
 import { publishDue } from '../services/scheduler.js';
 
@@ -49,6 +50,13 @@ export const RECURRING = [
     scope: 'author',
     describe: (job) => `tell reviewers what is waiting on them for author ${job.author_id}`,
   },
+  {
+    // Global: the audit log is one log across every tenant, and an integrity
+    // check that ran per author would seal overlapping ranges of it.
+    kind: 'audit.seal_and_verify',
+    scope: 'global',
+    describe: () => 'seal new audit rows and re-verify every seal',
+  },
 ];
 
 export const HANDLERS = {
@@ -93,6 +101,25 @@ export const HANDLERS = {
       confirmed: scan.confirmed.length,
       producerStricter: scan.producerStricter.length,
       notified: alerts.notified.length,
+    };
+  },
+
+  /**
+   * STORY-013's integrity check.
+   *
+   * Seals what is new, then recomputes every seal from the live rows. It cannot
+   * stop anyone rewriting history; it makes sure that afterwards somebody knows.
+   */
+  'audit.seal_and_verify': async () => {
+    const { seal, verification } = await sealAndVerify();
+    return {
+      sealed: seal.sealed,
+      rows: seal.rows ?? 0,
+      status: verification.status,
+      checkpoints: verification.checked,
+      // Surfaced in the job result so a run that found tampering is visible in
+      // the worker's own health view, not only in the log it was checking.
+      tampering: verification.breaks.length > 0,
     };
   },
 
