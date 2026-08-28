@@ -33,6 +33,17 @@ export const config = {
   // anything at all (STORY-069). The number doing the real work in that story:
   // below this, the ratio of two averages is noise wearing a decimal point.
   minSamplePerCell: number(process.env.MIN_SAMPLE_PER_CELL, 8),
+  // Audit rows allowed to sit unsealed before the governance check complains
+  // (STORY-014). Not zero: the sealer runs on an interval, so a handful of
+  // unsealed rows is the system working, and a check that fires on one would be
+  // a permanent red light nobody looks at.
+  maxUnsealedAuditRows: number(process.env.MAX_UNSEALED_AUDIT_ROWS, 50),
+  // A decision made faster than this looks like a rubber stamp rather than a
+  // review. A signal, never a verdict — some decisions are genuinely obvious.
+  fastApprovalSeconds: number(process.env.FAST_APPROVAL_SECONDS, 5),
+  // Decisions a reviewer must have made before their pattern means anything.
+  // Below it the dashboard says so rather than inferring from three data points.
+  minDecisionsForPattern: number(process.env.MIN_DECISIONS_FOR_PATTERN, 10),
   // How long a post must have been live before its metrics count. A meme
   // measured an hour after publishing against a three-week-old text post is
   // measuring age, not format.

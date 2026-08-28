@@ -15,6 +15,7 @@ import {
   listEscalations,
   monitorPressMaterials,
   recommendMix,
+  trustDashboard,
 } from '../agents/trustMonitoringAgent.js';
 import { draftOutreachMessages } from '../agents/prOutreachAgent.js';
 import { config, PLATFORMS } from '../config.js';
@@ -1025,6 +1026,19 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Trust dashboard (STORY-014 / REQ-007) ---
+
+/**
+ * System health, pending approvals, recent actions and anomalies, in one place.
+ *
+ * Every number is produced by the module that owns it. A dashboard that
+ * recomputed what it displays would be a second implementation free to disagree
+ * with the first, and the disagreement would be invisible.
+ */
+router.get('/authors/:authorId/trust-dashboard', asyncRoute(async (req, res) => {
+  res.json(await trustDashboard({ authorId: Number(req.params.authorId) }));
 }));
 
 // --- Audit integrity (STORY-013 / REQ-006) ---

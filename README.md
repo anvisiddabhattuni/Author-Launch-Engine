@@ -26,6 +26,7 @@ Implemented so far:
 - **STORY-069 — Meme vs Text Performance Tracking** (Trust and Monitoring Agent), fulfilling `REQ-001`
 - **STORY-012 — Approval and Notification Agent Handles Approvals** (Approval and Notification Agent), fulfilling `REQ-005` and `REQ-004`
 - **STORY-013 — Audit and Security Agent Logs All Actions** (Audit and Security Agent), fulfilling `REQ-006` and `REQ-004`
+- **STORY-014 — Trust and Monitoring Agent Provides a Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-007` and `REQ-004`
 
 ## What works today
 
@@ -886,6 +887,55 @@ the next step, and it is a deployment decision rather than a schema one.
 > like after it has failed? If the answer is "exactly the same", the control is prevention with no
 > detection.**
 
+### STORY-014 — a score that is never allowed to outrank a broken promise
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Aggregate the data in Node | `services/governance.js`, `services/anomalies.js` |
+| 2. Serve it over REST | `GET /api/authors/:id/trust-dashboard` |
+| 3. React trust dashboard | `client/src/pages/TrustPage.jsx` |
+| 4. Governance score | `scoreOf` — a summary of a readable list, not a verdict |
+| 5. Anomaly detection | detectors that state their sample and decline below it |
+
+REQ-007's first real entry, and unusual for this project in that nothing was half-built: every input
+already existed and existed *separately*. Escalations on one screen, dead letters on another, audit
+integrity on a third, work waiting on a human on a fourth. Each observable, none observable together,
+so "is this system behaving" was four questions with four places to look.
+
+**The score is a summary, never the verdict.** A governance score is easy to build and easy to
+believe, because it is a number. Checks are split into **invariants** — things that must never be
+true, like content published with no approval on record — and **quality checks** — things that
+should be true, like every approval naming an authenticated session. One failed invariant is a
+`breach` regardless of score: a dashboard showing *94% compliant* above content that went out
+unapproved would be worse than one showing nothing. The demo prints exactly that case at 0.778.
+
+**The gates are checked from outside the code that enforces them.** `scheduleDraft`,
+`sendOutreachMessage` and `distributePressKit` each refuse unapproved work; these queries ask the
+database the same question independently. A gate that only checks itself is the arrangement STORY-008
+spent a whole story removing.
+
+**Nothing here is recomputed.** Audit integrity comes from the Audit and Security Agent, the pending
+queue from the Approval and Notification Agent. A dashboard that recomputed what it displays would be
+a second implementation free to disagree with the first, and the disagreement would be invisible —
+which is the specific way dashboards become confidently wrong.
+
+**The anomaly detectors say what they cannot conclude.** This is the part of a trust dashboard most
+likely to invent findings: a "spike" over four data points is noise, and a dashboard that reports one
+will be believed. Each detector reports its sample and returns `insufficient_evidence` rather than a
+guess, and the UI distinguishes *looked and found nothing* from *could not look* — a panel listing
+only its findings looks identical either way. The STORY-069 rule, applied to a different set of small
+numbers.
+
+**One detector is aimed at this system's own central claim:** a reviewer who has made enough
+decisions and never once rejected anything. An approval gate that never turns anything away is hard
+to tell apart from no gate at all.
+
+> **The demo's dashboard opens by reporting a breach, and that is the point.** STORY-013's stages
+> tamper with the audit log to prove detection works, and never repair it — so three stages later the
+> trust dashboard correctly refuses to call the system healthy. It would have been easy to quietly
+> restore the log first and show a clean board. **A monitoring surface is only worth having if you are
+> willing to look at it on a bad day**, and the honest demonstration is the one where it fails.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -931,7 +981,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 106 stages with evidence at each one.
+Prints 111 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1018,6 +1068,11 @@ Prints 106 stages with evidence at each one.
   triggers switched off and history rewritten while the log still refuses ordinary writes, the seal
   catching the edit, the same catch for removed rows, and what the checkpoints still cannot do.
 
+- **Stages 107–111, STORY-014:** the dashboard opening on a breach caused by the previous story's
+  tampering, every check with its severity and why it matters, the four gates checked from outside
+  the code that enforces them, the anomaly detectors declining to guess, and health and queue drawn
+  from the modules that own them.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -1028,7 +1083,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-412 tests across 99 suites. For each story the leading suites map one-to-one onto its Gherkin
+432 tests across 103 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -1053,6 +1108,9 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `MIN_MEMES_PER_BATCH` | `1` | Meme candidates every batch of social content must include |
 | `MIN_IDENTITY_MATCH` | `0.75` | Below this fit against the book's visual identity, a meme escalates |
 | `MIN_SAMPLE_PER_CELL` | `8` | Posts of each format, per platform, before the comparison says anything |
+| `MAX_UNSEALED_AUDIT_ROWS` | `50` | Unsealed audit rows tolerated before the governance check complains |
+| `FAST_APPROVAL_SECONDS` | `5` | A decision quicker than this looks like a rubber stamp |
+| `MIN_DECISIONS_FOR_PATTERN` | `10` | Decisions a reviewer needs before their pattern means anything |
 | `ENGAGEMENT_MATURITY_HOURS` | `48` | How long a post must be live before its metrics count |
 | `EXPERTISE_THRESHOLD` | `0.5` | Below this fit against the *author*, a listing does not qualify on expertise |
 | `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
@@ -1120,6 +1178,7 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/authors/:id/trust-dashboard` | Health, pending approvals, recent actions, anomalies |
 | `GET` | `/api/audit-integrity` | Whether the log still says what it said when written |
 | `POST` | `/api/audit-integrity/verify` | Seal what is new and re-check every seal (admin) |
 | `GET` | `/api/authors/:id/awaiting-approval` | One queue across all four things a human decides |
@@ -1271,6 +1330,14 @@ These are deliberate deferrals, not oversights:
   is the write-path cost the checkpoint design exists to avoid.
 - Nothing is *notified* when tampering is found — the verdict is logged with `needsHuman: true` and
   surfaced in the worker's run health, but the STORY-012 digest does not carry it.
+- The trust dashboard is assessed on request, not on a schedule, so nothing alerts when a check
+  starts failing — `governance.assessed` is written to the audit log each time it is viewed, which
+  makes the score a series only for as long as somebody keeps looking.
+- The governance checks are a fixed list in `governance.js`. A new outbound path added later gets no
+  invariant unless somebody remembers to write one, and nothing warns that it is unwatched — the same
+  shape of gap STORY-011 named for job resources.
+- Anomaly detection covers three patterns and no statistical baselines. There is not enough history
+  in this system for a rate-of-change detector to say anything honest, which is why there isn't one.
 - Notification is email only, and one channel means one failure mode. A reviewer who does not read
   email is a reviewer who is not notified, and nothing escalates a digest that was never opened.
 - A digest is sent once per item per reviewer and never repeated. That is the right default against

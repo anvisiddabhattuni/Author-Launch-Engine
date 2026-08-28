@@ -13,6 +13,7 @@ import { UploadPage } from './pages/UploadPage.jsx';
 import { WorkerPage } from './pages/WorkerPage.jsx';
 import { TemplatesPage } from './pages/TemplatesPage.jsx';
 import { PerformancePage } from './pages/PerformancePage.jsx';
+import { TrustPage } from './pages/TrustPage.jsx';
 
 export function App() {
   const [user, setUser] = useState(null);
@@ -105,6 +106,7 @@ export function App() {
           ['/worker', 'Worker'],
           ['/templates', 'Meme templates'],
           ['/performance', 'Meme vs text'],
+          ['/trust', 'Trust'],
           ['/audit', 'Audit log'],
         ].map(([to, label]) => (
           <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
@@ -125,6 +127,7 @@ export function App() {
           <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/press" element={<PressPage author={author} book={book} />} />
           <Route path="/worker" element={<WorkerPage />} />
+          <Route path="/trust" element={<TrustPage author={author} />} />
           <Route
             path="/performance"
             element={<PerformancePage author={author} user={user} />}

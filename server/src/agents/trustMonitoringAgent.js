@@ -1,7 +1,11 @@
 import { config } from '../config.js';
 import { query, withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { findAwaitingApproval } from './approvalNotificationAgent.js';
+import { verifyAuditLog } from './auditSecurityAgent.js';
+import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
+import { runChecks, scoreOf } from '../services/governance.js';
 import { DECIDABLE, assess, thresholds } from '../services/escalationPolicy.js';
 
 /**
@@ -350,4 +354,80 @@ export async function recommendMix({ authorId, now = new Date() }) {
   });
 
   return { proposed, skipped, comparison };
+}
+
+/**
+ * The trust dashboard (STORY-014).
+ *
+ * Everything it shows already existed and existed separately: escalations here,
+ * dead letters there, audit integrity somewhere else, work waiting on a human on
+ * a fourth screen. Each was observable and none of them were observable
+ * together, which meant nobody could answer "is this system behaving" without
+ * knowing where to look for four different answers.
+ *
+ * Assembled rather than computed. Every number here is produced by the module
+ * that owns it — audit integrity by the Audit and Security Agent, the queue by
+ * the Approval and Notification Agent — because a dashboard that recomputes what
+ * it displays is a second implementation free to disagree with the first, and
+ * the disagreement would be invisible.
+ */
+export async function trustDashboard({ authorId, now = new Date() } = {}) {
+  // The expensive one first, and only once: verification walks every seal.
+  const auditIntegrity = await verifyAuditLog({});
+
+  const [checks, anomalies, queue] = await Promise.all([
+    runChecks({ auditIntegrity }),
+    detectAnomalies({}),
+    authorId ? findAwaitingApproval({ authorId }) : Promise.resolve(null),
+  ]);
+
+  const governance = scoreOf(checks);
+
+  const { rows: jobs } = await query(
+    `SELECT status, COUNT(*)::int AS n FROM jobs GROUP BY status`,
+  );
+  const { rows: lastRun } = await query(
+    'SELECT MAX(finished_at) AS at FROM jobs WHERE status = $1',
+    ['done'],
+  );
+  const { rows: recent } = await query(
+    `SELECT actor, action, entity_type, entity_id, author_id, created_at
+       FROM audit_log ORDER BY id DESC LIMIT 20`,
+  );
+
+  const lastRunAt = lastRun[0].at ? new Date(lastRun[0].at) : null;
+  const minutesSinceRun = lastRunAt ? Math.round((now - lastRunAt) / 60000) : null;
+
+  const health = {
+    jobs: Object.fromEntries(jobs.map((j) => [j.status, j.n])),
+    lastWorkerRun: lastRunAt,
+    minutesSinceRun,
+    // A worker that has never run and a worker that stopped an hour ago look
+    // identical in a status count, and are very different problems.
+    workerSeen: lastRunAt !== null,
+    auditIntegrity: auditIntegrity.status,
+    sealedThrough: auditIntegrity.sealedThrough,
+  };
+
+  await recordAction({
+    actor: ACTOR,
+    action: 'governance.assessed',
+    entityType: 'author',
+    entityId: authorId ?? 'all',
+    authorId: authorId ?? null,
+    metadata: {
+      status: governance.status,
+      score: governance.score,
+      passed: governance.passed,
+      total: governance.total,
+      failedInvariants: governance.failedInvariants,
+      failedQuality: governance.failedQuality,
+      anomaliesFound: anomalies.findings,
+      // On the log so the score is a series rather than a snapshot — the audit
+      // log is already the append-only store this would otherwise need.
+      auditIntegrity: auditIntegrity.status,
+    },
+  });
+
+  return { governance, checks, anomalies, health, queue, recent, assessedAt: now };
 }

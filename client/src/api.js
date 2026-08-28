@@ -172,6 +172,9 @@ export const api = {
   scanEscalations: (authorId) =>
     request(`/authors/${authorId}/escalations/scan`, { method: 'POST' }),
 
+  // STORY-014 — one place to see whether the system is behaving
+  trustDashboard: (authorId) => request(`/authors/${authorId}/trust-dashboard`),
+
   // STORY-013 — is the audit log still what it said it was?
   auditIntegrity: () => request('/audit-integrity'),
   verifyAuditIntegrity: () => request('/audit-integrity/verify', { method: 'POST' }),

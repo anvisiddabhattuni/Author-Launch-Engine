@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011 to STORY-013, and STORY-066 to STORY-069), printed step by step.
+ * STORY-011 to STORY-014, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -18,6 +18,7 @@ import {
   notifyAwaitingApproval,
 } from './agents/approvalNotificationAgent.js';
 import { sealAuditLog, verifyAuditLog } from './agents/auditSecurityAgent.js';
+import { trustDashboard } from './agents/trustMonitoringAgent.js';
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
@@ -2082,9 +2083,65 @@ console.log('anything short of that is caught. Publishing digests somewhere this
 console.log('cannot reach is the next step, and it is a deployment decision, not a schema one.');
 console.log('\nAnd a detection is not a repair: the verdict is logged with needsHuman.');
 
+
+// ── STORY-014 ────────────────────────────────────────────────────────────────
+// The trust dashboard. Everything it shows already existed, and existed
+// separately — which meant nobody could answer "is this behaving" in one place.
+
+rule('107. The dashboard opens by reporting the damage this demo did');
+const board = await trustDashboard({ authorId: author.id });
+console.log(`STATUS: ${board.governance.status.toUpperCase()}   score ${board.governance.score} (${board.governance.passed}/${board.governance.total})`);
+console.log(board.governance.headline);
+console.log();
+console.log('The tampering three stages ago was never repaired, so the audit-integrity');
+console.log('invariant is failing. The dashboard reporting a breach against its own system');
+console.log('is the check working, not the dashboard misbehaving.');
+
+rule('108. Invariants, and why they outrank the score');
+console.log('result  severity   check');
+for (const c of board.checks) {
+  console.log(
+    `  ${(c.passed ? 'pass' : 'FAIL').padEnd(6)}${c.severity.padEnd(11)}${c.label}`,
+  );
+  if (!c.passed) console.log(`         ${c.violations} violation(s) — ${c.why}`);
+}
+console.log('\nA broken invariant is a breach whatever the score says. "94% compliant" printed');
+console.log('above content that went out unapproved would be worse than showing nothing.');
+
+rule('109. The four gates, checked from outside the code that enforces them');
+for (const c of board.checks.filter((x) => x.severity === 'invariant' && x.id.startsWith('gate.'))) {
+  console.log(`  ${(c.passed ? 'pass' : 'FAIL').padEnd(6)} ${c.label}`);
+}
+console.log('\nThe gates live inside scheduleDraft, sendOutreachMessage and distributePressKit.');
+console.log('These queries ask the database the same question independently — a gate that');
+console.log('checks only itself is the arrangement STORY-008 spent a story removing.');
+console.log('\n(The demo injects 40 published posts directly at stage 92 to build a sample for');
+console.log('the meme comparison. Those are genuinely ungated and the check is right to see');
+console.log('them, so they are excluded by external id — named here rather than hidden.)');
+
+rule('110. Anomalies, and the ones it will not guess at');
+console.log(`${board.anomalies.findings} finding(s) across ${board.anomalies.detectors.length} detectors\n`);
+for (const d of board.anomalies.detectors) {
+  console.log(`  ${d.confidence.padEnd(22)} ${d.label}`);
+  console.log(`  ${''.padEnd(22)} ${d.because}`);
+  for (const f of d.findings) console.log(`  ${''.padEnd(22)} → ${f.detail}`);
+}
+console.log('\nA "spike" over four data points is noise, and a dashboard that reports one will');
+console.log('be believed. Each detector states the sample it had and declines below it.');
+
+rule('111. Health, and the queue, from the modules that own them');
+console.log(`worker: ${board.health.workerSeen ? `last ran ${board.health.minutesSinceRun} min ago` : 'has never run'}`);
+console.log(`jobs  : ${Object.entries(board.health.jobs).map(([k, n]) => `${k} ${n}`).join(' · ')}`);
+console.log(`audit : ${board.health.auditIntegrity} (sealed through row ${board.health.sealedThrough})`);
+console.log(`queue : ${board.queue.total} waiting on a human, ${board.queue.escalated} escalated`);
+console.log(`        ${Object.entries(board.queue.byKind).map(([k, n]) => `${n} ${k}`).join(' · ')}`);
+console.log('\nNone of these numbers are computed here. Audit integrity comes from the Audit');
+console.log('and Security Agent, the queue from the Approval and Notification Agent — a');
+console.log('dashboard that recomputed them could disagree with them, invisibly.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-013 complete — the append-only claim is now something you can check');
-console.log('rather than something you take on trust\n');
+console.log('\nSTORY-014 complete — one place to ask whether the system is behaving, and a');
+console.log('score that is never allowed to outrank a broken promise\n');
 await closePool();
 
