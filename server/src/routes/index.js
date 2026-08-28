@@ -46,6 +46,7 @@ import {
   getActiveIdentity,
   listVersions,
   saveIdentity,
+  scoreIdentity,
 } from '../services/visualIdentity.js';
 import { MIN_POSTS_FOR_TRAIT, deriveVoice } from '../services/voiceProfile.js';
 
@@ -1091,12 +1092,31 @@ router.post('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async
  * the rule in force now: a licence that stops permitting commercial use is a
  * change to the row, and every reader should see the consequence immediately.
  */
-router.get('/meme-templates', asyncRoute(async (_req, res) => {
+router.get('/meme-templates', asyncRoute(async (req, res) => {
   const templates = await listTemplates();
+  // With a book in scope, say how each template sits against that book's
+  // identity too (STORY-068). Licensed and on-brand are different questions and
+  // an author browsing the library needs both — a template can be perfectly
+  // licensed and still not look like their book.
+  const identity = req.query.bookId
+    ? await getActiveIdentity({ bookId: Number(req.query.bookId) })
+    : null;
+
   res.json(
     templates.map((template) => {
       const verdict = assessTemplate(template);
-      return { ...template, usable: verdict.usable, reason: verdict.reason, detail: verdict.detail };
+      const fit = identity
+        ? scoreIdentity({ imageRef: template.imageRef, identity })
+        : null;
+      return {
+        ...template,
+        usable: verdict.usable,
+        reason: verdict.reason,
+        detail: verdict.detail,
+        identityScore: fit?.score ?? null,
+        identityFindings: fit?.findings ?? [],
+        identityFloor: config.minIdentityMatch,
+      };
     }),
   );
 }));

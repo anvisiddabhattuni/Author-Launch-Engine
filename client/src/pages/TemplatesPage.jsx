@@ -25,7 +25,7 @@ export function TemplatesPage({ user, author, book }) {
   const isAdmin = user?.role === 'admin';
 
   const refresh = useCallback(async () => {
-    setTemplates(await api.memeTemplates());
+    setTemplates(await api.memeTemplates(book?.id));
     if (author?.id && book?.id) {
       const guide = await api.visualIdentity(author.id, book.id);
       setIdentity(guide);
@@ -89,10 +89,19 @@ export function TemplatesPage({ user, author, book }) {
           <h2>Visual identity — version {active.version}</h2>
           <p className="hint">
             What every meme is generated against and scored against, so the output looks like one
-            book rather than one feed. {active.derivedFrom?.confidence}. Editing writes a new
-            version: later memes are judged against it, and memes already drafted keep pointing at
-            the version they were made to satisfy.
+            book rather than one feed. Editing writes a new version: later memes are judged against
+            it, and memes already drafted keep pointing at the version they were made to satisfy.
           </p>
+          {/* Where the palette came from, said as its own claim rather than
+              buried mid-sentence — an inferred palette and one the author set
+              are different things and should not read the same. */}
+          <div className="meta">
+            <span
+              className={`pill ${active.derivedFrom?.coverArt || active.createdBy !== 'system' ? 'approved' : 'neutral'}`}
+            >
+              palette {active.derivedFrom?.confidence}
+            </span>
+          </div>
 
           <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
             {['ground', 'ink', 'accent'].map((key) => (
@@ -240,6 +249,8 @@ export function TemplatesPage({ user, author, book }) {
         <p className="hint">
           Each template is a piece of artwork with named caption slots the drafter fills. A slot says
           what it is <em>for</em>, so a new template can be added without a code change to go with it.
+          The identity score says whether it looks like <em>this book</em> — a separate question from
+          whether it is licensed, and the generator prefers the ones that fit.
           {!isAdmin && ' Retiring a template is an operator action — sign in as ops to do it.'}
         </p>
 
@@ -251,6 +262,23 @@ export function TemplatesPage({ user, author, book }) {
               <span className="pill">{t.layout}</span>
               <span className="pill approved">{t.licence?.terms}</span>
               {t.licence?.attribution && <span className="mono">© {t.licence.attribution}</span>}
+              {/* Licensed and on-brand are different questions (STORY-068). A
+                  template can be perfectly licensed and still not look like
+                  this book, and the author is the one who decides what to do
+                  about that — retire it, or move the guide. */}
+              {t.identityScore !== null && (
+                <span
+                  className={`pill ${t.identityScore >= (t.identityFloor ?? 0.75) ? 'approved' : 'unnamed'}`}
+                  title={
+                    t.identityFindings?.length
+                      ? t.identityFindings.join(', ')
+                      : 'matches the active identity'
+                  }
+                >
+                  identity {Number(t.identityScore).toFixed(2)}
+                  {t.identityFindings?.length > 0 && ` · ${t.identityFindings.join(', ').replace(/_/g, ' ')}`}
+                </span>
+              )}
             </div>
 
             <div className="meme">

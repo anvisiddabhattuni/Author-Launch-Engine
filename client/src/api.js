@@ -180,7 +180,8 @@ export const api = {
     request(`/authors/${authorId}/books/${bookId}/visual-identity`, { method: 'POST', body }),
 
   // STORY-067 — the meme template library
-  memeTemplates: () => request('/meme-templates'),
+  memeTemplates: (bookId) =>
+    request(`/meme-templates${bookId ? `?bookId=${bookId}` : ''}`),
 
   addMemeTemplate: (template) =>
     request('/meme-templates', { method: 'POST', body: template }),
