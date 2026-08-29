@@ -27,6 +27,7 @@ Implemented so far:
 - **STORY-012 — Approval and Notification Agent Handles Approvals** (Approval and Notification Agent), fulfilling `REQ-005` and `REQ-004`
 - **STORY-013 — Audit and Security Agent Logs All Actions** (Audit and Security Agent), fulfilling `REQ-006` and `REQ-004`
 - **STORY-014 — Trust and Monitoring Agent Provides a Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-007` and `REQ-004`
+- **STORY-015 — Infrastructure and Deployment Agent Manages Deployment** (Infrastructure and Deployment Agent), fulfilling `REQ-008` and `REQ-004` — **partially; see below**
 
 ## What works today
 
@@ -936,6 +937,63 @@ to tell apart from no gate at all.
 > restore the log first and show a clean board. **A monitoring surface is only worth having if you are
 > willing to look at it on a bad day**, and the honest demonstration is the one where it fails.
 
+### STORY-015 — the half a laptop can finish, and the half it cannot
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Docker configuration for the stack | `server/Dockerfile`, `server/Dockerfile.worker`, `client/Dockerfile`, `docker-compose.yml` — **never built** |
+| 2. CI/CD pipeline | `.github/workflows/ci.yml` — **never run** |
+| 3. Deploy to a public demo URL | **not done — see below** |
+| 4. Deployment logs for rollback and audit | `020_deployments.sql`, `services/deployment.js` |
+| 5. Reliable availability | `/api/ready`, graceful shutdown in `server/src/index.js` |
+
+**This story is not finished, and the parts that are not finished are named rather than implied.**
+The acceptance clause asks for deployment to a public demo URL using Docker. There is no cloud
+account, no credentials, and **Docker is not installed on the machine this was written on**. The
+Dockerfiles, the compose stack and the CI workflow are written and reviewed and have **never been
+executed** — each says so in its own opening lines, and there is a test asserting that they do. A
+green tick over an untested claim would have been a worse outcome than an unfinished story.
+
+What *is* built and verified is the half that turns out to matter operationally, and it is the half
+the trust clause actually names.
+
+**Liveness and readiness are different questions.** `/api/health` answers "is this process up" —
+what a platform restarts on. `/api/ready` answers "is it safe to send this instance traffic" — what a
+load balancer asks, returning 503 when the answer is no. Conflating them means a schema mismatch gets
+treated as a crash and restarted into the same mismatch, forever.
+
+**Readiness checks the thing a rolling deploy actually breaks.** An instance whose code expects a
+migration nobody applied starts perfectly, answers `/health`, and throws on the first request that
+touches a column that is not there. `/api/ready` compares the migrations this build ships against the
+migrations the database has run, and names the missing files. Demo stage 114 removes one and watches
+readiness refuse.
+
+**The API drains on SIGTERM.** The worker has done this since STORY-065 — *"so a deploy does not
+create a stale claim"* — and the API never did: `listen()` with no signal handler, so every deploy
+severed whatever requests were in flight. Readiness flips first so traffic stops arriving, then
+in-flight requests finish, then the process exits. Verified by holding a database lock, sending
+SIGTERM, and watching the blocked request return **HTTP 200 with a full body** afterwards.
+
+**A release you can identify is a release you can roll back to.** Each instance records what it is —
+version, commit, and the schema it expects against the schema it found — written *by the process
+itself at boot*, because the process is the only thing that knows which commit it is actually
+running. A record produced by the deployer describes what it intended to start. Stopping on purpose
+and crashing are recorded differently, because an instance that keeps crashing and restarting looks
+like a healthy deploy history otherwise.
+
+**What still needs a platform**, precisely: somewhere to run the images; a registry to push them to;
+secret storage for `JWT_SECRET` and `DATABASE_URL`; a managed Postgres with backups; a load balancer
+wired to `/api/ready` rather than `/api/health`; a termination grace period longer than
+`SHUTDOWN_GRACE_MS`; and a migration step that runs once per release rather than per instance — the
+compose file models that last one with a `migrate` service the API waits on, which is the shape, not
+a proof it works.
+
+> **The temptation here was to write a Dockerfile and call the story done.** It would have looked
+> identical to a finished one in the diff, and the acceptance criterion has a checkbox that could
+> have been ticked. **Infrastructure you have never executed is a design document with a filename
+> that makes it look like a build** — so it is committed with what it is written at the top of each
+> file, and there is a test that fails if anyone removes the disclaimer.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -981,7 +1039,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 111 stages with evidence at each one.
+Prints 116 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1073,6 +1131,10 @@ Prints 111 stages with evidence at each one.
   the code that enforces them, the anomaly detectors declining to guess, and health and queue drawn
   from the modules that own them.
 
+- **Stages 112–116, STORY-015:** what this story could not do and why, liveness against readiness,
+  an instance running ahead of its migrations being refused traffic, the release record that makes a
+  rollback possible, and the difference between stopping and crashing.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -1083,7 +1145,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-432 tests across 103 suites. For each story the leading suites map one-to-one onto its Gherkin
+446 tests across 106 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -1178,6 +1240,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/ready` | Readiness — 503 when this instance should not be routed to (public) |
+| `GET` | `/api/deployments` | What is running, and what ran before it |
 | `GET` | `/api/authors/:id/trust-dashboard` | Health, pending approvals, recent actions, anomalies |
 | `GET` | `/api/audit-integrity` | Whether the log still says what it said when written |
 | `POST` | `/api/audit-integrity/verify` | Seal what is new and re-check every seal (admin) |
@@ -1288,6 +1352,9 @@ These are deliberate deferrals, not oversights:
 - A track record contributes to expertise by *type* — an author who has done one event scores a
   little on every event, including a protocol meetup (0.075, well under the floor). Coarse but
   harmless at these weights; it would need topic-level matching before it could carry more.
+- **Nothing is deployed.** STORY-015 built readiness, release records and graceful shutdown, all
+  verified locally; the Dockerfiles, compose stack and CI workflow have never been executed, and
+  there is no public URL. The list of what needs a platform is in the STORY-015 section above.
 - The worker exists as of STORY-065 but has to be started (`npm run worker`) and is not supervised —
   nothing restarts it if the process dies, and a machine with no worker running looks identical to a
   machine with nothing to do. Deployment and process supervision are R5. As of STORY-011 running

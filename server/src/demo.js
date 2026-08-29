@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011 to STORY-014, and STORY-066 to STORY-069), printed step by step.
+ * STORY-011 to STORY-015, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -19,6 +19,15 @@ import {
 } from './agents/approvalNotificationAgent.js';
 import { sealAuditLog, verifyAuditLog } from './agents/auditSecurityAgent.js';
 import { trustDashboard } from './agents/trustMonitoringAgent.js';
+import {
+  appliedMigrations,
+  deploymentHistory,
+  expectedMigrations,
+  readiness,
+  recordReady,
+  recordStart,
+  recordStop,
+} from './services/deployment.js';
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
@@ -2139,9 +2148,80 @@ console.log('\nNone of these numbers are computed here. Audit integrity comes fr
 console.log('and Security Agent, the queue from the Approval and Notification Agent — a');
 console.log('dashboard that recomputed them could disagree with them, invisibly.');
 
+
+// ── STORY-015 ────────────────────────────────────────────────────────────────
+// The Infrastructure and Deployment Agent. Half of this story cannot be done
+// from a laptop, and the half that can is the half that matters operationally.
+
+rule('112. What this story could not do, first');
+console.log('The clause asks for deployment to a public demo URL using Docker. There is no');
+console.log('cloud account, no credentials, and Docker is not installed on the machine this');
+console.log('was built on. The Dockerfiles, the compose stack and the CI workflow are');
+console.log('written and reviewed and have never been executed — each says so in its own');
+console.log('first lines, and so does the README. A green tick over an untested claim would');
+console.log('be a worse outcome than an unfinished story.');
+
+rule('113. Liveness and readiness are different questions');
+const live = await readiness({});
+console.log(`ready: ${live.ready}  (status ${live.status})`);
+for (const c of live.checks) {
+  console.log(`  ${(c.ok ? 'ok  ' : 'FAIL')}  ${c.id.padEnd(11)} ${c.detail}`);
+}
+console.log('\n/health answers "is this process up" — what a platform restarts on.');
+console.log('/ready answers "is it safe to send this traffic" — what a load balancer asks.');
+console.log('Conflating them means a schema mismatch gets treated as a crash and restarted');
+console.log('into the same mismatch, forever.');
+
+rule('114. The failure a rolling deploy actually produces');
+const appliedNow = await appliedMigrations();
+const lastMigration = appliedNow[appliedNow.length - 1];
+console.log(`this build expects ${expectedMigrations().length} migrations; the database has ${appliedNow.length}.`);
+console.log(`\nremoving ${lastMigration} from the applied list — new code, old schema:\n`);
+await query('DELETE FROM schema_migrations WHERE filename = $1', [lastMigration]);
+const behind = await readiness({});
+console.log(`  ready: ${behind.ready}  (status ${behind.status})`);
+console.log(`  ${behind.checks.find((c) => c.id === 'schema').detail}`);
+await query('INSERT INTO schema_migrations (filename) VALUES ($1)', [lastMigration]);
+console.log(`\n  restored → ready: ${(await readiness({})).ready}`);
+console.log('\nThat instance starts perfectly and answers /health. It throws on the first');
+console.log('request touching a column that is not there. Readiness is what keeps traffic');
+console.log('off it in the minutes before somebody notices.');
+
+rule('115. A release you can identify is a release you can roll back to');
+const demoRelease = await recordStart({ version: '0.1.0-demo', commit: 'demo0000' });
+await recordReady({ deploymentId: demoRelease.id, readinessResult: await readiness({}) });
+const { current: liveRelease, history: releaseHistory } = await deploymentHistory({ limit: 5 });
+console.log('version        commit    schema      status   instance');
+for (const d of releaseHistory.slice(0, 5)) {
+  console.log(
+    `  ${String(d.version).padEnd(13)}${String(d.commit_sha || '—').padEnd(10)}` +
+      `${String(d.migrations_applied + '/' + d.migrations_expected).padEnd(12)}` +
+      `${String(d.status).padEnd(9)}${d.instance}`,
+  );
+}
+console.log(`\ncurrently running: ${liveRelease ? liveRelease.version : '(nothing)'}`);
+console.log('\nWritten by the process itself at boot, not by whatever deployed it: the');
+console.log('process is the only thing that knows which commit it is actually running.');
+console.log('A record produced by the deployer describes what it intended to start.');
+
+rule('116. Stopping on purpose, and stopping otherwise');
+await recordStop({ deploymentId: demoRelease.id, reason: 'SIGTERM', clean: true });
+const crashed = await recordStart({ version: '0.1.0-demo', commit: 'demo0000' });
+await recordStop({ deploymentId: crashed.id, reason: 'out of memory', clean: false });
+const { rows: stops } = await query(
+  `SELECT status, stop_reason FROM deployments WHERE version = '0.1.0-demo' ORDER BY id DESC LIMIT 2`,
+);
+for (const s of stops) console.log(`  ${s.status.padEnd(9)} ${s.stop_reason}`);
+console.log('\nAn instance that keeps crashing and restarting looks like a healthy deploy');
+console.log('history unless the difference between the two is recorded.');
+console.log('\nThe API also drains now: SIGTERM stops new connections, finishes the requests');
+console.log('in hand, and exits. Verified by holding a database lock, sending SIGTERM, and');
+console.log('watching the blocked request return HTTP 200 with a full body afterwards — the');
+console.log('worker has done this since STORY-065 and the API never did.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-014 complete — one place to ask whether the system is behaving, and a');
-console.log('score that is never allowed to outrank a broken promise\n');
+console.log('\nSTORY-015 partially complete — readiness, release records and graceful');
+console.log('shutdown are built and verified; the deploy itself needs a platform\n');
 await closePool();
 

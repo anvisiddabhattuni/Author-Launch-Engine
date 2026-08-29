@@ -1,9 +1,15 @@
-# Optional: provides the mandated PostgreSQL 17 when you do not have one
-# locally. The default DATABASE_URL already points at localhost:5432, so this
-# is a drop-in replacement for a Homebrew install.
+# The stack (STORY-015).
 #
-#   docker compose up -d
+# NOT RUN. Docker is not installed on the machine these services were written
+# on, so nothing below has been executed — reviewed, not verified.
+#
+# `docker compose up postgres` alone remains what it always was: a drop-in
+# replacement for a Homebrew Postgres while you run the app with `npm run dev`.
+#
+#   docker compose up -d postgres     # just the database, as before
 #   npm run db:reset
+#
+#   docker compose up                 # the whole stack (untested)
 
 services:
   postgres:
@@ -25,3 +31,58 @@ services:
 
 volumes:
   ale-pgdata:
+
+  migrate:
+    # Migrations run once, as their own unit, before anything serves.
+    # Doing this in the API's entrypoint means N instances race to apply the
+    # same DDL on every deploy — and readiness already refuses to serve an
+    # instance whose schema is behind, which only works if something else is
+    # responsible for moving it forward.
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ['node', 'server/src/db/migrate.js']
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports: ['4000:4000']
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+      GIT_COMMIT: ${GIT_COMMIT:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: server/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # Safe to scale: STORY-011 gave every job a priority and an exclusive
+    # resource, and STORY-065 made claiming and shutdown safe under concurrency.
+    deploy:
+      replicas: 1
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    ports: ['8080:8080']
+    depends_on: [api]

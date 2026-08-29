@@ -1,0 +1,28 @@
+# Worker image (STORY-015). Same code, different entrypoint.
+#
+# NOT BUILT OR RUN — see server/Dockerfile.
+#
+# A separate container rather than a second process in the API's: they scale on
+# different signals (requests versus queue depth), and a worker that dies should
+# not take an API instance with it.
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+RUN npm ci --omit=dev --workspace server --include-workspace-root
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+RUN addgroup -S app && adduser -S app -G app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/server/node_modules ./server/node_modules
+COPY package.json ./
+COPY server ./server
+USER app
+ENV NODE_ENV=production
+
+# No port and no HTTP health check: the worker serves nothing. Whether it is
+# alive is answered by the job rows it finishes, which is what the trust
+# dashboard reads (STORY-014).
+CMD ["node", "server/src/jobs/worker.js"]

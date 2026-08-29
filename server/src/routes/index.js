@@ -8,6 +8,7 @@ import {
   notifyAwaitingApproval,
 } from '../agents/approvalNotificationAgent.js';
 import { sealAndVerify, verifyAuditLog } from '../agents/auditSecurityAgent.js';
+import { deploymentHistory, readiness } from '../services/deployment.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
@@ -90,9 +91,33 @@ router.get('/auth/me', asyncRoute(async (req, res) => {
   res.json({ user: req.user });
 }));
 
+/**
+ * Liveness: is this process running and able to reach its database?
+ *
+ * What a platform restarts on. Kept as it was, because things already depend on
+ * it and because "restart me" and "stop sending me traffic" are different
+ * answers to different questions — conflating them means a schema mismatch gets
+ * treated as a crash and restarted into the same mismatch forever.
+ */
 router.get('/health', asyncRoute(async (_req, res) => {
   await query('SELECT 1');
   res.json({ ok: true, provider: config.aiProvider });
+}));
+
+/**
+ * Readiness: is it safe to send this instance traffic?
+ *
+ * 503 when not, because a load balancer reads the status code and not the body.
+ * The body is for the person who then has to work out why.
+ */
+router.get('/ready', asyncRoute(async (_req, res) => {
+  const result = await readiness({});
+  res.status(result.ready ? 200 : 503).json(result);
+}));
+
+/** What is running, and what ran before it. The first question of an incident. */
+router.get('/deployments', asyncRoute(async (_req, res) => {
+  res.json(await deploymentHistory({}));
 }));
 
 // --- Authors, book content and social history (build step 1's backend) ---

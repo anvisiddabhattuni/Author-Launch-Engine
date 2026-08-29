@@ -1,0 +1,76 @@
+# CI (STORY-015).
+#
+# NOT RUN. This repository has a GitHub remote but no Actions history, so this
+# workflow has never executed — reviewed, not verified, and the README says so.
+#
+# It stops at "the tests pass and the images build". There is no deploy job,
+# because there is nothing to deploy to: no cloud account, no credentials, no
+# environment. A deploy job that referenced secrets nobody has set would be a
+# red X on every push pretending to be a pipeline.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Matches the version the migrations are written against. A CI database
+        # on a different major version tests something nobody runs.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: author_launch_engine
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d author_launch_engine"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      # The API refuses to start in production without this, which is the point
+      # of that check — so CI has to set one rather than the check being untested.
+      JWT_SECRET: ci-only-not-a-secret
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run db:reset
+      - run: npm test
+
+      # The suites share one database and several assert on cross-suite
+      # behaviour, so a single green run is weaker evidence than it looks. Three
+      # runs is what caught two latent flakes during STORY-013 and STORY-014.
+      - name: Run the suite three times
+        run: |
+          for i in 1 2 3; do
+            npm run db:reset
+            npm test
+          done
+
+      - run: npm run build --workspace client
+      - name: The demo must run end to end
+        run: npm run db:reset && npm run demo
+
+  images:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      # Build only. Pushing needs a registry and credentials that do not exist,
+      # and building is what catches a broken Dockerfile — which is the failure
+      # these files are most likely to have, never having been built.
+      - run: docker build -f server/Dockerfile -t ale-api:${{ github.sha }} .
+      - run: docker build -f server/Dockerfile.worker -t ale-worker:${{ github.sha }} .
+      - run: docker build -f client/Dockerfile -t ale-client:${{ github.sha }} .

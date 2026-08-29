@@ -15,7 +15,11 @@ const unauthorized = (message) => Object.assign(new Error(message), { status: 40
 const forbidden = (message) => Object.assign(new Error(message), { status: 403 });
 
 /** Paths that must work before anyone has a session. */
-const PUBLIC_PATHS = new Set(['/health', '/auth/login']);
+// `/ready` is public for the same reason `/health` is: the thing asking is a
+// load balancer, and it has no credentials and never will. It exposes which
+// migrations are missing, which is operational detail rather than tenant data
+// (STORY-015).
+const PUBLIC_PATHS = new Set(['/health', '/ready', '/auth/login']);
 
 export function authenticate(req, _res, next) {
   if (PUBLIC_PATHS.has(req.path)) return next();
