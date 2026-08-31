@@ -1,3 +1,4 @@
+import { callExternal, httpJson } from '../agents/apiIntegrationAgent.js';
 import { config } from '../config.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
@@ -56,25 +57,29 @@ export const outreachAnthropicProvider = {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
 
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': config.anthropicApiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: config.anthropicModel,
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: buildPrompt({ opportunity, book, author }) }],
-      }),
+    // Through the API Integration Agent (STORY-016): timed out rather than
+    // hanging forever, retried on a 429 or a 5xx and not on a 400, and every
+    // attempt on the record. This is the one adapter that makes a real
+    // network call, so it is the one where a bare fetch was a live hazard.
+    const body = await callExternal({
+      service: 'anthropic',
+      operation: 'outreach.generate',
+      fn: (signal) =>
+        httpJson(API_URL, {
+          method: 'POST',
+          signal,
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': config.anthropicApiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+                  model: config.anthropicModel,
+                  max_tokens: 1500,
+                  messages: [{ role: 'user', content: buildPrompt({ opportunity, book, author }) }],
+                }),
+        }),
     });
-
-    if (!response.ok) {
-      throw new Error(`Anthropic API ${response.status}: ${await response.text()}`);
-    }
-
-    const body = await response.json();
     const text = (body.content ?? []).map((part) => part.text ?? '').join('');
     const message = parseMessage(text);
 

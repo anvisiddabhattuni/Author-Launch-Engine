@@ -85,7 +85,17 @@ before(async () => {
 after(async () => {
   await query('DELETE FROM authors WHERE id = $1', [authorId]);
   if (created.length > 0) {
-    await query('DELETE FROM meme_templates WHERE key = ANY($1)', [created]);
+    // Retired, not deleted — which is the rule this very story argues for.
+    // These fixtures carry real licences, so the generator can and does pick
+    // them; deleting one while another suite is mid-draft violates the
+    // drafts.meme_template_id foreign key. `db:reset` clears them between runs.
+    await query(
+      `UPDATE meme_templates
+          SET active = FALSE, retired_at = COALESCE(retired_at, now()),
+              retired_reason = 'test fixture'
+        WHERE key = ANY($1) AND active`,
+      [created],
+    );
   }
   await closePool();
 });

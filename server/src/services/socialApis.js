@@ -6,21 +6,40 @@
  * inside this file only. Deterministic ids keep the demo reproducible.
  */
 
+import { callExternal } from '../agents/apiIntegrationAgent.js';
+
 let counter = 0;
 
 const publisher = (platform, maxChars) => ({
   platform,
   maxChars,
-  async publish({ content, scheduledFor }) {
-    if (content.length > maxChars) {
-      throw new Error(`${platform} rejected the post: ${content.length} chars exceeds ${maxChars}`);
-    }
-    counter += 1;
-    return {
-      externalId: `${platform}_${String(counter).padStart(6, '0')}`,
-      permalink: `https://mock.${platform}.test/p/${counter}`,
-      publishedAt: scheduledFor ?? new Date().toISOString(),
-    };
+  // Routed through the API Integration Agent (STORY-016), so the call is timed,
+  // logged and retried on the provider's terms rather than ours. The adapter
+  // itself stays a mock; the policy around it is the part that has to be real
+  // before a live SDK is dropped in here.
+  async publish({ content, scheduledFor, authorId = null }) {
+    return callExternal({
+      service: platform,
+      operation: 'publish',
+      authorId,
+      fn: async () => {
+        if (content.length > maxChars) {
+          // The provider rejecting the content is an answer, not a fault. It
+          // carries a 400 so the retry policy does not ask again and get the
+          // same refusal more slowly.
+          throw Object.assign(
+            new Error(`${platform} rejected the post: ${content.length} chars exceeds ${maxChars}`),
+            { status: 400 },
+          );
+        }
+        counter += 1;
+        return {
+          externalId: `${platform}_${String(counter).padStart(6, '0')}`,
+          permalink: `https://mock.${platform}.test/p/${counter}`,
+          publishedAt: scheduledFor ?? new Date().toISOString(),
+        };
+      },
+    });
   },
 });
 

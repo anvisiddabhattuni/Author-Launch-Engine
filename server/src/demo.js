@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011 to STORY-015, and STORY-066 to STORY-069), printed step by step.
+ * STORY-011 to STORY-016, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -19,6 +19,7 @@ import {
 } from './agents/approvalNotificationAgent.js';
 import { sealAuditLog, verifyAuditLog } from './agents/auditSecurityAgent.js';
 import { trustDashboard } from './agents/trustMonitoringAgent.js';
+import { callExternal, integrationHealth, isRetryable } from './agents/apiIntegrationAgent.js';
 import {
   appliedMigrations,
   deploymentHistory,
@@ -2219,9 +2220,108 @@ console.log('in hand, and exits. Verified by holding a database lock, sending SI
 console.log('watching the blocked request return HTTP 200 with a full body afterwards — the');
 console.log('worker has done this since STORY-065 and the API never did.');
 
+
+// ── STORY-016 ────────────────────────────────────────────────────────────────
+// The API Integration Agent. The adapters already worked; what they had no
+// notion of is the ways a real provider fails.
+
+rule('117. 48 outbound calls, and until now none of them recorded');
+const health117 = await integrationHealth({ sinceHours: 24 });
+console.log('service      calls  attempts  ok  retried  timed out  failed  avg ms');
+for (const h of health117) {
+  console.log(
+    `  ${h.service.padEnd(11)}${String(h.calls).padEnd(7)}${String(h.attempts).padEnd(10)}` +
+      `${String(h.ok).padEnd(4)}${String(h.retried).padEnd(9)}${String(h.timed_out).padEnd(11)}` +
+      `${String(h.failed).padEnd(8)}${h.avg_ms}`,
+  );
+}
+console.log('\nThe audit log has always recorded that a post was published. It never recorded');
+console.log('that a platform answered 200 in 1.2s on the second attempt — and when a provider');
+console.log('starts degrading, that is the fact that tells you.');
+
+rule('118. A 429 and a 400 are opposite instructions');
+console.log('status              treated as');
+for (const [label, err] of [
+  ['429 rate limited', { status: 429 }],
+  ['503 unavailable', { status: 503 }],
+  ['400 bad request', { status: 400 }],
+  ['404 not found', { status: 404 }],
+  ['connection reset', new Error('ECONNRESET')],
+  ['no response at all', { name: 'TimeoutError' }],
+]) {
+  console.log(`  ${label.padEnd(20)}${isRetryable(err) ? 'try again' : 'the provider answered — stop'}`);
+}
+console.log('\nRetrying a rejected request gets the same refusal more slowly. Not retrying a');
+console.log('rate limit throws away work that would have succeeded a second later. Neither');
+console.log('mistake was possible before, because there was no retry at all.');
+
+rule('119. A rate limit, ridden out');
+let demoAttempts = 0;
+const rode = await callExternal({
+  service: 'demo-provider',
+  operation: 'flaky',
+  sleep: () => Promise.resolve(),
+  fn: async () => {
+    demoAttempts += 1;
+    if (demoAttempts < 3) {
+      throw Object.assign(new Error('rate limited'), { status: 429, retryAfterMs: 250 });
+    }
+    return { ok: true };
+  },
+});
+console.log(`succeeded on attempt ${demoAttempts}: ${JSON.stringify(rode)}`);
+const { rows: rideRows } = await query(
+  `SELECT attempt, outcome, status FROM api_interactions
+    WHERE service = 'demo-provider' AND operation = 'flaky' ORDER BY attempt`,
+);
+for (const r of rideRows) {
+  console.log(`  attempt ${r.attempt}  ${String(r.outcome).padEnd(10)} status ${r.status ?? '-'}`);
+}
+console.log('\nEvery attempt is its own row. A call that succeeded on the third try and one');
+console.log('that succeeded first time are very different pictures of a provider.');
+
+rule('120. A provider that accepts the connection and never answers');
+try {
+  await callExternal({
+    service: 'demo-provider',
+    operation: 'hangs',
+    timeoutMs: 400,
+    maxAttempts: 2,
+    sleep: () => Promise.resolve(),
+    fn: (signal) =>
+      new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')));
+      }),
+  });
+} catch (error) {
+  console.log(`gave up: ${error.message}`);
+}
+const { rows: hungRows } = await query(
+  `SELECT attempt, outcome FROM api_interactions
+    WHERE service = 'demo-provider' AND operation = 'hangs' ORDER BY attempt`,
+);
+console.log(`  ${hungRows.map((r) => `attempt ${r.attempt} ${r.outcome}`).join('  ·  ')}`);
+console.log('\nA bare fetch in Node has no timeout. Against a socket that accepts and never');
+console.log('answers it waits indefinitely — measured at over four seconds before the test');
+console.log('harness itself gave up, and it would have waited all day. Since STORY-015 that');
+console.log('would also have held the graceful drain open until the platform killed it.');
+
+rule('121. Giving up is an event, not a silence');
+const givenUp = await listAuditLog({ limit: 200 });
+for (const entry of givenUp.filter((e) => e.action === 'api.call_failed').slice(0, 3)) {
+  const m = entry.metadata ?? {};
+  console.log(
+    `${entry.created_at.toISOString()}  ${String(m.service).padEnd(15)} ${String(m.operation).padEnd(10)} ` +
+      `after ${m.attempts} attempts · gaveUp=${m.gaveUp}`,
+  );
+}
+console.log('\nThe interactions table has the detail; the audit log has the fact that the');
+console.log('system stopped trying. A provider nobody can reach is a decision somebody');
+console.log('should know was made on their behalf.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-015 partially complete — readiness, release records and graceful');
-console.log('shutdown are built and verified; the deploy itself needs a platform\n');
+console.log('\nSTORY-016 complete — every outbound call is timed, classified, retried on the');
+console.log('provider\'s terms, and on the record\n');
 await closePool();
 

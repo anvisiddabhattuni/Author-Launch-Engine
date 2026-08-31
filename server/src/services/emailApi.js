@@ -6,6 +6,8 @@
  * deterministic to keep the demo reproducible.
  */
 
+import { callExternal } from '../agents/apiIntegrationAgent.js';
+
 let counter = 0;
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -13,18 +15,31 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const emailApi = {
   name: 'mock-email',
 
-  async send({ to, subject, body }) {
-    if (!EMAIL_PATTERN.test(to ?? '')) {
-      throw new Error(`Invalid recipient address: "${to}"`);
-    }
-    if (!subject?.trim()) throw new Error('Email subject is required');
-    if (!body?.trim()) throw new Error('Email body is required');
+  async send({ to, subject, body, authorId = null }) {
+    return callExternal({
+      service: 'email',
+      operation: 'send',
+      authorId,
+      fn: async () => {
+        // Validation failures are 400s: the message is wrong, and sending it
+        // again unchanged produces the same rejection.
+        if (!EMAIL_PATTERN.test(to ?? '')) {
+          throw Object.assign(new Error(`Invalid recipient address: "${to}"`), { status: 400 });
+        }
+        if (!subject?.trim()) {
+          throw Object.assign(new Error('Email subject is required'), { status: 400 });
+        }
+        if (!body?.trim()) {
+          throw Object.assign(new Error('Email body is required'), { status: 400 });
+        }
 
-    counter += 1;
-    return {
-      externalId: `msg_${String(counter).padStart(6, '0')}`,
-      acceptedAt: new Date().toISOString(),
-    };
+        counter += 1;
+        return {
+          externalId: `msg_${String(counter).padStart(6, '0')}`,
+          acceptedAt: new Date().toISOString(),
+        };
+      },
+    });
   },
 };
 

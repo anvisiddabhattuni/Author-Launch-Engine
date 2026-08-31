@@ -8,6 +8,7 @@ import {
   notifyAwaitingApproval,
 } from '../agents/approvalNotificationAgent.js';
 import { sealAndVerify, verifyAuditLog } from '../agents/auditSecurityAgent.js';
+import { integrationHealth } from '../agents/apiIntegrationAgent.js';
 import { deploymentHistory, readiness } from '../services/deployment.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
@@ -113,6 +114,20 @@ router.get('/health', asyncRoute(async (_req, res) => {
 router.get('/ready', asyncRoute(async (_req, res) => {
   const result = await readiness({});
   res.status(result.ready ? 200 : 503).json(result);
+}));
+
+/** What every external integration has been doing, and how well (STORY-016). */
+router.get('/integrations', asyncRoute(async (req, res) => {
+  const sinceHours = Number(req.query.sinceHours ?? 24);
+  const services = await integrationHealth({ sinceHours });
+  const { rows: recentFailures } = await query(
+    `SELECT service, operation, attempt, outcome, status, duration_ms, error, created_at
+       FROM api_interactions
+      WHERE outcome <> 'ok' AND created_at > now() - make_interval(hours => $1)
+      ORDER BY id DESC LIMIT 20`,
+    [sinceHours],
+  );
+  res.json({ sinceHours, services, recentFailures });
 }));
 
 /** What is running, and what ran before it. The first question of an incident. */

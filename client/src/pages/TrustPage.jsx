@@ -118,6 +118,50 @@ export function TrustPage({ author }) {
           A worker that has never run and a worker that stopped an hour ago look identical in a
           status count, and are very different problems — so the two are distinguished here.
         </p>
+
+        {health.integrations?.length > 0 && (
+          <>
+            <h3>External integrations, last 24 hours</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Service</th>
+                  <th>Calls</th>
+                  <th>Attempts</th>
+                  <th>Retried</th>
+                  <th>Timed out</th>
+                  <th>Failed</th>
+                  <th>Avg</th>
+                </tr>
+              </thead>
+              <tbody>
+                {health.integrations.map((i) => (
+                  <tr key={i.service}>
+                    <td>{i.service}</td>
+                    <td className="mono">{i.calls}</td>
+                    <td className="mono">{i.attempts}</td>
+                    <td className="mono">
+                      {/* Attempts above calls is the early signal: the provider
+                          is still working, and working harder than it should. */}
+                      {i.retried > 0 ? <span className="pill unnamed">{i.retried}</span> : '—'}
+                    </td>
+                    <td className="mono">
+                      {i.timed_out > 0 ? <span className="pill escalated">{i.timed_out}</span> : '—'}
+                    </td>
+                    <td className="mono">
+                      {i.failed > 0 ? <span className="pill escalated">{i.failed}</span> : '—'}
+                    </td>
+                    <td className="mono">{i.avg_ms}ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="hint">
+              Attempts higher than calls means work is being retried — a provider degrading rather
+              than failing, which is the state worth catching before it becomes the other one.
+            </p>
+          </>
+        )}
       </div>
 
       {queue && (

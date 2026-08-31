@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { query, withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { integrationHealth } from './apiIntegrationAgent.js';
 import { findAwaitingApproval } from './approvalNotificationAgent.js';
 import { verifyAuditLog } from './auditSecurityAgent.js';
 import { detectAnomalies } from '../services/anomalies.js';
@@ -375,10 +376,13 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
   // The expensive one first, and only once: verification walks every seal.
   const auditIntegrity = await verifyAuditLog({});
 
-  const [checks, anomalies, queue] = await Promise.all([
+  const [checks, anomalies, queue, integrations] = await Promise.all([
     runChecks({ auditIntegrity }),
     detectAnomalies({}),
     authorId ? findAwaitingApproval({ authorId }) : Promise.resolve(null),
+    // Every outbound call, by service (STORY-016). A provider degrading is
+    // visible here before it is visible as failed work.
+    integrationHealth({ sinceHours: 24 }),
   ]);
 
   const governance = scoreOf(checks);
@@ -407,6 +411,7 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
     workerSeen: lastRunAt !== null,
     auditIntegrity: auditIntegrity.status,
     sealedThrough: auditIntegrity.sealedThrough,
+    integrations,
   };
 
   await recordAction({

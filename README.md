@@ -28,6 +28,7 @@ Implemented so far:
 - **STORY-013 — Audit and Security Agent Logs All Actions** (Audit and Security Agent), fulfilling `REQ-006` and `REQ-004`
 - **STORY-014 — Trust and Monitoring Agent Provides a Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-007` and `REQ-004`
 - **STORY-015 — Infrastructure and Deployment Agent Manages Deployment** (Infrastructure and Deployment Agent), fulfilling `REQ-008` and `REQ-004` — **partially; see below**
+- **STORY-016 — API Integration Agent Interfaces with External APIs** (API Integration Agent), fulfilling `REQ-009` and `REQ-004`
 
 ## What works today
 
@@ -994,6 +995,55 @@ a proof it works.
 > that makes it look like a build** — so it is committed with what it is written at the top of each
 > file, and there is a test that fails if anyone removes the disclaimer.
 
+### STORY-016 — a mock never fails the way a real API fails
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Module handling auth and retrieval from external APIs | `server/src/agents/apiIntegrationAgent.js` |
+| 2. Data stored in PostgreSQL for other agents | `021_api_interactions.sql` |
+| 3. Every adapter routed through it | `socialApis.js`, `emailApi.js`, the three Anthropic providers |
+| 4. Log all API interactions | one row per *attempt*, plus `api.call_failed` on the audit log |
+| 5. Visible to an operator | `GET /api/integrations`, the Trust tab |
+
+The acceptance clause passed before this story existed. Adapters for the social platforms, email and
+the directories were all written to the shape of a real client, and the demo makes 48 outbound calls
+through them. What a mock cannot exercise is the ways a real provider fails, so the code around it
+had never had to be right — and it wasn't, in three specific ways.
+
+**Nothing was logged.** The trust clause asks that all API interactions be recorded for traceability.
+48 calls in a demo run and zero rows anywhere. The audit log has always said `post.published` — the
+*business* event — and never which service was called, how long it took, what came back, or whether
+it was retried. When a platform starts degrading it is the second fact that tells you, and it did not
+exist.
+
+**Nothing had a timeout.** A bare `fetch` in Node has none. Against a provider that accepts the
+connection and never answers, it waits indefinitely — measured against a real socket at over four
+seconds before the harness gave up, and it would have waited all day. Since STORY-015 added graceful
+shutdown that would also hold the drain open until the platform force-killed the process, turning one
+slow provider into a failed deploy.
+
+**Nothing distinguished a 429 from a 400.** Retrying a rejected request gets the same refusal more
+slowly; not retrying a rate limit throws away work that would have succeeded a second later. They are
+opposite mistakes and neither was possible to make, because there was no retry at all. Rate limits,
+timeouts, connection resets and 5xx are retried; a 4xx the provider actually answered is not.
+A `Retry-After` header overrides the backoff, because the provider knows better than the schedule.
+
+**One row per attempt, not per call.** A call that succeeded on its third try and one that succeeded
+immediately are very different pictures of a provider, and collapsing them loses exactly the signal
+worth having. The Trust tab shows attempts beside calls for that reason: attempts above calls means a
+provider is degrading rather than failing, which is the state worth catching before it becomes the
+other one.
+
+**The policy lives in the agent, not in each adapter.** The adapters were written on the premise that
+swapping a mock for a real client is a change confined to one file, and that premise only holds if
+the retry, timeout and logging are already outside them.
+
+> **The mock was the problem, and it had been the whole time.** Every one of these adapters worked
+> perfectly, in tests and in the demo, for fifteen stories. A stub that always succeeds does not just
+> fail to test the error path — it removes the pressure to write one, and the absence looks exactly
+> like completeness. **Ask of any faked dependency: what does the real one do that this one cannot,
+> and which of those has my code never had to survive?**
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1039,7 +1089,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 116 stages with evidence at each one.
+Prints 121 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1135,6 +1185,11 @@ Prints 116 stages with evidence at each one.
   an instance running ahead of its migrations being refused traffic, the release record that makes a
   rollback possible, and the difference between stopping and crashing.
 
+- **Stages 117–121, STORY-016:** every integration's call volume and latency where nothing was
+  recorded before, a 429 and a 400 classified as opposite instructions, a rate limit ridden out
+  across three attempts, a provider that never answers being abandoned, and giving up recorded as an
+  event rather than a silence.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -1145,7 +1200,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-446 tests across 106 suites. For each story the leading suites map one-to-one onto its Gherkin
+465 tests across 111 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -1170,6 +1225,9 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `MIN_MEMES_PER_BATCH` | `1` | Meme candidates every batch of social content must include |
 | `MIN_IDENTITY_MATCH` | `0.75` | Below this fit against the book's visual identity, a meme escalates |
 | `MIN_SAMPLE_PER_CELL` | `8` | Posts of each format, per platform, before the comparison says anything |
+| `API_TIMEOUT_MS` | `10000` | How long an outbound call may take before it is abandoned |
+| `API_MAX_ATTEMPTS` | `3` | Attempts in total, not retries after the first |
+| `API_BACKOFF_MS` | `500` | First retry wait, doubling — overridden by a `Retry-After` header |
 | `MAX_UNSEALED_AUDIT_ROWS` | `50` | Unsealed audit rows tolerated before the governance check complains |
 | `FAST_APPROVAL_SECONDS` | `5` | A decision quicker than this looks like a rubber stamp |
 | `MIN_DECISIONS_FOR_PATTERN` | `10` | Decisions a reviewer needs before their pattern means anything |
@@ -1240,6 +1298,7 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/meme-templates/:key/retire` | Retire a template (admin; the row survives) |
 | `GET` | `/api/authors/:id/books/:bookId/visual-identity` | The guide in force, and every version behind it |
 | `POST` | `/api/authors/:id/books/:bookId/visual-identity` | Revise it — always a new version, never an edit |
+| `GET` | `/api/integrations` | Every external service's call volume, retries and failures |
 | `GET` | `/api/ready` | Readiness — 503 when this instance should not be routed to (public) |
 | `GET` | `/api/deployments` | What is running, and what ran before it |
 | `GET` | `/api/authors/:id/trust-dashboard` | Health, pending approvals, recent actions, anomalies |
@@ -1301,7 +1360,16 @@ These are deliberate deferrals, not oversights:
   (`draftApproachingKits`), but something still has to call it — the UI button, the demo, or a cron
   entry. Nothing runs on a timer yet.
 - Social platform, directory, email and press-list adapters are all mocked; no live credentials are
-  involved. **Engagement metrics are mocked too**, which is the largest caveat in this README:
+  involved. As of STORY-016 the timeout, retry and logging policy around them is real, which is the
+  part that had never been exercised — but a mock still cannot produce the failures it was written
+  to survive, so that policy is tested against constructed faults rather than observed ones.
+- There is no circuit breaker. A provider that is down is retried on every call rather than being
+  given up on for a while, which is the right shape at this call volume and the wrong one at any
+  real one.
+- `api_interactions` has no retention policy. One row per attempt is the right grain and an unbounded
+  one; nothing prunes it.
+- Credentials are a single environment variable per provider with no rotation and no per-tenant keys.
+  The agent handles *how* a call is made, not who it is made as. **Engagement metrics are mocked too**, which is the largest caveat in this README:
   STORY-069 builds the apparatus for answering "do memes outperform text" and cannot answer it. The
   collector is deliberately format-blind so no demo can imply otherwise.
 - The comparison uses a normal-approximation interval, not a t-test, and no correction for testing

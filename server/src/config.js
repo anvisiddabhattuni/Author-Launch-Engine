@@ -44,6 +44,18 @@ export const config = {
   // Decisions a reviewer must have made before their pattern means anything.
   // Below it the dashboard says so rather than inferring from three data points.
   minDecisionsForPattern: number(process.env.MIN_DECISIONS_FOR_PATTERN, 10),
+  // How long an outbound call may take before it is abandoned (STORY-016). A
+  // bare fetch in Node has no timeout at all: against a provider that accepts
+  // the connection and never answers, it hangs forever — and since STORY-015
+  // added graceful shutdown, it would hang the drain too.
+  apiTimeoutMs: number(process.env.API_TIMEOUT_MS, 10000),
+  // Attempts in total, not retries after the first. Three is the same shape the
+  // job queue uses, and for the same reason: enough to ride out a blip, few
+  // enough that a broken provider is noticed rather than hammered.
+  apiMaxAttempts: number(process.env.API_MAX_ATTEMPTS, 3),
+  // First retry waits this long, then doubles. Overridden by a Retry-After
+  // header when the provider sends one — it knows better than we do.
+  apiBackoffMs: number(process.env.API_BACKOFF_MS, 500),
   // How long a post must have been live before its metrics count. A meme
   // measured an hour after publishing against a three-week-old text post is
   // measuring age, not format.
