@@ -29,6 +29,7 @@ Implemented so far:
 - **STORY-014 — Trust and Monitoring Agent Provides a Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-007` and `REQ-004`
 - **STORY-015 — Infrastructure and Deployment Agent Manages Deployment** (Infrastructure and Deployment Agent), fulfilling `REQ-008` and `REQ-004` — **partially; see below**
 - **STORY-016 — API Integration Agent Interfaces with External APIs** (API Integration Agent), fulfilling `REQ-009` and `REQ-004`
+- **STORY-017 — Tenant Management Agent Manages Multi-Tenancy** (Tenant Management Agent), fulfilling `REQ-010` and `REQ-004`
 
 ## What works today
 
@@ -1044,6 +1045,62 @@ the retry, timeout and logging are already outside them.
 > like completeness. **Ask of any faked dependency: what does the real one do that this one cannot,
 > and which of those has my code never had to survive?**
 
+### STORY-017 — the guard that checks the address, not the answer
+
+Multi-tenancy was built in STORY-064 and this README has claimed it ever since. The story asks for a
+Tenant Management Agent that keeps tenants isolated — and the honest reading of that, given the guards
+already existed, was to stop restating the claim and go test it.
+
+It failed on the first try, in my own code.
+
+Signed in as Mira, tenant 1, asking for **her own** trust dashboard:
+
+```
+recent actions returned: 20
+belonging to ANOTHER tenant: 1
+  author 2 · TomasPrivateAgent · tomas.secret_action
+```
+
+Nothing was bypassed. `enforceTenant` pins `?authorId=` to the caller and `tenantParam` refuses
+`/authors/2/...` — both worked exactly as written. They guard the **address** of a request. They say
+nothing about the rows a handler then goes and fetches, and the STORY-014 trust dashboard fetched
+recent audit activity with no tenant filter at all, because at the point I wrote it the surrounding
+route was already "protected". Two routes had the same shape; both are fixed.
+
+That is the useful finding, and it is not a bug about one query. A tenant check that lives at the
+door cannot see what the room does. The only thing that catches this class of error is a check that
+looks from **outside** the code doing the enforcing, so this story built two of them:
+
+**A walk across the API as a real tenant.** `tenantIsolation.test.js` signs in as tenant 1, requests
+every list route, and asserts no row in any response carries another tenant's id — the exact walk
+that would have caught the dashboard leak the day it was written. It is a guard against a whole
+category, not a regression test for one query.
+
+**A check against the database, not the requests.** `verifyIsolation` looks for a child row claiming
+one tenant while its parent belongs to another — a draft on someone else's book. No code path should
+produce that, which is precisely why nothing that only inspects incoming requests would ever see it.
+
+The first version of that check reported **1,868 orphaned `audit_log` rows as a breach**. They are not
+a breach: `audit_log` has no foreign key to `authors` on purpose, because deleting an account must not
+delete the record of what it did. So the check names its exclusions in its result rather than
+skipping them quietly — a security check that cries wolf about a design decision is one people learn
+to ignore, and an exclusion nobody can see is indistinguishable from a check that never ran.
+
+Onboarding and suspension follow the same rule the rest of the system already uses. `onboardTenant`
+creates the author and its login in one transaction — an author with no account is a tenant nobody can
+reach, an account with no author is a session with nothing behind it, and either half alone is a
+broken state somebody cleans up by hand. `suspendTenant` sets a status and revokes access; it does
+not delete. That is the same reasoning as retiring a meme template rather than dropping it: a
+cascading delete takes the evidence away with the account.
+
+The isolation result is also a governance invariant (`tenant.isolation`), so a breach costs the
+governance score the way an approval-gate violation does, rather than sitting in a log nobody reads.
+
+**What this is not:** the build note suggests PostgreSQL schemas or separate databases per tenant.
+This is neither. Isolation here is an `author_id` column on 23 tables plus application middleware —
+which is what the README has always said, and is now what a test asserts rather than what a paragraph
+claims.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1190,6 +1247,10 @@ Prints 121 stages with evidence at each one.
   across three attempts, a provider that never answers being abandoned, and giving up recorded as an
   event rather than a silence.
 
+- **Stages 122–126, STORY-017:** the 23 tables isolation actually rests on, the cross-tenant leak
+  found in this project's own trust dashboard, onboarding as one transaction, suspension that keeps
+  the audit trail, and an isolation check that names what it excludes and why.
+
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
 award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
@@ -1200,7 +1261,7 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 npm run db:reset && npm test
 ```
 
-465 tests across 111 suites. For each story the leading suites map one-to-one onto its Gherkin
+488 tests across 114 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
 drives the API over HTTP, which is the only way to catch a query a route assembles itself.
 
@@ -1339,6 +1400,12 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/jobs/:id/retry` | Put a dead-lettered job back in the queue |
 | `POST` | `/api/jobs/tick` | Run one worker cycle on demand |
 | `GET` | `/api/audit-log?authorId=` | Read the append-only log |
+| `GET` | `/api/tenants` | Every tenant, its status, and when it was onboarded (admin) |
+| `POST` | `/api/tenants` | Onboard an author and their login in one transaction (admin) |
+| `POST` | `/api/tenants/:id/suspend` | Suspend access without deleting the record (admin) |
+| `POST` | `/api/tenants/:id/restore` | Restore a suspended tenant (admin) |
+| `GET` | `/api/tenants/isolation` | Latest isolation check: tables checked, exclusions, findings |
+| `POST` | `/api/tenants/isolation/verify` | Run the isolation check now against the database |
 
 ## Known gaps
 
@@ -1354,7 +1421,15 @@ These are deliberate deferrals, not oversights:
   separate-schema-per-tenant model the requirements describe. It is checked in three places — the
   path parameter, the query string, and the owning row when the URL names no tenant — and there is no
   database-level row policy behind it, so a route that queries a table directly without going through
-  those checks would bypass them.
+  those checks bypasses them. That is not hypothetical: STORY-017 found two such routes in this
+  project's own trust dashboard. They are fixed, and a cross-tenant API walk now guards the category,
+  but the walk covers the routes that exist today — a new handler written the same careless way is
+  caught only if someone adds it to that test. PostgreSQL row-level security would make the boundary
+  structural instead of remembered, and is the honest next step for anything carrying real tenants.
+- `verifyIsolation` reads the database directly rather than going through the API, which is what
+  makes it able to see a cross-tenant parentage no request would reveal. It runs on demand and from
+  the governance sweep; nothing runs it on a schedule with an alert behind it, so today it finds a
+  breach only when somebody asks.
 - Publishing, outreach sending and press distribution are triggered on demand rather than by a
   background worker. STORY-004 added the *detection* a worker would call
   (`draftApproachingKits`), but something still has to call it — the UI button, the demo, or a cron

@@ -88,6 +88,23 @@ export const CHECKS = [
           WHERE d.status NOT IN ('approved', 'scheduled')`,
   },
   {
+    id: 'tenant.isolation',
+    severity: SEVERITY.INVARIANT,
+    label: 'No tenant data has escaped its tenant',
+    why: 'REQ-010. Isolation is a column here, so a leak is a row rather than a breach of a wall.',
+    // Orphaned rows: owned by a tenant that no longer exists, so no tenant
+    // filter will ever exclude them. Checked here as well as by the Tenant
+    // Management Agent, because the dashboard should not have to be told.
+    sql: `SELECT (
+            (SELECT COUNT(*) FROM drafts d
+              WHERE d.author_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM authors a WHERE a.id = d.author_id))
+          + (SELECT COUNT(*) FROM scheduled_posts sp
+              JOIN drafts d2 ON d2.id = sp.draft_id
+             WHERE sp.author_id IS DISTINCT FROM d2.author_id)
+          )::int AS n`,
+  },
+  {
     id: 'approvals.attributable',
     severity: SEVERITY.QUALITY,
     label: 'Every approval names an authenticated session',

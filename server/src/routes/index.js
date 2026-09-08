@@ -8,6 +8,12 @@ import {
   notifyAwaitingApproval,
 } from '../agents/approvalNotificationAgent.js';
 import { sealAndVerify, verifyAuditLog } from '../agents/auditSecurityAgent.js';
+import {
+  onboardTenant,
+  restoreTenant,
+  suspendTenant,
+  verifyIsolation,
+} from '../agents/tenantManagementAgent.js';
 import { integrationHealth } from '../agents/apiIntegrationAgent.js';
 import { deploymentHistory, readiness } from '../services/deployment.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
@@ -119,15 +125,21 @@ router.get('/ready', asyncRoute(async (_req, res) => {
 /** What every external integration has been doing, and how well (STORY-016). */
 router.get('/integrations', asyncRoute(async (req, res) => {
   const sinceHours = Number(req.query.sinceHours ?? 24);
-  const services = await integrationHealth({ sinceHours });
+  // An admin sees every tenant; an author sees their own calls and the
+  // system-wide ones. `enforceTenant` has already filled in `authorId` for a
+  // non-admin, and a route that ignored it would serve everybody's — which is
+  // exactly the leak STORY-017 found in two routes written before this one.
+  const scope = req.user?.role === 'admin' ? null : Number(req.query.authorId);
+  const services = await integrationHealth({ sinceHours, authorId: scope });
   const { rows: recentFailures } = await query(
     `SELECT service, operation, attempt, outcome, status, duration_ms, error, created_at
        FROM api_interactions
       WHERE outcome <> 'ok' AND created_at > now() - make_interval(hours => $1)
+        AND ($2::bigint IS NULL OR author_id = $2 OR author_id IS NULL)
       ORDER BY id DESC LIMIT 20`,
-    [sinceHours],
+    [sinceHours, scope ?? null],
   );
-  res.json({ sinceHours, services, recentFailures });
+  res.json({ sinceHours, scopedTo: scope ?? 'all tenants', services, recentFailures });
 }));
 
 /** What is running, and what ran before it. The first question of an incident. */
@@ -1066,6 +1078,46 @@ router.get('/jobs', asyncRoute(async (req, res) => {
     sweepSeconds: config.jobSweepSeconds,
     maxAttempts: config.jobMaxAttempts,
   });
+}));
+
+// --- Tenants (STORY-017 / REQ-010) ---
+
+/**
+ * Onboarding a tenant is an operator action.
+ *
+ * It creates an author, an account and a role in one transaction — a tenant
+ * with no account is unreachable and an account with no tenant is a session
+ * with nothing behind it, and either half alone is a broken state somebody
+ * cleans up by hand.
+ */
+router.post('/tenants', requireRole('admin'), asyncRoute(async (req, res) => {
+  const { name, email, password, role, voiceProfile } = req.body ?? {};
+  res.status(201).json(await onboardTenant({ name, email, password, role, voiceProfile }));
+}));
+
+router.post('/tenants/:authorId/suspend', requireRole('admin'), asyncRoute(async (req, res) => {
+  res.json(
+    await suspendTenant({
+      authorId: Number(req.params.authorId),
+      reason: req.body?.reason ?? '',
+      user: req.user,
+    }),
+  );
+}));
+
+router.post('/tenants/:authorId/restore', requireRole('admin'), asyncRoute(async (req, res) => {
+  res.json(await restoreTenant({ authorId: Number(req.params.authorId), user: req.user }));
+}));
+
+/**
+ * Checks isolation by asking the database directly, table by table.
+ *
+ * Deliberately not routed through the middleware it is checking: a check that
+ * went through the tenant guard would only ever confirm the guard agrees with
+ * itself.
+ */
+router.get('/tenants/isolation', requireRole('admin'), asyncRoute(async (_req, res) => {
+  res.json(await verifyIsolation({}));
 }));
 
 // --- Trust dashboard (STORY-014 / REQ-007) ---

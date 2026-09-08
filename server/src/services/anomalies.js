@@ -32,7 +32,7 @@ export const CONFIDENCE = {
  * What it is useful for is the shape — a reviewer whose decisions are *all* that
  * fast is a different thing from one whose decisions sometimes are.
  */
-async function fastDecisions(client) {
+async function fastDecisions(client, authorId) {
   const { rows } = await client.query(
     `SELECT a.reviewer,
             COUNT(*)::int AS decisions,
@@ -44,8 +44,10 @@ async function fastDecisions(client) {
        LEFT JOIN drafts d            ON d.id = a.draft_id
        LEFT JOIN outreach_messages m ON m.id = a.outreach_message_id
        LEFT JOIN pr_materials p      ON p.id = a.pr_material_id
+      WHERE $2::bigint IS NULL
+         OR COALESCE(d.author_id, m.author_id, p.author_id) = $2
       GROUP BY a.reviewer`,
-    [config.fastApprovalSeconds],
+    [config.fastApprovalSeconds, authorId ?? null],
   );
 
   const enough = rows.filter((r) => r.decisions >= config.minDecisionsForPattern);
@@ -87,12 +89,19 @@ async function fastDecisions(client) {
  * from no gate at all, and that is exactly the thing this dashboard exists to
  * notice about itself.
  */
-async function neverRejects(client) {
+async function neverRejects(client, authorId) {
   const { rows } = await client.query(
-    `SELECT reviewer,
+    `SELECT a.reviewer,
             COUNT(*)::int AS decisions,
-            COUNT(*) FILTER (WHERE decision = 'rejected')::int AS rejections
-       FROM approvals GROUP BY reviewer`,
+            COUNT(*) FILTER (WHERE a.decision = 'rejected')::int AS rejections
+       FROM approvals a
+       LEFT JOIN drafts d            ON d.id = a.draft_id
+       LEFT JOIN outreach_messages m ON m.id = a.outreach_message_id
+       LEFT JOIN pr_materials p      ON p.id = a.pr_material_id
+      WHERE $1::bigint IS NULL
+         OR COALESCE(d.author_id, m.author_id, p.author_id) = $1
+      GROUP BY a.reviewer`,
+    [authorId ?? null],
   );
 
   const enough = rows.filter((r) => r.decisions >= config.minDecisionsForPattern);
@@ -130,11 +139,13 @@ async function neverRejects(client) {
  * through. One is a difference of opinion; a run of them means a producer's own
  * check is drifting, and that is the thing worth catching early.
  */
-async function producerDisagreement(client) {
+async function producerDisagreement(client, authorId) {
   const { rows } = await client.query(
     `SELECT COUNT(*)::int AS total,
             COUNT(*) FILTER (WHERE agreed = FALSE)::int AS disagreed
-       FROM escalations`,
+       FROM escalations
+      WHERE $1::bigint IS NULL OR author_id = $1`,
+    [authorId ?? null],
   );
   const { total, disagreed } = rows[0];
 
@@ -166,11 +177,15 @@ async function producerDisagreement(client) {
  * explicitly. A dashboard listing only its findings looks the same whether it
  * checked and found nothing or never checked at all.
  */
-export async function detectAnomalies({} = {}, client = pool) {
+export async function detectAnomalies({ authorId = null } = {}, client = pool) {
+  // `authorId` null means an operator asking across every tenant. Passing it
+  // through rather than filtering afterwards matters: a reviewer's decision
+  // counts have to be computed within a tenant, or a shared reviewer's pattern
+  // in one author's queue leaks into another's dashboard as a number.
   const detectors = await Promise.all([
-    fastDecisions(client),
-    neverRejects(client),
-    producerDisagreement(client),
+    fastDecisions(client, authorId),
+    neverRejects(client, authorId),
+    producerDisagreement(client, authorId),
   ]);
 
   return {

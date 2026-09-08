@@ -173,13 +173,15 @@ describe('The governance score is a summary, never the verdict', () => {
 
 describe('The gates this dashboard exists to watch', () => {
   it('checks all four outbound paths, not just the one', async () => {
+    // Presence, not exhaustiveness. An earlier version asserted the invariant
+    // list was exactly these four, which meant adding a fifth invariant — the
+    // tenant isolation check in STORY-017 — failed a test about outbound gates.
+    // A test should break when its own subject changes, not when the list it
+    // happens to live in grows.
     const invariants = CHECKS.filter((c) => c.severity === SEVERITY.INVARIANT).map((c) => c.id);
-    assert.deepEqual(invariants.sort(), [
-      'gate.outreach',
-      'gate.posts',
-      'gate.press',
-      'gate.schedule',
-    ]);
+    for (const gate of ['gate.outreach', 'gate.posts', 'gate.press', 'gate.schedule']) {
+      assert.ok(invariants.includes(gate), `${gate} must be an invariant`);
+    }
   });
 
   it('counts one more violation when a post is published without an approval', async () => {

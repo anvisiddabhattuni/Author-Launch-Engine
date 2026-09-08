@@ -1,6 +1,6 @@
 /**
  * End-to-end walkthrough of STORY-001 to STORY-065 (plus STORY-008 through
- * STORY-011 to STORY-016, and STORY-066 to STORY-069), printed step by step.
+ * STORY-011 to STORY-017, and STORY-066 to STORY-069), printed step by step.
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
@@ -20,6 +20,12 @@ import {
 import { sealAuditLog, verifyAuditLog } from './agents/auditSecurityAgent.js';
 import { trustDashboard } from './agents/trustMonitoringAgent.js';
 import { callExternal, integrationHealth, isRetryable } from './agents/apiIntegrationAgent.js';
+import {
+  onboardTenant,
+  suspendTenant,
+  tenantTables,
+  verifyIsolation,
+} from './agents/tenantManagementAgent.js';
 import {
   appliedMigrations,
   deploymentHistory,
@@ -2319,9 +2325,75 @@ console.log('\nThe interactions table has the detail; the audit log has the fact
 console.log('system stopped trying. A provider nobody can reach is a decision somebody');
 console.log('should know was made on their behalf.');
 
+
+// ── STORY-017 ────────────────────────────────────────────────────────────────
+// The Tenant Management Agent. Isolation was already enforced — and this story
+// is where that claim got tested rather than restated.
+
+rule('122. Isolation here is a column, on 23 tables');
+const isoTables = await tenantTables();
+console.log(`${isoTables.length} tables carry author_id:\n`);
+console.log('  ' + isoTables.join(', '));
+console.log('\nThe build note suggests PostgreSQL schemas or separate databases. This uses');
+console.log('neither. Every guard is application middleware over that column — which the');
+console.log('README has said all along, and which this story finally went and tested.');
+
+rule('123. The guard checks the address, not the answer');
+console.log('tenantParam refuses /authors/2/... to author 1. It says nothing about the rows');
+console.log('a handler then goes and fetches.\n');
+console.log('Asking for your OWN trust dashboard used to return this:');
+console.log('  recent actions: 20   ← of which 1 belonged to another tenant');
+console.log('    author 2 · TomasPrivateAgent · tomas.secret_action\n');
+console.log('The middleware was working exactly as designed. The leak was in a handler');
+console.log('written two stories later that queried audit_log with no tenant filter at all.');
+console.log('Two routes had it; both are fixed, and the walk below is what would have');
+console.log('caught them.');
+
+rule('124. Onboarding a tenant, with its access already correct');
+const newTenant = await onboardTenant({
+  name: 'Priya Raman',
+  email: `priya-${Date.now()}@example.test`,
+  password: 'a-long-enough-password',
+  role: 'author',
+});
+console.log(
+  `author ${newTenant.author.id} · ${newTenant.author.name} · status ${newTenant.author.tenant_status}`,
+);
+console.log(`account ${newTenant.user.email} · role ${newTenant.user.role}`);
+console.log('\nOne transaction. An author with no account is a tenant nobody can reach; an');
+console.log('account with no author is a session with nothing behind it. Either half alone');
+console.log('is a broken state somebody cleans up by hand.');
+
+rule('125. Suspending without destroying the record');
+const { rows: beforeSuspend } = await query(
+  'SELECT COUNT(*)::int n FROM audit_log WHERE author_id = $1',
+  [newTenant.author.id],
+);
+await suspendTenant({ authorId: newTenant.author.id, reason: 'demo' });
+const { rows: afterSuspend } = await query(
+  'SELECT COUNT(*)::int n FROM audit_log WHERE author_id = $1',
+  [newTenant.author.id],
+);
+console.log(`audit rows before: ${beforeSuspend[0].n}   after suspension: ${afterSuspend[0].n}`);
+console.log('\nSuspended, not deleted — the same rule as retiring a template rather than');
+console.log('dropping it. A cascading delete takes the evidence away with the account.');
+
+rule('126. Checked from outside the code that enforces it');
+const isolation = await verifyIsolation({});
+console.log(`isolation: ${isolation.ok ? 'clean' : 'BREACH'} across ${isolation.tablesChecked} tables`);
+console.log(`excluded:  ${isolation.excluded.join(', ')}`);
+for (const f of isolation.findings) console.log(`  ${f.table}: ${f.detail}`);
+console.log('\naudit_log is excluded on purpose: it has no foreign key to authors, because');
+console.log('deleting an account must not delete the record of what it did. The first');
+console.log('version of this check reported 1,868 such rows as orphans — a design decision');
+console.log('read as a fault, which is how a security check earns the right to be ignored.');
+console.log('\nWhat it does look for: a child row claiming one tenant while its parent');
+console.log('belongs to another. No code path should produce that, which is exactly why a');
+console.log('check that only inspects incoming requests would never see it.');
+
 await new Promise((resolve) => demoServer.close(resolve));
 
-console.log('\nSTORY-016 complete — every outbound call is timed, classified, retried on the');
-console.log('provider\'s terms, and on the record\n');
+console.log('\nSTORY-017 complete — the isolation claim was tested, it failed in two routes,');
+console.log('and there is now a check that looks from outside the guard\n');
 await closePool();
 

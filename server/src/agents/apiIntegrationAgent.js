@@ -230,7 +230,7 @@ export async function httpJson(url, { signal, ...init } = {}) {
 }
 
 /** What each integration has been doing, for the trust dashboard and for incidents. */
-export async function integrationHealth({ sinceHours = 24 } = {}, client = pool) {
+export async function integrationHealth({ sinceHours = 24, authorId = null } = {}, client = pool) {
   const { rows } = await client.query(
     `SELECT service,
             COUNT(*)::int                                        AS attempts,
@@ -243,8 +243,9 @@ export async function integrationHealth({ sinceHours = 24 } = {}, client = pool)
             MAX(duration_ms)::int                                AS slowest_ms
        FROM api_interactions
       WHERE created_at > now() - make_interval(hours => $1)
+        AND ($2::bigint IS NULL OR author_id = $2 OR author_id IS NULL)
       GROUP BY service ORDER BY service`,
-    [sinceHours],
+    [sinceHours, authorId],
   );
   return rows;
 }

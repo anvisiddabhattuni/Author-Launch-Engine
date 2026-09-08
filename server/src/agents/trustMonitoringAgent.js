@@ -378,11 +378,11 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
 
   const [checks, anomalies, queue, integrations] = await Promise.all([
     runChecks({ auditIntegrity }),
-    detectAnomalies({}),
+    detectAnomalies({ authorId }),
     authorId ? findAwaitingApproval({ authorId }) : Promise.resolve(null),
     // Every outbound call, by service (STORY-016). A provider degrading is
     // visible here before it is visible as failed work.
-    integrationHealth({ sinceHours: 24 }),
+    integrationHealth({ sinceHours: 24, authorId }),
   ]);
 
   const governance = scoreOf(checks);
@@ -394,9 +394,16 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
     'SELECT MAX(finished_at) AS at FROM jobs WHERE status = $1',
     ['done'],
   );
+  // Scoped to the tenant, or the leak this story found. `tenantParam` guards the
+  // *address* of this route — /authors/1/... is refused to author 2 — and says
+  // nothing about the rows the handler then goes and fetches. Asking for your
+  // own dashboard returned the last twenty audit rows across every tenant.
   const { rows: recent } = await query(
     `SELECT actor, action, entity_type, entity_id, author_id, created_at
-       FROM audit_log ORDER BY id DESC LIMIT 20`,
+       FROM audit_log
+      WHERE $1::bigint IS NULL OR author_id = $1 OR author_id IS NULL
+      ORDER BY id DESC LIMIT 20`,
+    [authorId ?? null],
   );
 
   const lastRunAt = lastRun[0].at ? new Date(lastRun[0].at) : null;
