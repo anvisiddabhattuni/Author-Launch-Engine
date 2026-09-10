@@ -128,6 +128,10 @@ export const api = {
 
   draftPressKit: (milestoneId) => request(`/milestones/${milestoneId}/press-kit`, { method: 'POST' }),
 
+  // STORY-018 — PR materials on request, with no milestone to wait for
+  generatePrMaterials: (authorId, bookId, body = {}) =>
+    request(`/authors/${authorId}/books/${bookId}/pr-materials`, { method: 'POST', body }),
+
   pressKits: (authorId) => request(`/press-kits?authorId=${authorId}`),
   pressContacts: () => request('/press-contacts'),
 

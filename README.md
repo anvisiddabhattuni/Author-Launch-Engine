@@ -30,6 +30,7 @@ Implemented so far:
 - **STORY-015 — Infrastructure and Deployment Agent Manages Deployment** (Infrastructure and Deployment Agent), fulfilling `REQ-008` and `REQ-004` — **partially; see below**
 - **STORY-016 — API Integration Agent Interfaces with External APIs** (API Integration Agent), fulfilling `REQ-009` and `REQ-004`
 - **STORY-017 — Tenant Management Agent Manages Multi-Tenancy** (Tenant Management Agent), fulfilling `REQ-010` and `REQ-004`
+- **STORY-018 — AI Content Generation Agent Generates PR Materials** (AI Content Generation Agent), fulfilling `REQ-011` and `REQ-004`
 
 ## What works today
 
@@ -1101,6 +1102,79 @@ This is neither. Isolation here is an `author_id` column on 23 tables plus appli
 which is what the README has always said, and is now what a test asserts rather than what a paragraph
 claims.
 
+### STORY-018 — the agent that graded everyone else finally writes something
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Node module generating PR materials with an external AI API | `server/src/agents/aiContentGenerationAgent.js` |
+| 2. Retrieval of the book's themes before drafting | `server/src/services/themeRetrieval.js`, `contentAlignmentAgent.js` |
+| 3. The author's voice, measured from their own posts | `server/src/services/voiceProfile.js` |
+| 4. Drafts stored in PostgreSQL for review | `server/src/db/migrations/023_on_demand_pr.sql` |
+| 5. Approval gate on everything generated | `server/src/services/approvals.js`, `governance.js` |
+
+The AI Content Generation Agent has been on the agent map since the start and had never generated
+anything. It was a scorer — `alignToThemes`, the visual identity check, the meme library — always
+grading some other agent's output. This story is where it writes, and it got the press materials
+because press materials had the two holes that matched its own acceptance criterion.
+
+**"When PR material generation is requested" — it could not be.** Press materials existed only as a
+byproduct of a milestone. `draftPressKit` took a milestone id and nothing else, and `milestone_id`
+was `NOT NULL`. A book has three or four milestones in its life; a publicist promoting it during the
+rest of that life had no path except to invent an event, which would put a fiction in the table the
+schedule reads from. So `pr_kits` gained an `occasion`, and "no occasion but the book itself" became
+one of the occasions rather than a missing row.
+
+**"and author's voice" — press copy was never measured against it.** This is the sharper half.
+`assess()` was called as `assess({ confidence, themeAlignment })`, with `voice` omitted — the
+parameter's own docstring said "Social posts". The only voice number press copy had was a word
+overlap with the author's prior posts, worth 0.15 of confidence and gating nothing. So a release
+could argue every one of the book's themes in a register the author had never used and queue for
+ordinary approval. That is the same finding STORY-009 made about social posts, at the other end of
+the pipeline, and it gets the same answer: counted traits, stored verdict, floor that acts.
+
+Here is the case, from the demo:
+
+```
+theme alignment 0.64 — it names every theme and carries their arguments
+voice           0.35 — floor is 0.5
+status          escalated
+reads unlike the author on: exclamations, hype, shouting, sentence_length
+```
+
+On themes alone that copy passes. Before this story, themes alone was the whole test.
+
+**Voice is measured on the prose, not on the format.** This was the part that needed thinking about.
+`measure()` counts a run of capitals as shouting — correctly, for a tweet. But a press release is
+required to say `FOR IMMEDIATE RELEASE` and `MEDIA CONTACT`, and a fact sheet is almost entirely
+capitalised labels. Scored raw, every press kit fails for being a press kit: that is a *format*
+measurement wearing voice's name, and a floor built on it would escalate everything and therefore
+mean nothing. `proseOf` drops the lines with no lowercase in them and strips the `LABEL — ` prefix
+from the rest. The same release scores **0.74 counted raw and 0.87 counted on its prose** — the
+difference is entirely the furniture.
+
+What survives that is a real finding rather than a structural one: the release still reads longer
+than this author's posts (`sentence_length` is a violation on most press copy, because a lede is not
+a tweet). It is reported to the reviewer and does not escalate on its own, because the composite
+clears the floor. A note, not a gate.
+
+**Making a required column optional breaks queries that never mentioned it.** Four `JOIN milestones`
+were inner joins — `GET /press-kits`, the review-notifier queue, the escalation notifier, and the
+trust dashboard. None of them lost a *column* when `milestone_id` went nullable; they dropped the
+whole kit. An on-demand kit would have been generated, stored, and then been invisible to every
+screen a human approves from — an approval gate with nobody standing at it. All four are `LEFT JOIN`
+now, and `aiContentGeneration.test.js` asserts the kit reaches the review queue and the dashboard.
+
+The voice floor applies to **all** PR materials, milestone kits included, because "an approval gate
+for all generated PR materials" is what the story asks for and two standards for one table is how a
+gate becomes advisory. Existing press tests were unaffected, and not by luck: they seed one and two
+prior posts, below `MIN_POSTS_FOR_TRAIT`, so voice is not enforceable and scores the neutral 0.6.
+The seeded demo author has five, so the demo's copy is genuinely measured.
+
+Materials written before this story carry no voice verdict and are never backfilled — a score
+nothing measured would be inventing the evidence the check exists to find. `023` records a watermark
+and the `press.voice_measured` governance check reads it, so those rows are reported as history
+rather than as a permanent red nobody can clear.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1146,7 +1220,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 121 stages with evidence at each one.
+Prints 132 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1250,6 +1324,12 @@ Prints 121 stages with evidence at each one.
 - **Stages 122–126, STORY-017:** the 23 tables isolation actually rests on, the cross-tenant leak
   found in this project's own trust dashboard, onboarding as one transaction, suspension that keeps
   the audit trail, and an isolation check that names what it excludes and why.
+
+- **Stages 127–132, STORY-018:** a press kit generated with no milestone and none invented, the
+  retrieved claims a release with no news hook has to lean on, the author's voice derived from five
+  real posts and cross-checked against their hand-written profile, the same release scored 0.74 with
+  its format furniture and 0.87 without, copy that argues every theme escalating on voice alone, and
+  both press invariants checked from outside the code that enforces them.
 
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
@@ -1384,7 +1464,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `GET` | `/api/authors/:id/awards/awaiting-outcome` | Awards whose ceremony has passed with no result recorded |
 | `POST` | `/api/milestones/:id/award-outcome` | Record won / not_won / shortlisted; a win drafts, a loss does not |
 | `POST` | `/api/milestones/:id/press-kit` | Draft the three press materials for a milestone |
-| `GET` | `/api/press-kits?authorId=` | Kits with their materials, scores and distributions |
+| `POST` | `/api/authors/:authorId/books/:bookId/pr-materials` | Generate PR materials on request, with no milestone (STORY-018) |
+| `GET` | `/api/press-kits?authorId=` | Kits with their materials, theme and voice scores, and distributions |
 | `POST` | `/api/pr-materials/:id/approve` · `/reject` | Record a human decision |
 | `POST` | `/api/press-kits/:id/distribute` | Distribute to matching press contacts (mocked) |
 | `GET` | `/api/press-contacts` | The mocked press list with beats |

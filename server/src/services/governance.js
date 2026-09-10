@@ -124,6 +124,20 @@ export const CHECKS = [
                               WHERE r.author_id = au.id AND r.active)`,
   },
   {
+    id: 'press.voice_measured',
+    severity: SEVERITY.QUALITY,
+    label: 'Every press material carries a voice verdict',
+    why: 'STORY-018 / REQ-011. A floor nothing was measured against is not a floor.',
+    // Bounded by the watermark 023 recorded. Materials written before this
+    // story have no verdict and will never get one — backfilling a score
+    // nothing measured would be inventing the evidence the check exists to
+    // find. Counting them would report a permanent failure nobody can fix,
+    // which is how a red check becomes background noise.
+    sql: `SELECT COUNT(*)::int AS n FROM pr_materials
+           WHERE voice_score IS NULL
+             AND id > COALESCE((SELECT material_id FROM pr_voice_watermark), 0)`,
+  },
+  {
     id: 'jobs.no_dead_letters',
     severity: SEVERITY.QUALITY,
     label: 'No scheduled work has been given up on',

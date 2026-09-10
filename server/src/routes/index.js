@@ -19,6 +19,7 @@ import { deploymentHistory, readiness } from '../services/deployment.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
+import { generatePrMaterials } from '../agents/aiContentGenerationAgent.js';
 import {
   listEscalations,
   monitorPressMaterials,
@@ -762,6 +763,29 @@ router.post('/milestones/:id/press-kit', asyncRoute(async (req, res) => {
   res.status(201).json(result);
 }));
 
+// --- PR materials on request (STORY-018 / REQ-011 + REQ-004) ---
+
+/**
+ * The command half of the slice: a publicist asks for PR materials, and gets
+ * them, with no milestone in the calendar and none invented.
+ *
+ * `:authorId` is spelled exactly so `tenantParam` guards it; the service scopes
+ * the book to the author as well, because the guard checks the address and not
+ * the answer.
+ */
+router.post('/authors/:authorId/books/:bookId/pr-materials', asyncRoute(async (req, res) => {
+  // No `angle` parameter. There is exactly one angle a kit with no occasion can
+  // take, and accepting a string nothing reads would be a knob that does
+  // nothing — the kit records `evergreen` because that is what it is, not
+  // because a caller said so.
+  const result = await generatePrMaterials({
+    authorId: Number(req.params.authorId),
+    bookId: Number(req.params.bookId),
+    requestedBy: req.user?.name ?? null,
+  });
+  res.status(201).json(result);
+}));
+
 router.get('/press-kits', asyncRoute(async (req, res) => {
   const params = [];
   let where = '';
@@ -771,19 +795,25 @@ router.get('/press-kits', asyncRoute(async (req, res) => {
   }
 
   const { rows: kits } = await query(
+    // LEFT JOIN, because an on-demand kit has no milestone (STORY-018). An
+    // inner join here did not merely lose a column — it dropped the whole kit
+    // from the page a publicist approves from, which is the failure mode of
+    // making a required thing optional.
     `SELECT k.*,
-            m.title AS milestone_title, m.type AS milestone_type,
+            COALESCE(m.title, 'Requested directly')                  AS milestone_title,
+            m.type AS milestone_type,
             m.event_date, m.location, m.details, m.award_name, m.outcome,
             COUNT(p.id)::int                                        AS material_count,
             COUNT(*) FILTER (WHERE p.status = 'approved')::int      AS approved_count,
             COUNT(*) FILTER (WHERE p.status = 'distributed')::int   AS distributed_count,
-            COALESCE(MIN(p.theme_alignment), 0)                     AS min_theme_alignment
+            COALESCE(MIN(p.theme_alignment), 0)                     AS min_theme_alignment,
+            COALESCE(MIN(p.voice_score), 0)                         AS min_voice_score
        FROM pr_kits k
-       JOIN milestones m ON m.id = k.milestone_id
+       LEFT JOIN milestones m ON m.id = k.milestone_id
        LEFT JOIN pr_materials p ON p.kit_id = k.id
        ${where}
       GROUP BY k.id, m.title, m.type, m.event_date, m.location, m.details, m.award_name, m.outcome
-      ORDER BY m.event_date, k.id`,
+      ORDER BY COALESCE(m.event_date, k.created_at::date), k.id`,
     params,
   );
 

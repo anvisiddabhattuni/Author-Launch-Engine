@@ -38,6 +38,8 @@ import {
 import { draftWeeklyPosts, scoreDraft, weekStart } from './agents/contentDraftingAgent.js';
 import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgent.js';
 import { draftPressKit } from './agents/prMaterialsAgent.js';
+import { generatePrMaterials, proseOf } from './agents/aiContentGenerationAgent.js';
+import { runChecks } from './services/governance.js';
 import { draftOutreachMessages } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { createApp } from './app.js';
@@ -82,7 +84,7 @@ import {
 } from './services/visualIdentity.js';
 import { searchAllDirectories } from './services/directories.js';
 import { scoreOpportunity } from './services/keywordAnalysis.js';
-import { deriveVoice } from './services/voiceProfile.js';
+import { checkVoice, deriveVoice } from './services/voiceProfile.js';
 import { assess } from './services/escalationPolicy.js';
 
 const rule = (title) => console.log(`\n${'─'.repeat(72)}\n${title}\n${'─'.repeat(72)}`);
@@ -647,7 +649,7 @@ console.log(
 );
 for (const kit of awaitingReview) {
   console.log(
-    `  kit ${kit.id}  ${kit.milestone_type.padEnd(12)} ${kit.pending_count} awaiting` +
+    `  kit ${kit.id}  ${(kit.milestone_type ?? 'on request').padEnd(12)} ${kit.pending_count} awaiting` +
       (kit.escalated_count > 0 ? `, ${kit.escalated_count} escalated` : ''),
   );
 }
@@ -2395,5 +2397,128 @@ await new Promise((resolve) => demoServer.close(resolve));
 
 console.log('\nSTORY-017 complete — the isolation claim was tested, it failed in two routes,');
 console.log('and there is now a check that looks from outside the guard\n');
+
+
+// ── STORY-018 ────────────────────────────────────────────────────────────────
+// The AI Content Generation Agent. The agent map has named it since the start
+// and it had never generated anything — it was a scorer, grading other agents'
+// output. This is where it writes, and where the half of its own acceptance
+// criterion nobody could fail finally became failable.
+
+rule('127. Press that does not wait for something to happen');
+const { rows: existingKits } = await query(
+  'SELECT COUNT(*)::int n FROM pr_kits WHERE book_id = $1 AND milestone_id IS NOT NULL',
+  [book.id],
+);
+console.log(`kits so far: ${existingKits[0].n}, every one of them attached to a milestone.`);
+console.log('A book has three or four milestones in its life. It needs press for the rest');
+console.log('of it too, and the only way to ask used to be inventing an event.\n');
+
+const onDemand = await generatePrMaterials({
+  authorId: author.id,
+  bookId: book.id,
+  requestedBy: 'Demo Publicist',
+});
+console.log(`kit ${onDemand.kit.id} · occasion ${onDemand.kit.occasion} · milestone_id ${onDemand.kit.milestone_id}`);
+console.log(`requested by ${onDemand.kit.requested_by} · angle ${onDemand.kit.angle}`);
+for (const m of onDemand.materials) {
+  console.log(
+    `  ${m.type.padEnd(14)} align ${Number(m.theme_alignment).toFixed(2)} · ` +
+      `voice ${Number(m.voice_score).toFixed(2)} · ${m.status}`,
+  );
+}
+
+rule('128. Written from what the book argues, not from its theme labels');
+console.log(`grounded in ${onDemand.kit.grounded_themes} themes over ${onDemand.kit.grounded_passages} passages\n`);
+for (const t of onDemand.grounding.themes) {
+  console.log(`  ${t.theme} — ${t.keyMessage || '(no key message recorded)'}`);
+}
+const onDemandRelease = onDemand.materials.find((m) => m.type === 'press_release');
+console.log('\nWith no news hook, the grounding is all the release has to say. Its opening:');
+console.log(`  ${onDemandRelease.body.split('\n').filter(Boolean)[3]?.slice(0, 150) ?? ''}`);
+
+rule('129. Voice, measured off the author\'s own posts');
+const { rows: demoHistory } = await query(
+  'SELECT content FROM social_history WHERE author_id = $1',
+  [author.id],
+);
+const demoVoice = deriveVoice(demoHistory, author.voice_profile);
+console.log(`derived from ${demoVoice.posts} prior posts · enforceable ${demoVoice.enforceable}`);
+console.log(`  sentences average ${demoVoice.meanSentenceWords.toFixed(1)} words`);
+console.log(`  exclamations/100w ${demoVoice.exclamationsPer100.toFixed(2)} · hype/100w ${demoVoice.hypePer100.toFixed(2)}`);
+console.log('\nWhat the hand-written profile claims, checked against the writing:');
+for (const claim of demoVoice.stated) {
+  const verdict = claim.supported === null ? 'not measurable' : claim.supported ? 'supported' : 'NOT supported';
+  console.log(`  ${claim.kind}: ${claim.claim} — ${verdict}`);
+}
+console.log('\nBefore this story, assess() was called for press without a voice number at');
+console.log('all. The floor existed and had nothing to act on.');
+
+rule('130. The furniture of a press kit is not shouting');
+const releaseText = `${onDemandRelease.headline}\n${onDemandRelease.body}`;
+const rawVoice = checkVoice({ text: releaseText, voice: demoVoice });
+const proseVoice = checkVoice({ text: proseOf(releaseText), voice: demoVoice });
+console.log(`counted raw, with FOR IMMEDIATE RELEASE and MEDIA CONTACT: ${rawVoice.score.toFixed(2)}`);
+console.log(`counted on the prose alone:                                ${proseVoice.score.toFixed(2)}`);
+console.log('\nA run of capitals reads as shouting, correctly, for a social post. A fact');
+console.log('sheet is almost entirely capitalised labels, so scoring the format would fail');
+console.log('every press kit for being one — a format measurement wearing voice\'s name.');
+console.log('The sentences are what the author is answerable for, so those are what count.');
+console.log(`\nThis release still reads longer than this author's posts: ${proseVoice.violations.join(', ') || 'no violations'}.`);
+console.log('Reported, not escalated — the composite clears the floor. A note, not a gate.');
+
+rule('131. Copy that argues every theme, in a voice the author has never used');
+const hypeProvider = {
+  name: 'demo-off-voice',
+  async draftKit() {
+    const body =
+      'FOR IMMEDIATE RELEASE\n\nThis absolutely AMAZING book about deep work, craft, ' +
+      'attention and resilience is guaranteed to transform your life in ways that are ' +
+      'frankly unbelievable and completely game-changing!!! Attention is a muscle! Craft ' +
+      'is the slow accumulation of decisions nobody claps for! Resilience is what remains ' +
+      'when motivation has gone home, which is insane and epic, so grab this massive smash ' +
+      'hit immediately before this limited exclusive offer disappears forever!!!\n\n' +
+      'ABOUT THE BOOK — an amazing book.\n\nMEDIA CONTACT — press@example.test';
+    return ['press_release', 'author_bio', 'fact_sheet'].map((type) => ({
+      type,
+      headline: 'An AMAZING and incredible book about deep work and craft!!!',
+      body,
+      themesUsed: book.themes,
+    }));
+  },
+};
+await query("UPDATE pr_kits SET status = 'superseded' WHERE book_id = $1 AND status = 'drafting'", [book.id]);
+const offVoice = await generatePrMaterials({
+  authorId: author.id,
+  bookId: book.id,
+  provider: hypeProvider,
+});
+const offRelease = offVoice.materials.find((m) => m.type === 'press_release');
+console.log(`theme alignment ${Number(offRelease.theme_alignment).toFixed(2)} — it names every theme and carries their arguments`);
+console.log(`voice           ${Number(offRelease.voice_score).toFixed(2)} — floor is ${config.minVoiceMatch}`);
+console.log(`status          ${offRelease.status}`);
+console.log(`reads unlike the author on: ${offRelease.voice_violations.join(', ')}`);
+console.log('\nThis is the case the story exists for. On themes alone it passes. Before');
+console.log('STORY-018 that was the whole test, and this copy would have queued for');
+console.log('ordinary approval alongside the release above it.');
+
+rule('132. Checked from outside the code that measures it');
+const pressChecks = await runChecks({});
+for (const id of ['gate.press', 'press.voice_measured']) {
+  const check = pressChecks.find((c) => c.id === id);
+  console.log(`  ${check.passed ? 'PASS' : 'FAIL'}  ${check.id.padEnd(22)} ${check.label}`);
+}
+const { rows: unmeasured } = await query(
+  `SELECT COUNT(*)::int n FROM pr_materials
+    WHERE voice_score IS NULL
+      AND id <= COALESCE((SELECT material_id FROM pr_voice_watermark), 0)`,
+);
+console.log(`\n${unmeasured[0].n} materials predate the story and carry no voice verdict.`);
+console.log('They are excluded by a watermark rather than backfilled: a score nothing');
+console.log('measured would be inventing the evidence the check exists to look for, and a');
+console.log('red check nobody can ever clear is how a governance check earns its ignoring.');
+
+console.log('\nSTORY-018 complete — PR materials can be asked for rather than waited for,');
+console.log('and "sounds like the author" is now a number that can fail\n');
 await closePool();
 

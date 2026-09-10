@@ -233,7 +233,8 @@ export function PressPage({ author, book }) {
                 <tr key={kit.id}>
                   <td>{kit.milestone_title}</td>
                   <td>
-                    <span className="pill">{kit.milestone_type}</span>
+                    {/* Null for a kit that was requested rather than triggered. */}
+                    <span className="pill">{kit.milestone_type ?? 'on request'}</span>
                   </td>
                   <td>{kit.pending_count}</td>
                   <td>
@@ -540,31 +541,52 @@ export function PressPage({ author, book }) {
           criterion, so it has to be readable on its own. Each theme is judged twice — whether the
           draft <em>named</em> it, and whether it carried the argument behind it. Naming alone is
           worth less than the escalation floor, so copy that name-checks every theme and argues none
-          reaches a human rather than a newsroom.
+          reaches a human rather than a newsroom. Voice is scored the same way and on the same
+          footing: copy that argues every theme in a register the author has never used is
+          escalated too.
         </p>
+
+        {/* STORY-018: press does not have to wait for something to happen to
+            the book. The materials are written from what the book argues, in
+            the voice measured from the author's own posts. */}
+        <button
+          disabled={busy || !book}
+          onClick={() =>
+            run(
+              () => api.generatePrMaterials(author.id, book.id),
+              'PR materials generated from the book\'s themes. Every piece is held for review.',
+            )
+          }
+        >
+          Generate PR materials for "{book?.title ?? 'this book'}"
+        </button>
 
         <label htmlFor="pr-reviewer">Reviewer</label>
         <input id="pr-reviewer" value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
 
         {kits.length === 0 ? (
-          <div className="empty">No kits yet. Draft one from a milestone above.</div>
+          <div className="empty">
+            No kits yet. Draft one from a milestone above, or generate one from the book itself.
+          </div>
         ) : (
           kits.map((kit) => (
             <div className="draft" key={kit.id}>
               <div className="meta">
                 <span className={`pill ${kit.status}`}>{kit.status}</span>
-                <span className="pill">{kit.milestone_type}</span>
+                {/* An on-demand kit has no milestone type to show (STORY-018). */}
+                <span className="pill">{kit.milestone_type ?? 'on request'}</span>
                 {kit.outcome && (
                   <span className={`pill ${kit.outcome === 'won' ? 'won' : ''}`}>
                     {kit.outcome.replace('_', ' ')}
                   </span>
                 )}
                 <strong>{kit.milestone_title}</strong>
-                <span>{formatDate(kit.event_date)}</span>
+                {kit.event_date && <span>{formatDate(kit.event_date)}</span>}
                 <span>
                   {kit.approved_count}/{kit.material_count} approved
                 </span>
                 <span>min alignment {Number(kit.min_theme_alignment).toFixed(2)}</span>
+                <span>min voice {Number(kit.min_voice_score ?? 0).toFixed(2)}</span>
                 <span className="mono">
                   grounded in {kit.grounded_themes} themes / {kit.grounded_passages} passages
                 </span>
@@ -581,9 +603,22 @@ export function PressPage({ author, book }) {
                     </span>
                     <strong>{MATERIAL_LABELS[material.type] ?? material.type}</strong>
                     <span>alignment {Number(material.theme_alignment).toFixed(2)}</span>
+                    {/* The other half of the criterion, since STORY-018. Null on
+                        materials drafted before the story: never measured, so
+                        not shown as a zero it did not earn. */}
+                    {material.voice_score !== null && (
+                      <span>voice {Number(material.voice_score).toFixed(2)}</span>
+                    )}
                     <span>confidence {Number(material.confidence).toFixed(3)}</span>
                     <span className="mono">themes: {material.themes_used.join(', ') || 'none'}</span>
                   </div>
+
+                  {material.voice_violations?.length > 0 && (
+                    <p className="hint">
+                      Reads unlike the author on:{' '}
+                      <span className="mono">{material.voice_violations.join(', ')}</span>
+                    </p>
+                  )}
 
                   {material.themes?.length > 0 && (
                     <div className="meta" style={{ marginTop: 8 }}>

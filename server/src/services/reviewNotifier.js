@@ -28,24 +28,27 @@ const AWAITING = ['pending_approval', 'escalated'];
  */
 export async function findKitsAwaitingReview({ authorId }, client) {
   const { rows } = await client.query(
+    // LEFT JOIN: an on-demand kit has no milestone, and a reviewer who is never
+    // told about it is an approval gate nobody is standing at (STORY-018).
     `SELECT k.id,
             k.author_id,
-            m.title       AS milestone_title,
+            COALESCE(m.title, 'PR materials requested directly') AS milestone_title,
             m.type        AS milestone_type,
             m.event_date,
             m.award_name,
             m.outcome,
             COUNT(*) FILTER (WHERE p.status = ANY($2))::int          AS pending_count,
             COUNT(*) FILTER (WHERE p.status = 'escalated')::int      AS escalated_count,
-            MIN(p.theme_alignment)                                   AS min_theme_alignment
+            MIN(p.theme_alignment)                                   AS min_theme_alignment,
+            MIN(p.voice_score)                                       AS min_voice_score
        FROM pr_kits k
-       JOIN milestones m   ON m.id = k.milestone_id
-       JOIN pr_materials p ON p.kit_id = k.id
+       LEFT JOIN milestones m ON m.id = k.milestone_id
+       JOIN pr_materials p    ON p.kit_id = k.id
       WHERE k.author_id = $1
         AND k.status = 'drafting'
       GROUP BY k.id, k.author_id, m.title, m.type, m.event_date, m.award_name, m.outcome
      HAVING COUNT(*) FILTER (WHERE p.status = ANY($2)) > 0
-      ORDER BY m.event_date, k.id`,
+      ORDER BY COALESCE(m.event_date, k.created_at::date), k.id`,
     [authorId, AWAITING],
   );
   return rows;
@@ -70,6 +73,9 @@ export async function findReviewers({ authorId }, client) {
  * to be inferred from prose; the same rule has to hold in the mail about it.
  */
 function announces(kit) {
+  // No milestone type at all: the kit was requested rather than triggered
+  // (STORY-018). Saying "a null" is how a nullable column reaches a reviewer.
+  if (!kit.milestone_type) return 'the book itself, requested directly';
   if (kit.milestone_type === 'award') {
     const prize = kit.award_name ?? 'a nonfiction prize';
     return kit.outcome === 'won' ? `an award win — ${prize}` : `an award shortlisting — ${prize}`;
@@ -95,8 +101,14 @@ function compose({ kit, reviewer, author }) {
     body: [
       `Hello ${reviewer.name},`,
       '',
-      `A press kit for ${author.name} is waiting for a decision. It announces ${announcement} ` +
-        `on ${new Date(kit.event_date).toISOString().slice(0, 10)}.`,
+      // An on-demand kit has no event date. `new Date(null)` is the epoch, not
+      // an error, so left alone this sentence would have told a reviewer the
+      // kit announces something on 1 January 1970.
+      kit.event_date
+        ? `A press kit for ${author.name} is waiting for a decision. It announces ${announcement} ` +
+          `on ${new Date(kit.event_date).toISOString().slice(0, 10)}.`
+        : `A press kit for ${author.name} is waiting for a decision. It announces ${announcement}, ` +
+          'with no event date — it was requested rather than triggered by one.',
       '',
       // The milestone title is kept for context but no longer carries the
       // claim: an award keeps the title it was scheduled under even after it
@@ -128,11 +140,15 @@ function compose({ kit, reviewer, author }) {
 export async function notifyRaisedEscalations({ authorId, notifier = emailApi }) {
   return withTransaction(async (client) => {
     const { rows: pending } = await client.query(
-      `SELECT e.*, p.type, p.headline, m.title AS milestone_title
+      // LEFT JOIN for the same reason as above: an escalation on an on-demand
+      // kit is exactly the kind a reviewer most needs to hear about, and an
+      // inner join here silently withheld it (STORY-018).
+      `SELECT e.*, p.type, p.headline,
+              COALESCE(m.title, 'PR materials requested directly') AS milestone_title
          FROM escalations e
          JOIN pr_materials p ON p.id = e.pr_material_id
          JOIN pr_kits k      ON k.id = p.kit_id
-         JOIN milestones m   ON m.id = k.milestone_id
+         LEFT JOIN milestones m ON m.id = k.milestone_id
         WHERE e.author_id = $1
           AND e.detected_by = 'monitor'
           AND p.status = 'escalated'

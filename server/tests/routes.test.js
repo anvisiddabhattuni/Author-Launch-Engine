@@ -228,3 +228,58 @@ describe('the other list routes respond', () => {
     assert.ok(Array.isArray(body.withoutKeyMessage));
   });
 });
+
+// STORY-018: the on-demand command and the read model it feeds. `GET
+// /press-kits` assembles its own aggregate over a LEFT JOIN that only matters
+// for kits with no milestone, so the kit created here is the only thing that
+// would catch the join going back to an inner one.
+describe('POST /authors/:authorId/books/:bookId/pr-materials', () => {
+  let created;
+
+  it('generates PR materials on request, with no milestone', async () => {
+    const response = await fetch(
+      `${baseUrl}/authors/${authorId}/books/${bookId}/pr-materials`,
+      {
+        method: 'POST',
+        headers: { ...auth(), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    );
+    created = await response.json();
+    assert.equal(response.status, 201, `expected 201, got ${response.status}: ${JSON.stringify(created)}`);
+    assert.equal(created.kit.milestone_id, null);
+    assert.equal(created.kit.occasion, 'on_demand');
+    assert.equal(created.kit.requested_by, 'Routes Test User');
+    assert.equal(created.materials.length, 3);
+    assert.ok(created.materials.every((m) => m.voice_score !== null));
+  });
+
+  it('shows the milestone-less kit in GET /press-kits', async () => {
+    const { status, body } = await get(`/press-kits?authorId=${authorId}`);
+    assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(body)}`);
+    const kit = body.find((k) => Number(k.id) === Number(created.kit.id));
+    assert.ok(kit, 'the on-demand kit was dropped by the press-kits query');
+    assert.equal(kit.milestone_title, 'Requested directly');
+    assert.equal(kit.material_count, 3);
+    assert.ok(typeof kit.min_voice_score === 'string' || typeof kit.min_voice_score === 'number');
+  });
+
+  it('refuses a book belonging to another tenant', async () => {
+    const { rows } = await query(
+      'INSERT INTO authors (name, email) VALUES ($1,$2) RETURNING *',
+      ['Routes Other Author', `routes-other-${Date.now()}@example.test`],
+    );
+    const { rows: otherBook } = await query(
+      'INSERT INTO books (author_id, title, content, themes) VALUES ($1,$2,$3,$4) RETURNING *',
+      [rows[0].id, 'Not Yours', 'Some content.', ['maps']],
+    );
+
+    const response = await fetch(
+      `${baseUrl}/authors/${rows[0].id}/books/${otherBook[0].id}/pr-materials`,
+      { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body: '{}' },
+    );
+    assert.equal(response.status, 403, 'a signed-in author reached another tenant\'s book');
+
+    await query('DELETE FROM authors WHERE id = $1', [rows[0].id]);
+  });
+});

@@ -4,6 +4,15 @@ import { config } from '../config.js';
 const API_URL = 'https://api.anthropic.com/v1/messages';
 
 function newsHook({ milestone, anniversaryYears, awardOutcome, awardName }) {
+  // No milestone means nothing has happened to the book — the materials were
+  // requested directly (STORY-018). Saying so is the point: invited to invent a
+  // hook, a model will, and a press release built on a fabricated event is the
+  // worst thing this system could hand a journalist.
+  if (!milestone) {
+    return 'there is no news event. Do not invent one, and do not imply the book is new, ' +
+      'newly awarded, or marking an anniversary. The angle is the book\'s own argument ' +
+      'and the reader it is for';
+  }
   if (milestone.type === 'launch') return 'the book is being published';
   if (milestone.type === 'award') {
     const prize = awardName ? `the ${awardName}` : 'a major nonfiction prize';
@@ -52,17 +61,42 @@ function groundedThemes(grounding) {
   ].filter((line) => line !== null);
 }
 
+/**
+ * The author's voice as a target rather than a description (STORY-018).
+ *
+ * The prompt used to carry `JSON.stringify(author.voice_profile)` — a
+ * hand-written wish the model could satisfy by agreeing with it. The copy is
+ * scored against counted traits, so the counted traits are what the model is
+ * given, the same trade the social provider made in STORY-009. Telling it the
+ * numbers is telling it the target.
+ */
+function voiceBrief(voice, voiceProfile) {
+  const stated = `Stated voice: ${JSON.stringify(voiceProfile ?? {})}`;
+  if (!voice?.enforceable) return stated;
+
+  return [
+    stated,
+    "Measured from this author's own previous posts — match these:",
+    `- sentences average ${voice.meanSentenceWords.toFixed(1)} words`,
+    `- exclamation marks per 100 words: ${voice.exclamationsPer100.toFixed(2)}`,
+    `- marketing/hype words per 100 words: ${voice.hypePer100.toFixed(2)}`,
+    'Copy that exceeds these rates is escalated before a human sees it. The labelled',
+    'furniture of a press kit — FOR IMMEDIATE RELEASE, MEDIA CONTACT, the fact sheet',
+    'labels — is not counted against you; the sentences are.',
+  ].join('\n');
+}
+
 function buildPrompt({
-  milestone, book, author, anniversaryYears, awardOutcome, awardName, grounding,
+  milestone, book, author, anniversaryYears, awardOutcome, awardName, grounding, voice,
 }) {
   return [
     `Write a press kit for the book "${book.title}" by ${author.name}.`,
     '',
-    `Milestone type: ${milestone.type}`,
-    `Milestone: ${milestone.title}`,
-    `Date: ${milestone.event_date}`,
-    `Location: ${milestone.location || 'not specified'}`,
-    `Details: ${milestone.details}`,
+    milestone ? `Milestone type: ${milestone.type}` : 'Occasion: none — requested directly.',
+    milestone ? `Milestone: ${milestone.title}` : null,
+    milestone ? `Date: ${milestone.event_date}` : null,
+    milestone ? `Location: ${milestone.location || 'not specified'}` : null,
+    milestone ? `Details: ${milestone.details}` : null,
     awardName ? `Award: ${awardName}` : null,
     `The news hook is that ${newsHook({ milestone, anniversaryYears, awardOutcome, awardName })}.`,
     awardOutcome === 'won'
@@ -76,7 +110,7 @@ function buildPrompt({
         'other anniversary, and do not call it the first unless that number is 1.'
       : null,
     '',
-    `Author voice: ${JSON.stringify(author.voice_profile)}`,
+    voiceBrief(voice, author.voice_profile),
     `Author contact: ${author.email}`,
     '',
     ...groundedThemes(grounding),
@@ -137,13 +171,16 @@ export const prAnthropicProvider = {
   name: 'anthropic',
 
   async draftKit({
-    milestone,
+    // Null for an on-demand kit (STORY-018); the prompt says so rather than
+    // leaving the model to guess at an occasion.
+    milestone = null,
     book,
     author,
     anniversaryYears = null,
     awardOutcome = null,
     awardName = null,
     grounding = null,
+    voice = null,
   }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
@@ -179,6 +216,7 @@ export const prAnthropicProvider = {
                   awardOutcome,
                   awardName,
                   grounding,
+                  voice,
                 }),
               },
             ],

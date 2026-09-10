@@ -119,23 +119,66 @@ const ordinalWord = (years) => {
 
 const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
-/** Headline and opening paragraph carry the news; both turn on milestone type. */
+/**
+ * What the kit is about.
+ *
+ * A milestone when there is one. When there is not — STORY-018's on-demand
+ * request — the book itself is the occasion, and the copy has no date, no
+ * location and no event details to lean on. That absence is the whole reason
+ * the evergreen angle has to work harder from the grounding: with no news hook,
+ * what the book argues is the only thing the release has to say.
+ */
+function occasionOf(milestone, book) {
+  if (milestone) {
+    return {
+      kind: milestone.type,
+      title: milestone.title,
+      date: milestone.event_date,
+      location: milestone.location ?? '',
+      details: milestone.details ?? '',
+      seed: `${milestone.id}:${book.id}`,
+    };
+  }
+  return {
+    kind: 'evergreen',
+    title: '',
+    date: null,
+    location: '',
+    details: '',
+    seed: `evergreen:${book.id}`,
+  };
+}
+
+/** Headline and opening paragraph carry the news; both turn on the occasion. */
 const ANGLES = {
-  launch: ({ book, author, milestone, themes }) => ({
+  launch: ({ book, author, occasion, themes }) => ({
     headline: `${author.name} publishes "${book.title}", a book on ${themes[0]} and ${themes[1]}`,
     lede:
-      `${author.name} will publish "${book.title}" on ${longDate(milestone.event_date)}. ` +
+      `${author.name} will publish "${book.title}" on ${longDate(occasion.date)}. ` +
       `The book argues that ${themes[0]} is a practice rather than a talent, and that ${themes[1]} ` +
       `is what remains once the initial enthusiasm for a project has worn off.`,
     quote:
       `I wanted to write the book I needed during the middle of a long project, ` +
       `when nothing was working and ${themes[2]} was the only thing left to spend.`,
   }),
+  // No event, so no news hook. The angle is the book's own argument and the
+  // reader it is for — the honest version of "why write about this now", and
+  // the only one available when nothing has happened to the book this week.
+  evergreen: ({ book, author, themes }) => ({
+    headline: `"${book.title}" by ${author.name}: the case for ${themes[0]} as a practice`,
+    lede:
+      `${author.name} wrote "${book.title}" for people who do careful work without an ` +
+      `audience for it. The book argues that ${themes[0]} is a practice rather than a talent. ` +
+      `It makes the same case for ${themes[1]}.`,
+    quote:
+      `Nobody claps for the middle of a project. That is where the ${themes[1]} is, ` +
+      `and it is the part the book is about.`,
+  }),
   // A win and a shortlisting are different news. The prize name arrives as data
   // (`awardName`); it used to be scraped out of the milestone title with a
   // regex, which mangled the headline for any title not phrased as "shortlisted
   // for X" — a won award being exactly such a title.
-  award: ({ book, author, milestone, themes, awardOutcome, awardName }) => {
+  award: ({ book, author, occasion, themes, awardOutcome, awardName }) => {
     const prize = awardName ? `the ${awardName}` : 'a major nonfiction prize';
 
     if (awardOutcome === 'won') {
@@ -143,7 +186,7 @@ const ANGLES = {
         headline: `"${book.title}" by ${author.name} wins ${prize}`,
         lede:
           `"${book.title}" by ${author.name} has won ${prize}, announced on ` +
-          `${longDate(milestone.event_date)}. Judges cited the book's treatment of ${themes[0]} ` +
+          `${longDate(occasion.date)}. Judges cited the book's treatment of ${themes[0]} ` +
           `and ${themes[1]} as the reason for the award.`,
         quote:
           `Prizes go to books, but the work is done by people nobody is watching yet. ` +
@@ -155,7 +198,7 @@ const ANGLES = {
       headline: `"${book.title}" by ${author.name} named to the ${awardName ?? 'nonfiction prize'} shortlist`,
       lede:
         `"${book.title}" by ${author.name} has been shortlisted for ${prize}, ` +
-        `announced on ${longDate(milestone.event_date)}. Judges cited the book's treatment of ${themes[0]} ` +
+        `announced on ${longDate(occasion.date)}. Judges cited the book's treatment of ${themes[0]} ` +
         `and ${themes[1]} as the reason for its inclusion.`,
       quote:
         `A shortlist is a room full of books that took ${themes[1]} seriously. ` +
@@ -165,15 +208,15 @@ const ANGLES = {
   // `years` is null when the publication date is unknown. Rather than assert an
   // anniversary it cannot count, the copy says "another year" — vaguer, but not
   // wrong, and wrong is what reaches a journalist.
-  anniversary: ({ book, author, milestone, themes, years }) => ({
+  anniversary: ({ book, author, occasion, themes, years }) => ({
     headline: years
       ? `"${book.title}" marks ${yearsPhrase(years)} in print as its argument about ${themes[0]} finds new readers`
       : `"${book.title}" marks another year in print as its argument about ${themes[0]} finds new readers`,
     lede:
       (years
-        ? `"${book.title}" by ${author.name} reaches its ${ordinalWord(years)} anniversary on ${longDate(milestone.event_date)}. ` +
+        ? `"${book.title}" by ${author.name} reaches its ${ordinalWord(years)} anniversary on ${longDate(occasion.date)}. ` +
           `${capitalize(yearsPhrase(years))} on, `
-        : `"${book.title}" by ${author.name} marks an anniversary on ${longDate(milestone.event_date)}. ` +
+        : `"${book.title}" by ${author.name} marks an anniversary on ${longDate(occasion.date)}. ` +
           `Years on, `) +
       `the book's case for ${themes[0]} and ${themes[2]} continues to reach readers ` +
       `who found it by recommendation rather than by advertising.`,
@@ -183,36 +226,41 @@ const ANGLES = {
   }),
 };
 
-const kicker = (type, awardOutcome) => {
-  if (type === 'launch') return 'NEW RELEASE';
-  if (type === 'anniversary') return 'ANNIVERSARY';
-  if (type === 'award') return awardOutcome === 'won' ? 'AWARD WINNER' : 'SHORTLIST';
+const kicker = (kind, awardOutcome) => {
+  if (kind === 'launch') return 'NEW RELEASE';
+  if (kind === 'anniversary') return 'ANNIVERSARY';
+  if (kind === 'award') return awardOutcome === 'won' ? 'AWARD WINNER' : 'SHORTLIST';
+  if (kind === 'evergreen') return 'AVAILABLE NOW';
   return 'BOOK NEWS';
 };
 
 function pressRelease({
-  book, author, milestone, themes, claims, line, years, awardOutcome, awardName,
+  book, author, occasion, themes, claims, line, years, awardOutcome, awardName,
 }) {
-  const angle = (ANGLES[milestone.type] ?? ANGLES.launch)({
+  const angle = (ANGLES[occasion.kind] ?? ANGLES.launch)({
     book,
     author,
-    milestone,
+    occasion,
     themes,
     years,
     awardOutcome,
     awardName,
   });
-  const dateline = [milestone.location, longDate(milestone.event_date)].filter(Boolean).join(', ');
+  const dateline = [occasion.location, occasion.date ? longDate(occasion.date) : null]
+    .filter(Boolean)
+    .join(', ');
 
   const body = [
     'FOR IMMEDIATE RELEASE',
-    kicker(milestone.type, awardOutcome),
+    kicker(occasion.kind, awardOutcome),
     '',
     angle.headline,
     '',
-    `${dateline} — ${angle.lede}`,
+    // An on-demand kit has no dateline because it has no date. Printing " — "
+    // with nothing before it would be a dateline-shaped hole in the copy.
+    dateline ? `${dateline} — ${angle.lede}` : angle.lede,
     '',
-    milestone.details,
+    occasion.details,
     '',
     `The book takes ${prose(themes)} as its subject, and makes its case in short chapters drawn ` +
       `from ordinary working life rather than from research summaries.`,
@@ -278,7 +326,7 @@ const AWARD_STATUS_LINE = {
   not_won: 'Shortlisted (did not win)',
 };
 
-function factSheet({ book, author, milestone, themes, claims, years, awardOutcome, awardName }) {
+function factSheet({ book, author, occasion, themes, claims, years, awardOutcome, awardName }) {
   const headline = `"${book.title}" — fact sheet`;
   const body = [
     `TITLE — ${book.title}`,
@@ -286,13 +334,16 @@ function factSheet({ book, author, milestone, themes, claims, years, awardOutcom
     `CATEGORY — Nonfiction`,
     `THEMES — ${themes.join(' · ')}`,
     book.published_on ? `PUBLISHED — ${longDate(book.published_on)}` : null,
-    `MILESTONE — ${milestone.title}`,
+    // An on-demand kit has no milestone, no date, no location and no details.
+    // Each line is omitted rather than filled with a placeholder: a fact sheet
+    // is lifted verbatim, so an invented fact is a printed one.
+    occasion.title ? `MILESTONE — ${occasion.title}` : null,
     awardName ? `AWARD — ${awardName}` : null,
     awardOutcome ? `AWARD STATUS — ${AWARD_STATUS_LINE[awardOutcome] ?? awardOutcome}` : null,
     years ? `ANNIVERSARY — ${ordinalWord(years)}, ${yearsPhrase(years)} in print` : null,
-    `DATE — ${longDate(milestone.event_date)}`,
-    milestone.location ? `LOCATION — ${milestone.location}` : null,
-    `DETAILS — ${milestone.details}`,
+    occasion.date ? `DATE — ${longDate(occasion.date)}` : null,
+    occasion.location ? `LOCATION — ${occasion.location}` : null,
+    occasion.details ? `DETAILS — ${occasion.details}` : null,
     '',
     `SUMMARY — A book about ${prose(themes)}, argued in short chapters drawn from ordinary ` +
       `working life rather than from research summaries.`,
@@ -317,7 +368,10 @@ export const prStubProvider = {
    * @returns {Array<{type: string, headline: string, body: string, themesUsed: string[]}>}
    */
   async draftKit({
-    milestone,
+    // Null when the materials were requested directly rather than triggered by
+    // an event (STORY-018). The occasion below is what the copy is written
+    // around either way.
+    milestone = null,
     book,
     author,
     anniversaryYears = null,
@@ -328,7 +382,8 @@ export const prStubProvider = {
     // never does; the copy then degrades to theme labels the way it used to.
     grounding = null,
   }) {
-    const seed = hash(`${milestone.id}:${book.id}`);
+    const occasion = occasionOf(milestone, book);
+    const seed = hash(occasion.seed);
 
     // Padded so an angle can reference themes[3] on a book with fewer themes.
     const themes = [...book.themes];
@@ -344,14 +399,14 @@ export const prStubProvider = {
       {
         type: 'press_release',
         ...pressRelease({
-          book, author, milestone, themes, claims, line, years, awardOutcome, awardName,
+          book, author, occasion, themes, claims, line, years, awardOutcome, awardName,
         }),
       },
       { type: 'author_bio', ...authorBio({ book, author, themes, claims, index, line }) },
       {
         type: 'fact_sheet',
         ...factSheet({
-          book, author, milestone, themes, claims, years, awardOutcome, awardName,
+          book, author, occasion, themes, claims, years, awardOutcome, awardName,
         }),
       },
     ];

@@ -218,14 +218,17 @@ async function record({ material, verdict, limits, detectedBy, agreed, client })
 export async function listEscalations({ authorId, openOnly = false }) {
   const { rows } = await withTransaction(async (client) =>
     client.query(
+      // LEFT JOIN: a dashboard that silently omits every on-demand kit's
+      // escalations is worse than no dashboard, because it reads as "nothing
+      // is wrong" (STORY-018).
       `SELECT e.*,
               p.type, p.headline, p.status AS material_status, p.kit_id,
-              m.title AS milestone_title,
+              COALESCE(m.title, 'PR materials requested directly') AS milestone_title,
               (p.status = ANY($2)) AS open
          FROM escalations e
          JOIN pr_materials p ON p.id = e.pr_material_id
          JOIN pr_kits k      ON k.id = p.kit_id
-         JOIN milestones m   ON m.id = k.milestone_id
+         LEFT JOIN milestones m ON m.id = k.milestone_id
         WHERE e.author_id = $1
         ORDER BY e.id DESC`,
       [authorId, DECIDABLE],
