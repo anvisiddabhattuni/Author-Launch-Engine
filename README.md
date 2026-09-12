@@ -31,6 +31,7 @@ Implemented so far:
 - **STORY-016 — API Integration Agent Interfaces with External APIs** (API Integration Agent), fulfilling `REQ-009` and `REQ-004`
 - **STORY-017 — Tenant Management Agent Manages Multi-Tenancy** (Tenant Management Agent), fulfilling `REQ-010` and `REQ-004`
 - **STORY-018 — AI Content Generation Agent Generates PR Materials** (AI Content Generation Agent), fulfilling `REQ-011` and `REQ-004`
+- **STORY-019 — Implement Append-Only Audit Log** (Audit and Security Agent), fulfilling `REQ-005` — **the access control and completeness half; see below**
 
 ## What works today
 
@@ -1175,6 +1176,85 @@ nothing measured would be inventing the evidence the check exists to find. `023`
 and the `press.voice_measured` governance check reads it, so those rows are reported as history
 rather than as a permanent red nobody can clear.
 
+### STORY-019 — the log nobody could edit and everybody could read
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `AuditLog` module handling logging | `server/src/services/auditLog.js` (since STORY-001; redaction added here) |
+| 2. Table with action details, timestamps, before-after states | `audit_log`, `001_init.sql` |
+| 3. Secure the table | `019_audit_integrity.sql` (append-only) + redaction at write — **not AES-256; see below** |
+| 4. RBAC in the Node/Express backend | `024_rbac.sql`, `server/src/services/permissions.js`, `middleware/auth.js` |
+| 5. Endpoints for logging and retrieving with access control | `GET /api/audit-log`, `GET /api/audit-integrity` |
+
+STORY-013 proved the audit log **cannot be tampered with**. This story asks two different questions:
+is it **complete**, and **who may read it**. Both were measured before anything was written.
+
+**Anyone could read it.** `GET /api/audit-log` had no guard at all — any signed-in author read it.
+The 403 an author gets asking for another tenant comes from `enforceTenant`, which is *tenant
+scoping*: it answers "whose rows?", not "may this role read audit data?". Those two questions agree
+right up until they don't. That is the third time this project has hit the same shape — a system
+cannot audit its own audit log (STORY-013), middleware cannot verify the handlers it protects
+(STORY-017), and now a tenant check cannot answer an access-control question.
+
+**So permissions became rows.** `008_auth.sql` said it in its own comment — *"This is not RBAC:
+there are no per-resource permissions here"* — and predicted the fix in the next line: *"adding a
+third role later is a row rather than a migration to every check."* This story added a third role
+and took that claim at its word:
+
+```
+admin       audit.read, audit.verify, templates.manage, tenant.manage, tenant.read.all
+author      audit.read
+compliance  audit.read, audit.verify, tenant.read.all
+```
+
+A compliance officer reads every tenant's log and can change nothing. Under role checks that person
+had to be made an admin, which is how "read the audit log" quietly becomes "suspend a tenant". No
+route names the `compliance` role, and a test asserts that — if the claim had been false, adding the
+role would have required editing routes. All seven `requireRole('admin')` guards became permission
+checks, and `requireRole` is deleted rather than deprecated, because leaving it exported leaves the
+easy wrong answer next to the right one.
+
+The same conflation was one layer down, in the schema: `CHECK (role = 'admin' OR author_id IS NOT
+NULL)` meant "an account with no tenant must be able to read across tenants", and while `admin` was
+the only such role the two sentences were indistinguishable. It rejected the first compliance user.
+It is now a trigger that consults the grant table, because a `CHECK` may not contain a subquery.
+
+**Why not AES-256.** The build note asks for it on this table. It would break the STORY-013 seals
+(which hash row contents), make every governance check unable to filter on `action` or join on
+`author_id`, and leave the key in the same env file as the database URL. None of that addresses the
+actual hazard, which is this: 28 call sites log a whole database row with `after: row`, and the day
+one of those rows comes from `users`, the password hash is in a table whose triggers refuse `UPDATE`,
+`DELETE` and `TRUNCATE`. **A secret written here can never be taken back out.** Encryption still lets
+the key holder read it; neither lets anyone remove it. So redaction happens at the single function
+every writer goes through:
+
+```
+after.password_hash        → "[redacted]"
+metadata.nested.api_key    → "[redacted]"
+after.email                → "mira@example.test"   (not a credential, kept)
+```
+
+The key is kept and the value replaced, because *that a write touched a credential* is itself an
+audit fact. Encryption at rest is a deployment-layer concern and is named in Known gaps rather than
+faked here — the same call STORY-015 made by saying "not deployed" out loud.
+
+**"Before-after states", checked where a state existed.** Two actions moved a row's status and
+recorded neither: `tenant.suspended` and `meme_template.retired`. Both now capture both states in a
+single statement (`FROM authors old` reads the pre-update snapshot, so there is no gap in which
+someone else's write could become the recorded "before").
+
+The governance check that stops this drifting again is deliberately narrow, and **its first version
+was wrong** — it counted 67 `meme_template.rejected` rows as violations. Those are gate *refusals*:
+the generator reached for a template it may not use and was told no. Nothing was stored, so there is
+no prior state, and demanding one is demanding fiction — exactly what the check's own comment warns
+against. It now qualifies `rejected` by entity type. Creations keep `after` with no `before`,
+retrievals have neither, and none of them count.
+
+Proving that check can fail needed a bad row, and a bad row here is permanent — it would leave the
+check red in every later run, and a red nobody can clear is one people learn to scroll past. The test
+writes one inside a transaction and rolls it back: the triggers block edits to committed rows and
+have nothing to say about a write that never commits.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1220,7 +1300,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 132 stages with evidence at each one.
+Prints 138 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1330,6 +1410,12 @@ Prints 132 stages with evidence at each one.
   real posts and cross-checked against their hand-written profile, the same release scored 0.74 with
   its format furniture and 0.87 without, copy that argues every theme escalating on voice alone, and
   both press invariants checked from outside the code that enforces them.
+
+- **Stages 133–138, STORY-019:** the audit log any signed-in author could read, the grant table that
+  replaced seven `requireRole('admin')` checks, a compliance officer reading every tenant and
+  refused every write, a password hash redacted on its way into a table that cannot be edited, the
+  two status changes that recorded neither state, and the check whose first version demanded a
+  "before" from 67 gate refusals.
 
 Stage 16 deliberately leaves the anniversary alone so stage 22 has something to find: STORY-003
 drafts when a person asks, STORY-004 drafts when the date approaches. Stage 16 *does* draft the
@@ -1465,6 +1551,8 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/milestones/:id/award-outcome` | Record won / not_won / shortlisted; a win drafts, a loss does not |
 | `POST` | `/api/milestones/:id/press-kit` | Draft the three press materials for a milestone |
 | `POST` | `/api/authors/:authorId/books/:bookId/pr-materials` | Generate PR materials on request, with no milestone (STORY-018) |
+| `GET` | `/api/audit-log?authorId=` | The trail. Requires `audit.read`; scoped to your tenant without `tenant.read.all` (STORY-019) |
+| `GET` | `/api/audit-integrity` | Tamper verification over the sealed ranges. Requires `audit.verify` |
 | `GET` | `/api/press-kits?authorId=` | Kits with their materials, theme and voice scores, and distributions |
 | `POST` | `/api/pr-materials/:id/approve` · `/reject` | Record a human decision |
 | `POST` | `/api/press-kits/:id/distribute` | Distribute to matching press contacts (mocked) |
@@ -1492,9 +1580,30 @@ material are the verified matches rather than the provider's own claim about wha
 
 These are deliberate deferrals, not oversights:
 
-- Authentication exists as of STORY-064, but only a thin slice: two roles, no signup, no password
-  reset, no refresh tokens, no lockout after repeated failures. Per-resource permissions are
-  STORY-022 in R5. Seed passwords are printed by `npm run db:reset` and are not secret.
+- Authentication exists as of STORY-064, but only a thin slice: no signup, no password reset, no
+  refresh tokens, no lockout after repeated failures. Per-resource permissions arrived early, in
+  STORY-019, because the audit log's access-control clause needed them. Seed passwords are printed
+  by `npm run db:reset` and are not secret.
+- **The audit log is not encrypted at rest.** REQ-005 asks for encryption and the STORY-019 build
+  note asks specifically for AES-256 on the table. It is not done, on purpose, and the reasoning is
+  in the STORY-019 section above: it would break the STORY-013 seals, make the governance checks
+  unable to query, and put the key beside the database URL. What was built instead is redaction at
+  the single write path, because the table refuses `UPDATE` and `DELETE` and so a secret written
+  there is unremovable — which encryption does not help with. Encryption at rest belongs to the
+  volume or the managed database, and that is a deployment decision this project has not made yet
+  (see STORY-015: nothing is deployed).
+- **Permissions are carried in the token, so a grant change waits for the next sign-in.** The guard
+  that reads them runs before Express has matched a route and has to be synchronous. This is the
+  same staleness `role` has had since STORY-064 — `role` was always a claim — so it adds no new
+  class of problem, but revoking a permission does not end a session that already holds it.
+- **The redaction list is a fixed set of key names.** It catches `password`, `token`, `api_key` and
+  the rest by name, at any depth. A credential stored under a field called something else reaches
+  the log, and once there it cannot be removed. The list is one regex in `services/auditLog.js`,
+  deliberately readable rather than clever.
+- **The `audit.states_recorded` check names the entity types it covers.** A new approvable thing
+  gets no coverage until somebody adds it to that list — the same standing limitation as every other
+  check here, and the reason its first version was wrong in the other direction (it demanded a prior
+  state from 67 gate refusals).
 - The session token lives in `localStorage`, so any script running on the page can read it. An
   httpOnly cookie would fix that and brings CSRF handling with it — a deliberate trade for a slice
   labelled thin, and named here rather than hidden.

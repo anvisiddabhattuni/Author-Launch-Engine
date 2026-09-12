@@ -316,16 +316,21 @@ export async function addTemplate(template, { user = null, force = false } = {},
  * strand the provenance on a post that has already gone out.
  */
 export async function retireTemplate({ key, reason = '', user = null }, client = pool) {
+  // One statement for both states: `FROM meme_templates old` reads the row as
+  // it was before this UPDATE touched it (STORY-019).
   const { rows } = await client.query(
-    `UPDATE meme_templates
+    `UPDATE meme_templates t
         SET active = FALSE, retired_at = now(), retired_reason = $2
-      WHERE key = $1 AND active
-      RETURNING *`,
+       FROM meme_templates old
+      WHERE t.key = $1 AND t.active AND old.key = t.key
+      RETURNING t.*, to_jsonb(old) AS before_row`,
     [key, reason],
   );
   if (!rows[0]) {
     throw Object.assign(new Error(`No active template "${key}" to retire`), { status: 404 });
   }
+
+  const { before_row: beforeRow, ...retired } = rows[0];
 
   await recordAction(
     {
@@ -333,10 +338,15 @@ export async function retireTemplate({ key, reason = '', user = null }, client =
       action: 'meme_template.retired',
       entityType: 'meme_template',
       entityId: key,
+      // Retiring flips `active` and stamps a reason. Recording neither state
+      // made the one audit row that explains a template's disappearance unable
+      // to say what it had been.
+      before: beforeRow,
+      after: retired,
       metadata: { template: key, reason, retiredBy: user?.name ?? null },
     },
     client,
   );
 
-  return rowToTemplate(rows[0]);
+  return rowToTemplate(retired);
 }

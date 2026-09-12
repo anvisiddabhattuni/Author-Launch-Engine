@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { pool } from '../db/pool.js';
 
 import { recordAction } from './auditLog.js';
+import { permissionsForRole } from './permissions.js';
 
 const scrypt = promisify(scryptCb);
 
@@ -66,13 +67,23 @@ export async function verifyPassword(password, stored) {
   return derived.length === expectedBuf.length && timingSafeEqual(derived, expectedBuf);
 }
 
-/** The claims a request is allowed to act on. Kept small — a token is not a profile. */
-export function issueToken(user) {
+/**
+ * The claims a request is allowed to act on. Kept small — a token is not a profile.
+ *
+ * `permissions` joins `role` here rather than being looked up per request
+ * (STORY-019). The middleware that reads them runs before Express has matched a
+ * route and has to stay synchronous, and a grant change already could not reach
+ * a live session — `role` has been a claim since STORY-064, so a role change
+ * has always waited for the next token. Carrying the grants alongside it adds
+ * no new staleness, and the lag is written into Known gaps.
+ */
+export function issueToken(user, permissions = []) {
   return jwt.sign(
     {
       sub: String(user.id),
       name: user.name,
       role: user.role,
+      permissions,
       // null for an admin, which is what lets them read across tenants.
       authorId: user.author_id === null ? null : Number(user.author_id),
     },
@@ -134,16 +145,21 @@ export async function login({ email, password }) {
     throw INVALID();
   }
 
+  const permissions = await permissionsForRole(user.role);
+
   await recordAction({
     actor: user.name,
     action: 'auth.login',
     entityType: 'user',
     entityId: user.id,
     authorId: user.author_id,
-    metadata: { role: user.role, email: user.email },
+    // What the session was granted, on the record at the moment it was granted.
+    // An access question asked later — "how did they read that?" — is answered
+    // by the log rather than by today's grant table, which may have changed.
+    metadata: { role: user.role, email: user.email, permissions },
   });
 
-  return { token: issueToken(user), user: publicUser(user) };
+  return { token: issueToken(user, permissions), user: publicUser(user) };
 }
 
 /** Never let a password hash out of the service, even internally. */

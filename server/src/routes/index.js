@@ -1,6 +1,13 @@
 import { Router } from 'express';
 
-import { assertOwns, authenticate, enforceTenant, requireRole, tenantParam } from '../middleware/auth.js';
+import {
+  assertOwns,
+  authenticate,
+  enforceTenant,
+  requirePermission,
+  tenantParam,
+} from '../middleware/auth.js';
+import { PERMISSIONS, grantMatrix, holds } from '../services/permissions.js';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
 import {
@@ -130,7 +137,10 @@ router.get('/integrations', asyncRoute(async (req, res) => {
   // system-wide ones. `enforceTenant` has already filled in `authorId` for a
   // non-admin, and a route that ignored it would serve everybody's — which is
   // exactly the leak STORY-017 found in two routes written before this one.
-  const scope = req.user?.role === 'admin' ? null : Number(req.query.authorId);
+  // Asks the capability, not the role: a compliance session reads across
+  // tenants and has no authorId of its own, so the old `role === 'admin'`
+  // reading would have scoped it to NaN (STORY-019).
+  const scope = holds(req.user, PERMISSIONS.TENANT_READ_ALL) ? null : Number(req.query.authorId);
   const services = await integrationHealth({ sinceHours, authorId: scope });
   const { rows: recentFailures } = await query(
     `SELECT service, operation, attempt, outcome, status, duration_ms, error, created_at
@@ -155,7 +165,7 @@ router.get('/authors', asyncRoute(async (req, res) => {
   // author in the database and the UI simply took the first one, which is how
   // the masthead came to say "Signed in as" about somebody nobody had signed in
   // as. An author now sees exactly one row: their own.
-  if (req.user.role !== 'admin') {
+  if (!holds(req.user, PERMISSIONS.TENANT_READ_ALL)) {
     const { rows } = await query('SELECT * FROM authors WHERE id = $1', [req.user.authorId]);
     return res.json(rows);
   }
@@ -1084,8 +1094,8 @@ router.get('/jobs', asyncRoute(async (req, res) => {
   const params = [];
   let where = '';
   // Global sweeps have no author. An author sees their own work and the global
-  // runs that act on it; an admin sees everything.
-  if (req.user.role !== 'admin') {
+  // runs that act on it; a session that reads across tenants sees everything.
+  if (!holds(req.user, PERMISSIONS.TENANT_READ_ALL)) {
     params.push(req.user.authorId);
     where = 'WHERE (author_id = $1 OR author_id IS NULL)';
   }
@@ -1120,12 +1130,12 @@ router.get('/jobs', asyncRoute(async (req, res) => {
  * with nothing behind it, and either half alone is a broken state somebody
  * cleans up by hand.
  */
-router.post('/tenants', requireRole('admin'), asyncRoute(async (req, res) => {
+router.post('/tenants', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
   const { name, email, password, role, voiceProfile } = req.body ?? {};
   res.status(201).json(await onboardTenant({ name, email, password, role, voiceProfile }));
 }));
 
-router.post('/tenants/:authorId/suspend', requireRole('admin'), asyncRoute(async (req, res) => {
+router.post('/tenants/:authorId/suspend', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
   res.json(
     await suspendTenant({
       authorId: Number(req.params.authorId),
@@ -1135,7 +1145,7 @@ router.post('/tenants/:authorId/suspend', requireRole('admin'), asyncRoute(async
   );
 }));
 
-router.post('/tenants/:authorId/restore', requireRole('admin'), asyncRoute(async (req, res) => {
+router.post('/tenants/:authorId/restore', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
   res.json(await restoreTenant({ authorId: Number(req.params.authorId), user: req.user }));
 }));
 
@@ -1146,7 +1156,7 @@ router.post('/tenants/:authorId/restore', requireRole('admin'), asyncRoute(async
  * went through the tenant guard would only ever confirm the guard agrees with
  * itself.
  */
-router.get('/tenants/isolation', requireRole('admin'), asyncRoute(async (_req, res) => {
+router.get('/tenants/isolation', requirePermission(PERMISSIONS.TENANT_READ_ALL), asyncRoute(async (_req, res) => {
   res.json(await verifyIsolation({}));
 }));
 
@@ -1172,7 +1182,7 @@ router.get('/authors/:authorId/trust-dashboard', asyncRoute(async (req, res) => 
  * that its integrity is checkable, and a check only an administrator can run is
  * a check most people have to take on trust.
  */
-router.get('/audit-integrity', asyncRoute(async (_req, res) => {
+router.get('/audit-integrity', requirePermission(PERMISSIONS.AUDIT_VERIFY), asyncRoute(async (_req, res) => {
   const verification = await verifyAuditLog({});
   const { rows: checkpoints } = await query(
     `SELECT id, from_id, to_id, row_count, LEFT(digest, 16) AS digest, sealed_at
@@ -1186,7 +1196,7 @@ router.get('/audit-integrity', asyncRoute(async (_req, res) => {
 }));
 
 /** Seals what is new and re-checks every seal. Detects; it cannot repair. */
-router.post('/audit-integrity/verify', requireRole('admin'), asyncRoute(async (_req, res) => {
+router.post('/audit-integrity/verify', requirePermission(PERMISSIONS.AUDIT_VERIFY), asyncRoute(async (_req, res) => {
   res.status(201).json(await sealAndVerify({}));
 }));
 
@@ -1393,7 +1403,7 @@ router.get('/meme-templates', asyncRoute(async (req, res) => {
  * changes what every other tenant's generator can reach for, which is exactly
  * the kind of decision the operator role exists for. Browsing stays open.
  */
-router.post('/meme-templates', requireRole('admin'), asyncRoute(async (req, res) => {
+router.post('/meme-templates', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), asyncRoute(async (req, res) => {
   const body = req.body ?? {};
   for (const field of ['key', 'name', 'layout', 'image_ref']) {
     if (!body[field]) return res.status(400).json({ error: `${field} is required` });
@@ -1406,7 +1416,7 @@ router.post('/meme-templates', requireRole('admin'), asyncRoute(async (req, res)
   return res.status(201).json(await addTemplate(body, { user: req.user }));
 }));
 
-router.post('/meme-templates/:key/retire', requireRole('admin'), asyncRoute(async (req, res) => {
+router.post('/meme-templates/:key/retire', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), asyncRoute(async (req, res) => {
   res.json(
     await retireTemplate({
       key: req.params.key,
@@ -1440,7 +1450,7 @@ router.post('/jobs/tick', asyncRoute(async (_req, res) => {
 
 // --- Audit trail (REQ-005) ---
 
-router.get('/audit-log', asyncRoute(async (req, res) => {
+router.get('/audit-log', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
   const rows = await listAuditLog({
     authorId: req.query.authorId,
     entityType: req.query.entityType,

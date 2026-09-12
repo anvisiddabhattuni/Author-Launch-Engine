@@ -86,8 +86,16 @@ export function App() {
         <div className="story">
           Signed in as <strong>{user.name}</strong>
           <span className="pill" style={{ marginLeft: 8 }}>{user.role}</span>
-          {user.role === 'admin' && (
+          {/* Reads the capability rather than the role name: `compliance` also
+              spans every tenant, and "all tenants" said about an admin only
+              would be wrong for them (STORY-019). */}
+          {user.permissions?.includes('tenant.read.all') && (
             <span className="mono"> · all tenants</span>
+          )}
+          {user.permissions?.length > 0 && (
+            <span className="mono" title={user.permissions.join('\n')}>
+              {' '}· {user.permissions.length} permissions
+            </span>
           )}
           <button className="link" onClick={signOut} style={{ marginLeft: 12 }}>
             Sign out

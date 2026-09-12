@@ -22,6 +22,7 @@ import { trustDashboard } from './agents/trustMonitoringAgent.js';
 import { callExternal, integrationHealth, isRetryable } from './agents/apiIntegrationAgent.js';
 import {
   onboardTenant,
+  restoreTenant,
   suspendTenant,
   tenantTables,
   verifyIsolation,
@@ -40,6 +41,7 @@ import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgen
 import { draftPressKit } from './agents/prMaterialsAgent.js';
 import { generatePrMaterials, proseOf } from './agents/aiContentGenerationAgent.js';
 import { runChecks } from './services/governance.js';
+import { grantMatrix } from './services/permissions.js';
 import { draftOutreachMessages } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { createApp } from './app.js';
@@ -53,7 +55,7 @@ import {
   approvePrMaterial,
   rejectMixRecommendation,
 } from './services/approvals.js';
-import { listAuditLog } from './services/auditLog.js';
+import { listAuditLog, recordAction } from './services/auditLog.js';
 import { findApproachingMilestones } from './services/milestones.js';
 import { draftApproachingKits } from './services/milestoneWatcher.js';
 import { recordAwardOutcome } from './services/awardOutcome.js';
@@ -2520,5 +2522,133 @@ console.log('red check nobody can ever clear is how a governance check earns its
 
 console.log('\nSTORY-018 complete — PR materials can be asked for rather than waited for,');
 console.log('and "sounds like the author" is now a number that can fail\n');
+
+
+// ── STORY-019 ────────────────────────────────────────────────────────────────
+// The append-only audit log. STORY-013 proved it cannot be tampered with. This
+// story asks two different questions: is it complete, and who may read it.
+
+rule('133. The log could not be tampered with. Anyone could read it.');
+console.log('Measured before writing a line of this story, signed in as an ordinary author:\n');
+console.log('  GET /api/audit-log            → 200, 100 rows');
+console.log('  GET /api/audit-log?authorId=2 → 403');
+console.log('\nThat 403 is STORY-017 working — tenant scoping, which answers "whose rows?".');
+console.log('Nothing anywhere asked "may this role read audit data at all?" The route had');
+console.log('no guard on it. Two questions that agree until they do not, which is the');
+console.log('third time this project has found that shape.');
+
+rule('134. Permissions as rows, so a role can be added without touching a route');
+for (const r of await grantMatrix()) {
+  console.log(`  ${r.role.padEnd(11)} ${(r.permissions.join(', ') || '(nothing granted)')}`);
+}
+console.log('\n008_auth.sql said it plainly: "This is not RBAC: there are no per-resource');
+console.log('permissions here." It also predicted the fix — "adding a third role later is a');
+console.log('row rather than a migration to every check." This story added `compliance` and');
+console.log('took that claim at its word. No route names the role; a test asserts that.');
+
+rule('135. Reading the log is not permission to change anything');
+// A fresh server: the STORY-017 block closed the first one, and these checks
+// have to go through real routing to mean anything.
+const rbacServer = createApp().listen(0);
+await new Promise((resolve) => rbacServer.once('listening', resolve));
+const demoBase = `http://127.0.0.1:${rbacServer.address().port}/api`;
+const demoLogin = async (email, password) => {
+  const r = await fetch(`${demoBase}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  return (await r.json()).token;
+};
+const auditorToken = await demoLogin('auditor@example.test', 'compliance-only');
+const miraToken2 = await demoLogin('mira@example.test', 'quiet-craft');
+const hit = async (token, path, method = 'GET') =>
+  (await fetch(`${demoBase}${path}`, { method, headers: { Authorization: `Bearer ${token}` } })).status;
+
+console.log('                                      author  compliance');
+for (const [label, path, method] of [
+  ['GET  /audit-log', '/audit-log', 'GET'],
+  ['GET  /audit-log?authorId=2', '/audit-log?authorId=2', 'GET'],
+  ['GET  /audit-integrity', '/audit-integrity', 'GET'],
+  ['POST /tenants/2/suspend', '/tenants/2/suspend', 'POST'],
+]) {
+  const a = await hit(miraToken2, path, method);
+  const c = await hit(auditorToken, path, method);
+  console.log(`  ${label.padEnd(34)}${String(a).padStart(4)}${String(c).padStart(11)}`);
+}
+console.log('\nA compliance officer reads every tenant and can change nothing. Under role');
+console.log('checks that person had to be made an admin — which is how "read the audit');
+console.log('log" quietly becomes "suspend a tenant".');
+
+await new Promise((resolve) => rbacServer.close(resolve));
+
+rule('136. A secret written here could never be taken back out');
+const { rows: [demoUser] } = await query('SELECT * FROM users LIMIT 1');
+const leaked = await recordAction({
+  actor: 'demo',
+  action: 'user.audited',
+  entityType: 'user',
+  entityId: demoUser.id,
+  after: demoUser,
+  metadata: { nested: { api_key: 'sk-live-9f3a2b', note: 'kept' } },
+});
+console.log('A users row passed straight to `after: row` — 28 call sites do exactly this:\n');
+console.log('  after.password_hash        →', JSON.stringify(leaked.after.password_hash));
+console.log('  metadata.nested.api_key    →', JSON.stringify(leaked.metadata.nested.api_key));
+console.log('  metadata.nested.note       →', JSON.stringify(leaked.metadata.nested.note), '(not a secret, kept)');
+console.log('  after.email                →', JSON.stringify(leaked.after.email), '(not a secret, kept)');
+console.log('\nThe key is kept and the value replaced, because "this write touched a');
+console.log('credential" is itself an audit fact. The build note asked for AES-256 on this');
+console.log('table instead. That would break the STORY-013 seals, make every governance');
+console.log('check unable to query, and still let the key holder read it — and none of it');
+console.log('addresses the actual hazard: 019_audit_integrity refuses UPDATE and DELETE, so');
+console.log('a secret written here is unremovable. Redaction is the only point it can be');
+console.log('stopped. Encryption at rest is a deployment decision, named in Known gaps.');
+
+rule('137. "Before-after states" — checked, and only where a state existed');
+const { rows: [secondTenant] } = await query(
+  "SELECT id FROM authors WHERE email = 'tomas@example.test'",
+);
+const secondTenantId = secondTenant.id;
+await suspendTenant({ authorId: secondTenantId, reason: 'demo: recording both states', user: { name: 'ops' } });
+const { rows: [suspendRow] } = await query(
+  "SELECT before, after FROM audit_log WHERE action = 'tenant.suspended' ORDER BY id DESC LIMIT 1",
+);
+console.log(`  tenant.suspended   ${suspendRow.before.tenant_status} → ${suspendRow.after.tenant_status}`);
+await restoreTenant({ authorId: secondTenantId, user: { name: 'ops' } });
+const { rows: [restoreRow] } = await query(
+  "SELECT before, after FROM audit_log WHERE action = 'tenant.restored' ORDER BY id DESC LIMIT 1",
+);
+console.log(`  tenant.restored    ${restoreRow.before.tenant_status} → ${restoreRow.after.tenant_status}`);
+console.log('\nBoth recorded neither state until this story. What the check does NOT demand:');
+const { rows: exempt } = await query(
+  `SELECT action,
+          COUNT(*)::int n,
+          CASE WHEN COUNT(after) > 0 THEN 'after only — nothing existed before'
+               ELSE 'neither — nothing was stored' END AS shape
+     FROM audit_log
+    WHERE before IS NULL
+      AND action IN ('draft.created', 'meme_template.rejected', 'pr_kit.themes_retrieved')
+    GROUP BY action ORDER BY n DESC`,
+);
+for (const r of exempt) console.log(`  ${String(r.n).padStart(3)} ${r.action.padEnd(26)} ${r.shape}`);
+console.log('\nA creation has no prior state; a retrieval has no state at all; and a gate');
+console.log('refusal stored nothing to have a state. The first version of this check counted');
+console.log('67 template refusals as violations — demanding fiction, which is exactly what');
+console.log('its own comment warns against. Narrowed to stored rows that actually moved.');
+
+rule('138. Checked from outside the code that records it');
+const auditChecks = await runChecks({});
+for (const id of ['audit.states_recorded', 'audit.sealed', 'approvals.attributable']) {
+  const check = auditChecks.find((c) => c.id === id);
+  console.log(`  ${check.passed ? 'PASS' : 'FAIL'}  ${check.id.padEnd(24)} ${check.label}`);
+}
+console.log('\nThe states check has to be able to fail or it is decoration. Proving that');
+console.log('needs a bad row, and a bad row here is permanent — so the test writes one');
+console.log('inside a transaction and rolls it back. The triggers block edits to committed');
+console.log('rows and have nothing to say about a write that never commits.');
+
+console.log('\nSTORY-019 complete — the log now says who may read it and what it may not');
+console.log('carry, and "before-after states" is checked where a state actually existed\n');
 await closePool();
 

@@ -337,11 +337,24 @@ async function seed() {
     authorId: otherAuthor[0].id,
   });
 
+  // The third role, and the point of STORY-019's permission table: someone who
+  // must read every tenant's audit log for compliance and must be able to
+  // change nothing. Under role checks this person had to be made an admin,
+  // which also handed them the power to suspend a tenant.
+  const auditor = await upsertUser({
+    email: 'auditor@example.test',
+    name: 'Rae Lindqvist',
+    password: 'compliance-only',
+    role: 'compliance',
+    authorId: null,
+  });
+
   console.log(
-    `seeded ${[authorLogin, admin, otherUser].length} logins:\n` +
+    `seeded ${[authorLogin, admin, otherUser, auditor].length} logins:\n` +
       `  ${authorLogin.email} / quiet-craft      (author, tenant ${authorLogin.author_id})\n` +
       `  ${otherUser.email} / second-shelf   (author, tenant ${otherUser.author_id})\n` +
-      `  ${admin.email} / ops-password      (admin, all tenants)`,
+      `  ${admin.email} / ops-password      (admin, all tenants)\n` +
+      `  ${auditor.email} / compliance-only (compliance, reads every tenant, changes nothing)`,
   );
 
   // Milestones hang off the book, which is recreated above, so they are gone

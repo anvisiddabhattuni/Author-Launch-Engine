@@ -1,5 +1,6 @@
 import { pool } from '../db/pool.js';
 import { verifyToken } from '../services/auth.js';
+import { PERMISSIONS, assertKnownPermission, holds } from '../services/permissions.js';
 
 /**
  * Session and tenant enforcement (STORY-064).
@@ -37,6 +38,10 @@ export function authenticate(req, _res, next) {
       id: Number(claims.sub),
       name: claims.name,
       role: claims.role,
+      // Absent on a token issued before STORY-019. Read as "no permissions"
+      // rather than falling back to the role, so an old session is denied
+      // rather than waved through by the guard that was added to stop it.
+      permissions: Array.isArray(claims.permissions) ? claims.permissions : [],
       authorId: claims.authorId === null ? null : Number(claims.authorId),
     };
     return next();
@@ -48,6 +53,17 @@ export function authenticate(req, _res, next) {
 }
 
 /**
+ * Whether this session may address a tenant other than its own.
+ *
+ * Was `role === 'admin'`, in three places. That reading is why a compliance
+ * officer had to be made an admin to read across tenants, which also handed
+ * them the power to suspend one — the exact conflation STORY-019 exists to
+ * undo. The question is "may they read across tenants", so that is now the
+ * thing being asked (STORY-019).
+ */
+const readsAllTenants = (user) => holds(user, PERMISSIONS.TENANT_READ_ALL);
+
+/**
  * Pins every request to the caller's tenant.
  *
  * Before this, every list route read its tenant from a query parameter the
@@ -55,13 +71,13 @@ export function authenticate(req, _res, next) {
  * An `author` may only ever address their own tenant, and a request that omits
  * the tenant gets theirs filled in rather than being served everything.
  *
- * An `admin` is left alone: reading across tenants is the distinction the role
- * exists for. They still cannot approve anonymously — that is `authenticate`'s
- * job and it has already run.
+ * A session holding `tenant.read.all` is left alone: reading across tenants is
+ * the distinction that permission exists for. They still cannot approve
+ * anonymously — that is `authenticate`'s job and it has already run.
  */
 export function enforceTenant(req, _res, next) {
   if (PUBLIC_PATHS.has(req.path) || !req.user) return next();
-  if (req.user.role === 'admin') return next();
+  if (readsAllTenants(req.user)) return next();
 
   const own = req.user.authorId;
   const requested = req.query.authorId;
@@ -88,7 +104,7 @@ const deniedTenant = (own, requested) =>
  * the wrong tenant. `router.param` fires once the value actually exists.
  */
 export function tenantParam(req, _res, next, value) {
-  if (!req.user || req.user.role === 'admin') return next();
+  if (!req.user || readsAllTenants(req.user)) return next();
   if (Number(value) !== req.user.authorId) {
     return next(deniedTenant(req.user.authorId, value));
   }
@@ -105,7 +121,7 @@ export function tenantParam(req, _res, next, value) {
  */
 export async function assertOwns(req, table, id) {
   if (!req.user) throw unauthorized('Sign in required');
-  if (req.user.role === 'admin') return;
+  if (readsAllTenants(req.user)) return;
 
   const { rows } = await pool.query(`SELECT author_id FROM ${table} WHERE id = $1`, [id]);
   if (!rows[0]) return; // Let the route's own 404 speak; this is not a tenant failure.
@@ -122,10 +138,26 @@ export async function assertOwns(req, table, id) {
   }
 }
 
-/** Route guard for the few things only an operator should do. */
-export const requireRole =
-  (...roles) =>
-  (req, _res, next) =>
-    roles.includes(req.user?.role)
+/**
+ * Route guard: does this session hold the permission this route needs?
+ *
+ * Replaces `requireRole('admin')`, which asked who somebody *is* when the
+ * question is what they may *do*. Those two agree right up until they don't —
+ * a compliance officer needs the audit log and must not be able to suspend a
+ * tenant, and under role checks there was no way to express that (STORY-019).
+ *
+ * The permission name is validated at module load rather than at request time,
+ * so a typo is a startup crash instead of a route that quietly denies everyone.
+ */
+export const requirePermission = (permission) => {
+  assertKnownPermission(permission);
+  return (req, _res, next) =>
+    holds(req.user, permission)
       ? next()
-      : next(forbidden(`This action requires role: ${roles.join(' or ')}`));
+      : next(forbidden(`This action requires permission: ${permission}`));
+};
+
+// `requireRole` was here. Every one of its seven call sites asked for 'admin',
+// and every one of them actually meant a capability — manage tenants, curate
+// templates, verify the log. Leaving it exported would leave the easy wrong
+// answer available next to the right one, so it is gone rather than deprecated.

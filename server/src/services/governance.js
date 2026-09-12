@@ -124,6 +124,37 @@ export const CHECKS = [
                               WHERE r.author_id = au.id AND r.active)`,
   },
   {
+    id: 'audit.states_recorded',
+    severity: SEVERITY.QUALITY,
+    label: 'Every recorded state change carries the states it changed',
+    why: 'STORY-019 / REQ-005. "Before-after states" is the clause; two actions were logging neither.',
+    // Deliberately narrow. Most rows with no before/after are correct: a
+    // creation has no prior state, and a scan or a retrieval has no state at
+    // all. Demanding states from those would be demanding fiction — the same
+    // mistake as backfilling a voice score nothing measured. So this counts
+    // only *transitions*: a stored row that moved from one status to another,
+    // which by definition had one before.
+    //
+    // `rejected` is qualified by entity type rather than matched on the verb,
+    // and the first version of this check was wrong for exactly that reason —
+    // it counted 67 `meme_template.rejected` rows as violations. Those are gate
+    // *refusals*: the generator reached for a template it may not use and was
+    // told no. Nothing was stored and nothing moved, so there is no prior state
+    // to record, and the check demanding one would have been the very mistake
+    // the paragraph above warns about.
+    //
+    // The entity list is fixed in code, which is the standing limitation of
+    // every check here: a new approvable thing gets no coverage until somebody
+    // adds it. Named in the README's Known gaps rather than left implied.
+    sql: `SELECT COUNT(*)::int AS n FROM audit_log
+           WHERE (
+                   action ~ '\\.(approved|suspended|restored|retired|distributed|published|sent|scheduled)$'
+                OR (action ~ '\\.rejected$'
+                    AND entity_type IN ('draft', 'outreach_message', 'pr_material', 'mix_recommendation'))
+                 )
+             AND (before IS NULL OR after IS NULL)`,
+  },
+  {
     id: 'press.voice_measured',
     severity: SEVERITY.QUALITY,
     label: 'Every press material carries a voice verdict',

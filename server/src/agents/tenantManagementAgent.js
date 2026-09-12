@@ -136,14 +136,22 @@ export async function onboardTenant({
  * account.
  */
 export async function suspendTenant({ authorId, reason = '', user = null }) {
+  // `FROM authors old` sees the pre-update snapshot, so one statement yields
+  // both states. A SELECT before the UPDATE would be a read and a write with a
+  // gap between them, and the "before" it recorded could already be somebody
+  // else's write (STORY-019).
   const { rows } = await pool.query(
-    `UPDATE authors SET tenant_status = 'suspended' WHERE id = $1 AND tenant_status = 'active'
-     RETURNING *`,
+    `UPDATE authors a SET tenant_status = 'suspended'
+       FROM authors old
+      WHERE a.id = $1 AND a.tenant_status = 'active' AND old.id = a.id
+     RETURNING a.*, to_jsonb(old) AS before_row`,
     [authorId],
   );
   if (!rows[0]) {
     throw Object.assign(new Error(`No active tenant ${authorId} to suspend`), { status: 404 });
   }
+
+  const { before_row: beforeRow, ...suspended } = rows[0];
 
   await recordAction({
     actor: ACTOR,
@@ -151,6 +159,11 @@ export async function suspendTenant({ authorId, reason = '', user = null }) {
     entityType: 'author',
     entityId: authorId,
     authorId,
+    // Suspension moves a row from one status to another and used to record
+    // neither of them. REQ-005 asks for the before-after states, and a status
+    // change is exactly the case that clause is about.
+    before: beforeRow,
+    after: suspended,
     metadata: { reason, suspendedBy: user?.name ?? null, dataRetained: true },
   });
 
@@ -159,10 +172,15 @@ export async function suspendTenant({ authorId, reason = '', user = null }) {
 
 export async function restoreTenant({ authorId, user = null }) {
   const { rows } = await pool.query(
-    `UPDATE authors SET tenant_status = 'active' WHERE id = $1 RETURNING *`,
+    `UPDATE authors a SET tenant_status = 'active'
+       FROM authors old
+      WHERE a.id = $1 AND old.id = a.id
+     RETURNING a.*, to_jsonb(old) AS before_row`,
     [authorId],
   );
   if (!rows[0]) throw Object.assign(new Error(`No tenant ${authorId}`), { status: 404 });
+
+  const { before_row: beforeRow, ...restored } = rows[0];
 
   await recordAction({
     actor: ACTOR,
@@ -170,9 +188,11 @@ export async function restoreTenant({ authorId, user = null }) {
     entityType: 'author',
     entityId: authorId,
     authorId,
+    before: beforeRow,
+    after: restored,
     metadata: { restoredBy: user?.name ?? null },
   });
-  return rows[0];
+  return restored;
 }
 
 /**
