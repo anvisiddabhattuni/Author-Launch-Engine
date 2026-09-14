@@ -95,6 +95,17 @@ export const OUTBOUND_PATHS = [
       'the breach persists (STORY-021).',
   },
   {
+    id: 'social.notify_failure',
+    kind: EXEMPT,
+    module: 'services/publishFailureNotifier.js',
+    sends: 'notice that an approved post failed to reach the platform, to this author\'s reviewers',
+    why:
+      'Reporting that something did NOT go out cannot itself require approval to go out. The post ' +
+      'in question already passed the gate — the failure happened at the platform, after it — so ' +
+      'this announces an absence rather than publishing content. Sent once per post per reviewer, ' +
+      'ever (STORY-025).',
+  },
+  {
     id: 'approval.notify_waiting',
     kind: EXEMPT,
     module: 'agents/approvalNotificationAgent.js',

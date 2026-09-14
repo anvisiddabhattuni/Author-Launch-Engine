@@ -46,8 +46,11 @@ export function OutreachPage({ author }) {
       <div className="card">
         <h2>Awaiting your decision ({queue.length})</h2>
         <p className="hint">
-          Nothing is emailed without an approval recorded against your name. Escalated messages
-          scored below the confidence threshold, usually because they read too generically.
+          Nothing is emailed without an approval recorded against your name. A message is escalated
+          when confidence is low, when it does not carry what the book argues, or when it does not
+          sound like the author — three separate floors, so a pitch cannot pass on one by being
+          strong on another. This is the channel that reaches a named stranger, so it is measured
+          the same way social posts and press materials are (STORY-023).
         </p>
 
         <label htmlFor="reviewer">Reviewer</label>
@@ -64,7 +67,26 @@ export function OutreachPage({ author }) {
                 <strong>{message.opportunity_name}</strong>
                 <span>to {message.contact_email}</span>
                 <span>confidence {Number(message.confidence).toFixed(3)}</span>
+                {/* STORY-023: both were computed and blended away before. A
+                    reviewer deciding on a pitch needs to see the two numbers
+                    that can escalate it, not only the one that averages them. */}
+                {message.theme_alignment !== null && message.theme_alignment !== undefined && (
+                  <span>alignment {Number(message.theme_alignment).toFixed(2)}</span>
+                )}
+                {message.voice_score !== null && message.voice_score !== undefined && (
+                  <span>voice {Number(message.voice_score).toFixed(2)}</span>
+                )}
+                {message.themes_used?.length > 0 && (
+                  <span className="mono">themes: {message.themes_used.join(', ')}</span>
+                )}
               </div>
+
+              {message.voice_violations?.length > 0 && (
+                <p className="hint">
+                  Reads unlike the author on:{' '}
+                  <span className="mono">{message.voice_violations.join(', ')}</span>
+                </p>
+              )}
 
               <div style={{ marginTop: 10 }}>
                 <strong>{message.subject}</strong>

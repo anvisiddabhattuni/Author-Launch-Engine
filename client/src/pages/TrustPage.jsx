@@ -37,7 +37,7 @@ export function TrustPage({ author }) {
   if (error) return <div className="banner error">{error}</div>;
   if (!data) return <div className="card"><div className="empty">Loading…</div></div>;
 
-  const { governance, checks, anomalies, health, queue, recent, outbound, history, episodes } = data;
+  const { governance, checks, anomalies, health, queue, recent, outbound, history, episodes, surface } = data;
   const status = STATUS_COPY[governance.status] ?? { kind: '', label: governance.status };
   const invariants = checks.filter((c) => c.severity === 'invariant');
   const quality = checks.filter((c) => c.severity === 'quality');
@@ -253,6 +253,47 @@ export function TrustPage({ author }) {
               </table>
             </>
           )}
+        </div>
+      )}
+
+      {/* STORY-024: which readable routes are checked for cross-tenant leaks.
+          The number is the point — it sat at 10 of 35 for six stories and
+          nothing noticed, because the list was kept by hand. */}
+      {surface && (
+        <div className="card">
+          <h2>
+            Leak-checked routes ({surface.walkable} of {surface.total})
+          </h2>
+          <p className="hint">
+            Every route a tenant can read is walked as one author and checked for another author's
+            id anywhere in the response, at any depth. The list is derived from the router, so a
+            route added tomorrow is walked tomorrow. {surface.declared.length} are deliberately not
+            walked and each says why — an exclusion nobody can see is indistinguishable from a check
+            that never ran.
+          </p>
+          <div className="meta">
+            <span className="pill approved">{surface.walkable} walked</span>
+            <span className="pill">{surface.declared.length} declared</span>
+            {surface.needsId > 0 && (
+              <span className="pill escalated">{surface.needsId} unwalkable and undeclared</span>
+            )}
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Not walked</th>
+                <th>Why that is not a gap</th>
+              </tr>
+            </thead>
+            <tbody>
+              {surface.declared.map((d) => (
+                <tr key={d.path}>
+                  <td className="mono">{d.path}</td>
+                  <td>{d.why}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 

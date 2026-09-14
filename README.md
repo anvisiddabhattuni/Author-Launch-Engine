@@ -35,6 +35,9 @@ Implemented so far:
 - **STORY-020 — Establish Approval Gates for Outbound Communications** (Approval and Notification Agent), fulfilling `REQ-006`
 - **STORY-021 — Develop a Trust Dashboard for Monitoring** (Trust and Monitoring Agent), fulfilling `REQ-007` — **the history and alerting half; see below**
 - **STORY-022 — Implement Role-Based Access Control (RBAC)** (Coordination and Governance Agent), fulfilling `REQ-005` and `REQ-006`
+- **STORY-023 — Create AI Content Generation Agent** (AI Content Generation Agent), fulfilling `REQ-006`
+- **STORY-024 — Enable Multi-Tenant Isolation** (Tenant Management Agent), fulfilling `REQ-005`
+- **STORY-025 — Integrate with Social Media Platforms** (API Integration Agent), fulfilling `REQ-006` — **the error-handling half; OAuth deferred, see below**
 
 ## What works today
 
@@ -1435,6 +1438,173 @@ route file and counts rather than trusting a list somebody keeps in their head �
 again: a check that verifies the gates that exist cannot see a missing one, so this one looks for
 the absence.
 
+### STORY-023 — the channel that emails strangers was the least checked
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `AIContentGeneration` module using an AI API | `server/src/agents/aiContentGenerationAgent.js` (STORY-018) |
+| 2. Service handling content requests | `contentDraftingAgent.js`, `prOutreachAgent.js`, `aiContentGenerationAgent.js` |
+| 3. Drafts stored for review | `drafts`, `outreach_messages`, `pr_materials` |
+| 4. **What was actually missing** | `027_outreach_grounding.sql` |
+
+The story names three content types — social posts, outreach messages and PR materials — all aligned
+with the book's themes and the author's voice. Two of them had both halves already:
+
+```
+social posts   retrieved themes (STORY-009) + measured voice (STORY-009)
+PR materials   retrieved themes (STORY-006) + measured voice (STORY-018)
+outreach       neither
+```
+
+Outreach was the one that *looked* done, which is why it survived six stories. `scoreMessage` had a
+number called "grounding" and a number called "voice" — and both were the measures the other two
+stories had already replaced.
+
+**The grounding counted a theme as hit if any single word of it appeared anywhere.** "deep work" was
+satisfied by the word "work" — including in *"I would love to work with you"* — and then floored at
+0.55 for a single hit, so one accidental match scored 0.66. **The voice was vocabulary overlap with
+prior posts**, the exact function `011_social_grounding.sql` records scoring 0.994 on copy breaking
+every rule the author's own voice profile states.
+
+Neither was a floor. `assess({ confidence })` was called with no `themeAlignment` and no `voice`, so
+both were blended into one number and outvoted by personalisation, which carries 0.4. Measured
+before the fix:
+
+```
+Hi Dana! I would absolutely LOVE to work with The Focus Podcast in London!!!
+This is an incredible, game-changing, guaranteed-viral opportunity...
+
+  confidence 0.79  →  QUEUED FOR ORDINARY APPROVAL
+```
+
+Its grounding of 0.66 came entirely from the word "work". The real voice check scores that text
+**0.16**, with violations on exclamations, hype, shouting and vocabulary. And this is the channel
+that emails a **named human at a podcast** with the author's name on it — the highest-stakes of the
+three and the only one nothing was checking.
+
+After: `confidence 0.53 · theme 0.00 · voice 0.17 → escalated` on all three reasons.
+
+**The provider had to change too, not just the scoring.** Teaching the checker without teaching the
+writer just escalates everything: the stub's real pitches scored 0.10–0.25 alignment the moment the
+measure got honest, because it quoted a sentence picked at random out of the book — which is not
+retrieval, it is whatever happened to be in range. It now writes from the claims retrieval found for
+the themes each opportunity is about. Alignment went to **0.82–1.00 without a single threshold
+moving**, which is the STORY-006 lesson repeating: alignment has to be something the drafter does,
+not something done to the draft afterwards.
+
+**Outreach is scored against the themes the pitch is actually about.** A press release can argue
+four themes; a 1,200-character booking request cannot, and averaging across themes the pitch had no
+business raising would cap every message below the floor. The grounding is narrowed to the
+opportunity's matched themes, with the full theme list passed as `themeVocabulary` so narrowing
+cannot grant credit sideways for naming a theme that was not being scored.
+
+### STORY-024 — the walk that was correct about 29% of the surface
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `TenantIsolation` module | `server/src/agents/tenantManagementAgent.js` (STORY-017) |
+| 2. PostgreSQL schemas per tenant | **not done — STORY-041 in R10; see below** |
+| 3. Tenant-specific RBAC | `middleware/auth.js`, `024_rbac.sql`, `026_approval_permissions.sql` |
+| 4. **What was actually missing** | `server/src/services/tenantSurface.js` |
+
+STORY-017 built the cross-tenant walk that would have caught its own leak: sign in as one tenant,
+request every list route, assert no response carries another tenant's id at any depth. It found two
+real leaks and it works.
+
+It also kept its routes in a hand-written array, and the array stopped growing. Measured at the start
+of this story: **10 of 35 GET routes were in it.** Everything added since — `/audit-log` (gated by
+STORY-019, re-gated by STORY-022), the trust history from STORY-021, the on-demand press route from
+STORY-018 — was never walked.
+
+STORY-017's own Known-gaps entry predicted this in so many words: *"a new handler written the same
+careless way is caught only if someone adds it to that test."* Six stories went by. Nobody added
+one — including across four stories where I was the one adding the routes.
+
+So the surface is derived from `router.stack` rather than typed out, and not by grepping the source,
+because the source is where a typo hides and the stack is what the server actually serves:
+
+```
+before:  10 of 35 GET routes walked, list maintained by hand
+after:   30 walked · 5 declared unwalkable with reasons · 0 unaccounted
+```
+
+The five exemptions each carry a written justification — `/health` and `/ready` are public because a
+load balancer has no session; `/audit-integrity` verifies one log across every tenant, so tenant ids
+in it are the subject rather than a leak. A reviewer can disagree with any of them, which is the
+point: an exclusion nobody can see is indistinguishable from a check that never ran.
+
+**Every walked route returns 200.** A walk that returns early on a non-200 can pass without ever
+reaching its own assertion, so that was measured rather than assumed — 30 of 30 genuinely answer and
+are genuinely inspected.
+
+**What the wider walk found: nothing.** Thirty routes, zero leaks. STORY-017's fixes held and the
+routes written since were written correctly. That is worth stating plainly rather than dressing up —
+a check that finds nothing is not a check that did nothing.
+
+`tenant.surface_walked` is a governance invariant so the coverage cannot rot again, and it fails
+usefully: adding a row-addressed route during development turns it red and names the offender.
+
+**Why not schema-per-tenant.** The build note suggests PostgreSQL schemas or separate databases.
+That is **STORY-041, "Tenant Database Schema Isolation", scheduled in R10** — pulling it forward
+here would be doing a later release's architecture work inside a story whose acceptance criteria are
+about data being isolated and access being role-based, both of which already hold.
+
+### STORY-025 — the failure the system knew about and the author did not
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `APIIntegration` module for social APIs | `server/src/services/socialApis.js`, `agents/apiIntegrationAgent.js` |
+| 2. OAuth for secure authentication | **not done — deferred with reasoning; see below** |
+| 3. Endpoints to schedule and publish approved posts | `POST /api/drafts/:id/schedule`, `/scheduled-posts/publish-due` |
+| 4. **What was actually missing** | `server/src/services/publishFailureNotifier.js` |
+
+The first acceptance clause — an approved post gets scheduled and published — has worked since
+STORY-001, and STORY-016 gave the call real timeout, retry and classification policy. The second
+clause asks the system to log an API failure **and notify the user**, and only the first half
+existed.
+
+Measured before building. On a failed publish:
+
+```
+scheduled_posts.status = 'failed', with the provider's message   yes
+a post.failed audit row with before/after                        yes
+a row on the Schedule tab, if somebody opened it                 yes
+a notification to anyone                                          NO
+a governance check that would notice                              NO
+a place in any queue a human works from                           NO
+```
+
+The failure was *recorded* and nobody was *told*. That is the worst shape an outbound failure can
+take — the system knows, and the only person who needs to know does not. An author whose post
+silently failed goes on believing it went out, and the only way to learn otherwise is to open a table
+they have no reason to open.
+
+The notification schema had no column for a scheduled post, so this could not have been a bug in the
+notifier; it was an absence in the schema, the same finding `018` recorded about drafts.
+
+**What the notice is careful to say.** It names the platform, the provider's own message and the
+post's opening words — and then states the thing a reader most needs: *nothing was published that
+should not have been*. "Published without approval" and "never published at all" are opposite fears,
+and a notice that does not distinguish them sends the reader to check the wrong thing.
+
+Announced **once per post per reviewer, ever**. A failed post stays failed, and a sweep on a timer
+would otherwise re-announce every past failure until the channel got muted — the rule STORY-012 set
+for the approval digest and STORY-021 reused for a persisting breach. It runs as
+`posts.notify_failures`, the eighth recurring sweep, so nobody has to remember to look.
+
+The return value distinguishes three states a bare count would collapse: **nothing failed**,
+**already announced**, and **nobody to tell** — the last recorded as
+`publish.failure_unreachable`. `posts.failures_announced` counts only failures for authors who have
+an active reviewer, so a missing reviewer cannot disguise itself as a missing notification; they are
+different findings with different fixes.
+
+**Why not OAuth and live platform SDKs.** The build note asks for both. The publishers are still
+deterministic mocks returning `twitter_000001`. No developer accounts exist for this project, and
+swapping in live SDKs would end the offline reproducibility that 628 tests and 170 demo stages
+depend on — while adding per-author token storage and refresh that nothing could exercise end to
+end. That is the "mocks hide the work" trap STORY-016 already found once, in reverse. Named here
+rather than half-built.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1480,7 +1650,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 155 stages with evidence at each one.
+Prints 170 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1590,6 +1760,21 @@ Prints 155 stages with evidence at each one.
   real posts and cross-checked against their hand-written profile, the same release scored 0.74 with
   its format furniture and 0.87 without, copy that argues every theme escalating on voice alone, and
   both press invariants checked from outside the code that enforces them.
+
+- **Stages 166–170, STORY-025:** a publish failure the system recorded and nobody was told about, the
+  notice that names the platform and the provider's own message, announced once however often the
+  sweep runs, the three states a bare count would collapse, and the check that counts only failures
+  somebody could have been told about.
+
+- **Stages 161–165, STORY-024:** the isolation walk that covered 10 of 35 routes, the list derived
+  from `router.stack` instead of typed out, every walked route actually answering rather than passing
+  vacuously, a wider walk that found nothing and says so, and the invariant that names a route it
+  cannot drive.
+
+- **Stages 156–160, STORY-023:** three content types with only two of them measured, a theme
+  satisfied by the word "work", the hype pitch that scored 0.79 and queued for ordinary approval now
+  escalating on all three floors, the real pitches going from 0.10–0.25 alignment to 0.82–1.00
+  without a threshold moving, and per-theme evidence as the third mirror of `draft_themes`.
 
 - **Stages 151–155, STORY-022:** eight approve routes with no permission among them, the read-only
   compliance role approving a press release in another tenant, the split of reading-across-tenants

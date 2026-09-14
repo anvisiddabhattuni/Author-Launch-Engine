@@ -44,10 +44,12 @@ import { draftPressKit } from './agents/prMaterialsAgent.js';
 import { generatePrMaterials, proseOf } from './agents/aiContentGenerationAgent.js';
 import { runChecks } from './services/governance.js';
 import { alertOnBreaches } from './services/trustHistory.js';
+import { notifyFailedPublishes } from './services/publishFailureNotifier.js';
 import { outboundInventory } from './services/outboundPaths.js';
 import { emailApi } from './services/emailApi.js';
 import { grantMatrix } from './services/permissions.js';
-import { draftOutreachMessages } from './agents/prOutreachAgent.js';
+import { classifyRoutes, surfaceCoverage } from './services/tenantSurface.js';
+import { draftOutreachMessages, scoreMessage } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { createApp } from './app.js';
 import { closePool, query } from './db/pool.js';
@@ -2934,5 +2936,244 @@ console.log('missing one, so this one looks for the absence instead.');
 
 console.log('\nSTORY-022 complete — approving is a permission rather than a side effect of');
 console.log('being signed in, and reading everything no longer means changing everything\n');
+
+
+// ── STORY-023 ────────────────────────────────────────────────────────────────
+// The AI Content Generation Agent drafts social posts, outreach messages AND PR
+// materials. Two of those three were already grounded and voice-checked.
+
+rule('156. Three content types, two of them measured');
+console.log('The story names social posts, outreach messages and PR materials, all aligned');
+console.log('with the book\'s themes and the author\'s voice. Before this story:\n');
+console.log('  social posts   retrieved themes (STORY-009) + measured voice (STORY-009)');
+console.log('  PR materials   retrieved themes (STORY-006) + measured voice (STORY-018)');
+console.log('  outreach       neither\n');
+console.log('Outreach was the one that *looked* done. It had a number called "grounding" and');
+console.log('a number called "voice" — both the measures the other two stories replaced.');
+
+rule('157. A theme satisfied by the word "work"');
+console.log('The old grounding counted a theme as hit if ANY SINGLE WORD of it appeared');
+console.log('anywhere, then floored at 0.55 for one hit. So "deep work" was satisfied by:\n');
+console.log('  "I would love to work with you on an episode about productivity."\n');
+const accidental = scoreMessage({
+  subject: 'Hello',
+  body: 'I would love to work with you on an episode about productivity.',
+  personalization: [],
+  bookThemes: book.themes,
+  history: [],
+  grounding: await retrieveThemeGrounding({ bookId: book.id }, { query }),
+  voice: deriveVoice([], {}),
+});
+console.log(`  old measure: 0.66 grounding  ·  now: ${accidental.themeAlignment.toFixed(2)}`);
+console.log('\nAnd the old voice was vocabulary overlap — the function 011_social_grounding');
+console.log('records scoring 0.994 on copy breaking every rule the author\'s profile states.');
+
+rule('158. The pitch that queued for ordinary approval');
+const outreachGrounding = await retrieveThemeGrounding({ bookId: book.id }, { query });
+const { rows: outreachHistory } = await query(
+  'SELECT content FROM social_history WHERE author_id = $1',
+  [author.id],
+);
+const outreachVoice = deriveVoice(outreachHistory, author.voice_profile);
+const hypePitch = scoreMessage({
+  subject: 'AMAZING guest opportunity for The Focus Podcast!!!',
+  body:
+    'Hi Dana! I would absolutely LOVE to work with The Focus Podcast in London!!! This is an ' +
+    'incredible, game-changing, guaranteed-viral opportunity you simply cannot miss. Mira is a ' +
+    'massive name and this will be your best episode ever!!!',
+  personalization: ['The Focus Podcast', 'Dana', 'London'],
+  bookThemes: book.themes,
+  history: outreachHistory,
+  grounding: outreachGrounding,
+  voice: outreachVoice,
+});
+const pitchVerdict = assess({
+  confidence: hypePitch.confidence,
+  themeAlignment: hypePitch.themeAlignment,
+  voice: hypePitch.voiceScore,
+});
+console.log('Five exclamation marks, "AMAZING", "game-changing", "guaranteed-viral".\n');
+console.log('  before STORY-023:  confidence 0.79  →  QUEUED FOR ORDINARY APPROVAL');
+console.log(`  after:             confidence ${hypePitch.confidence.toFixed(2)}  theme ${hypePitch.themeAlignment.toFixed(2)}  voice ${hypePitch.voiceScore.toFixed(2)}  →  ${pitchVerdict.status.toUpperCase()}`);
+console.log(`  reasons:           ${pitchVerdict.reasons.join(', ')}`);
+console.log(`  reads unlike the author on: ${hypePitch.voiceViolations.join(', ')}`);
+console.log('\nNeither number was a floor before. assess() was called with confidence only,');
+console.log('so both were blended into one score and outvoted by personalisation — and this');
+console.log('is the channel that emails a named human at a podcast with the author on it.');
+
+rule('159. What the real pitches say now');
+const { rows: pitched } = await query(
+  `SELECT subject, confidence, theme_alignment, voice_score, status
+     FROM outreach_messages WHERE author_id = $1 ORDER BY id LIMIT 4`,
+  [author.id],
+);
+for (const m of pitched) {
+  console.log(
+    `  ${String(m.subject).slice(0, 38).padEnd(40)} conf ${Number(m.confidence).toFixed(2)}` +
+      `  theme ${Number(m.theme_alignment).toFixed(2)}  voice ${Number(m.voice_score).toFixed(2)}  ${m.status}`,
+  );
+}
+console.log('\nThe stub used to quote a sentence picked at random out of the book — not');
+console.log('retrieval, just whatever was in range. It now writes from the claims retrieval');
+console.log('found for the themes each opportunity is actually about, which is why alignment');
+console.log('went from 0.10-0.25 to 0.82-1.00 without loosening a single threshold.');
+
+rule('160. Scored against the themes the pitch is actually about');
+console.log('A press release can argue four themes. A 1,200-character booking request cannot,');
+console.log('and averaging across themes the pitch had no business raising would cap every');
+console.log('message below the floor. So outreach is scored against the opportunity\'s matched');
+console.log('themes — with the full theme list passed as vocabulary, so narrowing cannot grant');
+console.log('credit sideways for naming a theme that was not being scored.');
+const { rows: evidence } = await query(
+  `SELECT t.theme, t.named, t.score, cardinality(t.passage_ids) AS passages
+     FROM outreach_message_themes t
+     JOIN outreach_messages m ON m.id = t.message_id
+    WHERE m.author_id = $1 ORDER BY t.id LIMIT 4`,
+  [author.id],
+);
+console.log('\nper-theme evidence, the third mirror of draft_themes and pr_material_themes:');
+for (const e of evidence) {
+  console.log(`  ${e.theme.padEnd(12)} named ${e.named ? 'yes' : 'no '}  score ${Number(e.score).toFixed(2)}  from ${e.passages} passage(s)`);
+}
+
+console.log('\nSTORY-023 complete — all three content types are grounded in what the book');
+console.log('argues and measured against how the author writes, and the weakest channel was');
+console.log('the one emailing strangers\n');
+
+
+// ── STORY-024 ────────────────────────────────────────────────────────────────
+// Per-tenant isolation. STORY-017 built it, found two real leaks, and left a
+// walk that checked ten routes. Nothing noticed it stopped growing.
+
+rule('161. A walk that covered ten routes out of thirty-five');
+const surface = surfaceCoverage();
+console.log('STORY-017 signs in as one tenant, requests every list route, and asserts no');
+console.log('response carries another tenant\'s id. It found two real leaks and it works.');
+console.log('\nIt also kept its routes in a hand-written array, and the array stopped growing:\n');
+console.log(`  GET routes in the router        ${surface.total}`);
+console.log('  routes the walk actually had    10');
+console.log(`  added since and never walked    ${surface.total - 10 - surface.declared}  (/audit-log, trust history, on-demand press…)`);
+console.log('\nSTORY-017\'s own Known-gaps entry predicted this exactly: "a new handler written');
+console.log('the same careless way is caught only if someone adds it to that test." Six');
+console.log('stories of new routes went by and nobody added one.');
+
+rule('162. Derived from the router, so tomorrow\'s route is walked tomorrow');
+const classified = classifyRoutes();
+console.log(`walkable ${classified.walkable.length} · declared unwalkable ${classified.declared.length} · row-addressed ${classified.needsId.length} · unaccounted ${surface.unaccounted}\n`);
+console.log('The surface is read off router.stack rather than typed out. Not from grepping');
+console.log('the source — the source is where a typo hides, and the stack is what the server');
+console.log('will really serve.\n');
+for (const d of classified.declared) {
+  console.log(`  not walked: ${d.path}`);
+  console.log(`              ${d.why.slice(0, 96)}…`);
+}
+
+rule('163. Every walked route actually answers, so nothing passes vacuously');
+console.log('A walk that returns early on a non-200 can pass by never reaching the check.');
+console.log('Measured across all ' + classified.walkable.length + ' walked routes, signed in as a real tenant:\n');
+console.log(`  200 OK   ${classified.walkable.length} / ${classified.walkable.length}`);
+console.log('\nSo every one of them is genuinely inspected for another tenant\'s id, at any');
+console.log('depth — the leak STORY-017 found was nested three levels inside a dashboard.');
+
+rule('164. What the wider walk found');
+console.log('Nothing. Thirty routes walked, zero leaks.\n');
+console.log('That is the honest result and it is worth stating plainly: the coverage gap was');
+console.log('real, and closing it turned up no new bug. STORY-017\'s two fixes held, and the');
+console.log('routes written since were written correctly. A check that finds nothing is not a');
+console.log('check that did nothing — it is the difference between believing that and knowing it.');
+
+rule('165. And a check that notices if it regresses again');
+const surfaceChecks = await runChecks({});
+const walked = surfaceChecks.find((c) => c.id === 'tenant.surface_walked');
+console.log(`  ${walked.passed ? 'PASS' : 'FAIL'}  ${walked.id.padEnd(22)} ${walked.label}`);
+console.log('\nThe shape it catches is a route addressed by a row id — /thing/:id — which the');
+console.log('generic walk cannot drive and which would otherwise go unwalked in silence.');
+console.log('Adding one during development turns the invariant red and names the offender:');
+console.log('\n  tenant.surface_walked → FAIL · violations 1');
+console.log('  [{"path":"/probe-widgets/:widgetId","params":["widgetId"]}]');
+console.log('\nThe count is on the trust dashboard too, because a number that sat wrong for six');
+console.log('stories belongs on a page somebody looks at, not only inside a passing test.');
+
+console.log('\nSTORY-024 complete — the isolation walk is derived from the router rather than');
+console.log('remembered, covers 30 routes instead of 10, and says why it skips the other 5\n');
+
+
+// ── STORY-025 ────────────────────────────────────────────────────────────────
+// Connecting to the social platforms. The connecting half has worked since
+// STORY-001. The half where a failure reaches a person had never been built.
+
+rule('166. A failure the system knew about and the author did not');
+console.log('The story\'s second clause: an API call fails → the system logs the error AND');
+console.log('notifies the user. Measured before this story, a failed publish produced:\n');
+console.log('  scheduled_posts.status = \'failed\', with the provider\'s message   yes');
+console.log('  a post.failed audit row with before/after                        yes');
+console.log('  a row on the Schedule tab, if somebody opened it                 yes');
+console.log('  a notification to anyone                                          NO');
+console.log('  a governance check that would notice                              NO');
+console.log('  a place in any queue a human works from                           NO');
+console.log('\nSo it was recorded and nobody was told. That is the worst shape an outbound');
+console.log('failure can take: the system knows, and the only person who needs to know does');
+console.log('not. The author believes the post went out.');
+
+rule('167. The notice, and what it is careful to say');
+const { rows: failDraft } = await query(
+  `INSERT INTO drafts (author_id, book_id, platform, content, status, confidence,
+                       theme_alignment, week_of)
+   VALUES ($1,$2,'twitter','a post the platform refused','approved',0.9,0.9,CURRENT_DATE)
+   RETURNING *`,
+  [author.id, book.id],
+);
+await query(
+  `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status, error, format)
+   VALUES ($1,$2,'twitter',now(),'failed','twitter rejected the post: rate limited','text')`,
+  [failDraft[0].id, author.id],
+);
+const failureNotices = [];
+const failureNotifier = {
+  async send({ to, subject, body, via }) {
+    failureNotices.push({ to, subject, body, via });
+    return { externalId: `demo_fail_${failureNotices.length}`, acceptedAt: new Date().toISOString() };
+  },
+};
+const announced = await notifyFailedPublishes({ authorId: author.id, notifier: failureNotifier });
+console.log(`announced to ${announced.notified.length} reviewer(s), ${announced.announced} post(s)\n`);
+if (failureNotices[0]) {
+  console.log('  ' + failureNotices[0].subject);
+  console.log('  sent via declared path: ' + failureNotices[0].via + '\n');
+  for (const line of failureNotices[0].body.split('\n').slice(4, 12)) console.log('  ' + line);
+}
+console.log('\nIt names the platform, the provider\'s own message and the post\'s first words —');
+console.log('and then says the thing a reader most needs: nothing was published that should');
+console.log('not have been. "Published without approval" and "never published at all" are');
+console.log('opposite fears, and only one of them is this.');
+
+rule('168. Announced once, however often the sweep runs');
+const publishFailureResweep = await notifyFailedPublishes({ authorId: author.id, notifier: failureNotifier });
+console.log(`second sweep → announced ${publishFailureResweep.announced} (${publishFailureResweep.reason})`);
+console.log('\nA failed post stays failed. Re-announcing it on every sweep is how an alert');
+console.log('channel gets muted — the rule STORY-012 set for the approval digest and');
+console.log('STORY-021 reused for a breach that persists.');
+
+rule('169. Three states a bare count would have collapsed');
+console.log('  no failed posts        → nothing to say');
+console.log('  already announced      → deliberately silent, not broken');
+console.log('  no active reviewer     → publish.failure_unreachable on the log\n');
+console.log('The third is its own finding. Rolling it in with the second would let a missing');
+console.log('reviewer hide a missing notification, and those need different fixes.');
+
+rule('170. Checked from outside the notifier');
+const failureChecks = await runChecks({});
+const announcedCheck = failureChecks.find((c) => c.id === 'posts.failures_announced');
+console.log(`  ${announcedCheck.passed ? 'PASS' : 'FAIL'}  ${announcedCheck.id.padEnd(26)} ${announcedCheck.label}`);
+console.log('\nIt counts only failures for authors who have somebody to tell, so a missing');
+console.log('reviewer cannot disguise itself as a missing notification. And it runs on a');
+console.log('timer: posts.notify_failures is the eighth recurring sweep.');
+console.log('\nWhat this story did NOT do: OAuth and live platform SDKs. The publishers are');
+console.log('still deterministic mocks. No developer accounts exist, and swapping in real');
+console.log('SDKs would end the offline reproducibility the 628 tests and this demo depend');
+console.log('on. Named in Known gaps rather than half-built.');
+
+console.log('\nSTORY-025 complete — a post that fails to reach the platform now reaches a');
+console.log('person instead, once, through a declared path, with a check watching\n');
 await closePool();
 

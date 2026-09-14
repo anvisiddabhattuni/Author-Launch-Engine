@@ -42,6 +42,22 @@ export function SchedulePage({ author }) {
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
+      {/* STORY-025: a failed post used to be one pill in a table nobody had a
+          reason to open, while the author believed it had gone out. The failure
+          is announced by email now; this is the same fact on the page they are
+          already looking at. */}
+      {posts.some((p) => p.status === 'failed') && (
+        <div className="banner error">
+          <strong>
+            {posts.filter((p) => p.status === 'failed').length} post
+            {posts.filter((p) => p.status === 'failed').length === 1 ? '' : 's'} failed to publish.
+          </strong>{' '}
+          These were approved and scheduled — the failure happened at the platform, after the gate.
+          Nothing was published that should not have been, and a failed post does not retry on its
+          own. Your reviewers have been emailed once about each.
+        </div>
+      )}
+
       <div className="card">
         <h2>Approved, ready to queue ({approved.length})</h2>
         <p className="hint">

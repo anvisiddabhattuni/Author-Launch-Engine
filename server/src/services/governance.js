@@ -24,6 +24,7 @@
  */
 import { config } from '../config.js';
 import { outboundInventory } from './outboundPaths.js';
+import { surfaceCoverage } from './tenantSurface.js';
 import { pool } from '../db/pool.js';
 
 export const SEVERITY = { INVARIANT: 'invariant', QUALITY: 'quality' };
@@ -125,6 +126,20 @@ export const CHECKS = [
                               WHERE r.author_id = au.id AND r.active)`,
   },
   {
+    id: 'tenant.surface_walked',
+    severity: SEVERITY.INVARIANT,
+    label: 'Every readable route is walked for cross-tenant leaks, or says why not',
+    why: 'REQ-005 / STORY-024. STORY-017 walked 10 of 35 routes and nothing noticed the other 25.',
+    // Code, not rows — the same reason gate.outbound_declared is not SQL. A
+    // route that is row-addressed (`/thing/:id`) cannot be walked generically
+    // and is not currently declared either; one appearing is the regression
+    // this catches, because it is the shape that goes unwalked silently.
+    evaluate: () => {
+      const { needsId, unaccounted } = surfaceCoverage();
+      return needsId + unaccounted;
+    },
+  },
+  {
     id: 'gate.outbound_declared',
     severity: SEVERITY.INVARIANT,
     label: 'Every gated outbound path names an invariant that checks it',
@@ -133,6 +148,21 @@ export const CHECKS = [
     // gate checks are precisely what cannot see it. A gated path that names no
     // invariant is a promise with nothing behind it.
     evaluate: () => outboundInventory().unverified.length,
+  },
+  {
+    id: 'posts.failures_announced',
+    severity: SEVERITY.QUALITY,
+    label: 'Every post that failed to publish was announced to somebody',
+    why: 'REQ-006 / STORY-025. A failure the system knows about and the author does not is the worst shape.',
+    // Only counts failures for authors who have a reviewer to tell. One with
+    // none is a different finding, recorded as publish.failure_unreachable, and
+    // rolling the two together would let a missing reviewer hide a missing
+    // notification.
+    sql: `SELECT COUNT(*)::int AS n FROM scheduled_posts sp
+           WHERE sp.status = 'failed'
+             AND EXISTS (SELECT 1 FROM reviewers r WHERE r.author_id = sp.author_id AND r.active)
+             AND NOT EXISTS (
+               SELECT 1 FROM notifications n WHERE n.scheduled_post_id = sp.id)`,
   },
   {
     id: 'audit.states_recorded',

@@ -270,13 +270,21 @@ describe('Scenario: approval required for outbound communication', () => {
 
 describe('Scenario: notify stakeholders for approval', () => {
   it('the notification paths are exempt, and say why', () => {
+    // Asserted as a property, not a count. The first version of this test
+    // hard-coded `length === 3` and broke the moment STORY-025 declared a
+    // fourth notifier — a count assertion that fails on every future addition
+    // while saying nothing about what is wrong.
     const notifiers = OUTBOUND_PATHS.filter((p) => p.id.includes('notify'));
-    assert.equal(notifiers.length, 3);
+    assert.ok(notifiers.length >= 3, 'the known notification paths are missing');
     for (const p of notifiers) {
-      assert.equal(p.kind, EXEMPT);
+      assert.equal(p.kind, EXEMPT, `${p.id} is a notifier but not exempt`);
       // The circularity is the reason, and it should be stated rather than
       // implied — a reader must not have to reconstruct it.
-      assert.match(p.why, /circular|deadlock|not publishing/i);
+      assert.match(
+        p.why,
+        /circular|deadlock|not publishing|announces an absence/i,
+        `${p.id} does not explain why a notification needs no gate`,
+      );
     }
   });
 

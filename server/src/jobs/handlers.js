@@ -7,6 +7,7 @@ import { sealAndVerify } from '../agents/auditSecurityAgent.js';
 import { monitorPressMaterials, trustDashboard } from '../agents/trustMonitoringAgent.js';
 import { publishDue } from '../services/scheduler.js';
 import { alertOnBreaches } from '../services/trustHistory.js';
+import { notifyFailedPublishes } from '../services/publishFailureNotifier.js';
 
 /**
  * What the worker knows how to do (STORY-065).
@@ -50,6 +51,13 @@ export const RECURRING = [
     kind: 'approvals.notify_waiting',
     scope: 'author',
     describe: (job) => `tell reviewers what is waiting on them for author ${job.author_id}`,
+  },
+  {
+    // Author-scoped: the person who needs telling is this tenant's reviewer,
+    // and a failed post belongs to exactly one tenant (STORY-025).
+    kind: 'posts.notify_failures',
+    scope: 'author',
+    describe: (job) => `tell reviewers about posts that failed to publish for author ${job.author_id}`,
   },
   {
     // The sweep this story exists for (STORY-021). Author-scoped because the
@@ -106,6 +114,20 @@ export const HANDLERS = {
    * start failing" had no answer. Running it on a timer is what turns the score
    * into a series and a breach into an event with a time on it.
    */
+  /**
+   * STORY-025's sweep. The publish failure was recorded and nobody was told;
+   * this is the half of the acceptance clause that did not exist.
+   */
+  'posts.notify_failures': async ({ job }) => {
+    const authorId = Number(job.author_id);
+    const result = await notifyFailedPublishes({ authorId });
+    return {
+      notified: result.notified.length,
+      announced: result.announced,
+      skipped: result.reason,
+    };
+  },
+
   'trust.assess': async ({ job }) => {
     const authorId = Number(job.author_id);
     const dashboard = await trustDashboard({ authorId });

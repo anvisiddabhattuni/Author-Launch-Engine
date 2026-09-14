@@ -29,6 +29,12 @@ import {
   verifyIsolation,
 } from '../src/agents/tenantManagementAgent.js';
 import { createApp } from '../src/app.js';
+import {
+  authorIdsIn,
+  classifyRoutes,
+  fillPath,
+  surfaceCoverage,
+} from '../src/services/tenantSurface.js';
 import { closePool, query } from '../src/db/pool.js';
 
 let server;
@@ -36,26 +42,11 @@ let baseUrl;
 let mine;
 let theirs;
 let myToken;
+let myBookId;
 let stamp;
 
 const asMe = (path) =>
   fetch(`${baseUrl}${path}`, { headers: { authorization: `Bearer ${myToken}` } });
-
-/** Every author_id appearing anywhere in a JSON response, at any depth. */
-function authorIdsIn(value, found = new Set()) {
-  if (Array.isArray(value)) {
-    for (const v of value) authorIdsIn(v, found);
-  } else if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) {
-      if ((k === 'author_id' || k === 'authorId') && v !== null && v !== undefined) {
-        found.add(Number(v));
-      } else {
-        authorIdsIn(v, found);
-      }
-    }
-  }
-  return found;
-}
 
 before(async () => {
   server = createApp().listen(0);
@@ -107,6 +98,15 @@ before(async () => {
     body: JSON.stringify({ email: `iso-mine-${stamp}@example.test`, password: 'a-long-enough-password' }),
   });
   myToken = (await login.json()).token;
+
+  // The walk fills :bookId with a book this tenant owns, so a route scoped to a
+  // book is exercised rather than skipped.
+  const { rows: mineBook } = await query(
+    `INSERT INTO books (author_id, title, content, themes) VALUES ($1,'My Book','y',$2)
+     RETURNING id`,
+    [mine, ['craft']],
+  );
+  myBookId = mineBook[0].id;
 });
 
 after(async () => {
@@ -176,29 +176,40 @@ describe('STORY-017: a tenant is onboarded with its isolation and role in place'
   });
 });
 
-describe('STORY-017: no route hands one tenant another tenant’s data', () => {
+describe('STORY-024: the walk is derived from the router, not a list', () => {
   /**
-   * The guard that would have caught the leak this story found. Walks the real
-   * API as one tenant and looks for the other tenant's id anywhere in the
-   * response — at any depth, because the leak was nested three levels down in a
-   * dashboard payload nobody would have thought to check by hand.
+   * STORY-017 built this walk and it found two real leaks. It also kept its
+   * routes in a hand-written array, and the array did not grow: measured at the
+   * start of STORY-024, **10 of 35 GET routes were in it**. Everything added
+   * since — /audit-log, the trust history, the on-demand press route — went
+   * unwalked, which is exactly what STORY-017's own Known-gaps entry predicted
+   * would happen.
+   *
+   * So the surface is read off `router.stack` now. A route added tomorrow is
+   * walked tomorrow, and a route that cannot be walked has to say why in
+   * `UNWALKABLE` where somebody can disagree with it.
    */
-  const routes = [
-    '/drafts',
-    '/opportunities',
-    '/outreach-messages',
-    '/press-kits',
-    '/notifications',
-    '/integrations',
-    '/jobs',
-    '/meme-templates',
-    '/deployments',
-    '/audit-integrity',
-  ];
+  const { walkable, declared, needsId, total } = classifyRoutes();
 
-  for (const path of routes) {
+  it('accounts for every GET route, with nothing silently dropped', () => {
+    const coverage = surfaceCoverage();
+    assert.equal(coverage.unaccounted, 0, 'a route is neither walked nor explained');
+    assert.equal(walkable.length + declared.length + needsId.length, total);
+    // The number that regressed before: if this walk ever covers a smaller
+    // share of the surface than it does today, something was added and not
+    // accounted for.
+    assert.ok(walkable.length >= 30, `only ${walkable.length} of ${total} routes are walkable`);
+  });
+
+  it('gives every unwalkable route a reason a person can argue with', () => {
+    for (const { path, why } of declared) {
+      assert.ok(why && why.length > 40, `${path} is excluded without a real reason`);
+    }
+  });
+
+  for (const path of walkable) {
     it(`GET ${path} returns nothing belonging to another tenant`, async () => {
-      const response = await asMe(path);
+      const response = await asMe(fillPath(path, { authorId: mine, bookId: myBookId }));
       assert.ok(response.status < 500, `${path} answered ${response.status}`);
       if (response.status !== 200) return;
 

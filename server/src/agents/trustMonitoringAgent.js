@@ -8,6 +8,7 @@ import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { runChecks, scoreOf } from '../services/governance.js';
 import { outboundInventory } from '../services/outboundPaths.js';
+import { classifyRoutes, surfaceCoverage } from '../services/tenantSurface.js';
 import {
   assessmentHistory,
   checkEpisodes,
@@ -483,6 +484,11 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
     queue,
     recent,
     outbound: outboundInventory(),
+    // Which readable routes are walked for cross-tenant leaks, and which are
+    // deliberately not (STORY-024). The count is the part that regressed
+    // silently before — 10 of 35, for six stories — so it belongs on the page
+    // rather than only inside a passing check.
+    surface: { ...surfaceCoverage(), declared: classifyRoutes().declared },
     // The 'analyse' half of REQ-007: a score with nothing to compare it to is a
     // number, not a metric.
     history,
