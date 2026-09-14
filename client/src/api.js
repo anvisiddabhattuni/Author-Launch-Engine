@@ -96,7 +96,11 @@ export const api = {
   scheduledPosts: (authorId) => request(`/scheduled-posts?authorId=${authorId}`),
   publishDue: (now) => request('/scheduled-posts/publish-due', { method: 'POST', body: { now } }),
 
-  auditLog: (authorId, limit = 50) => request(`/audit-log?authorId=${authorId}&limit=${limit}`),
+  // A null authorId asks for every tenant. Allowed only for a session holding
+  // tenant.read.all — the server refuses it otherwise, which is the point
+  // (STORY-019).
+  auditLog: (authorId, limit = 50) =>
+    request(`/audit-log?${authorId === null ? '' : `authorId=${authorId}&`}limit=${limit}`),
 
   // STORY-002 — opportunities and outreach
   // `types` narrows the scan to one kind of engagement (STORY-010).
@@ -169,6 +173,10 @@ export const api = {
     request(`/authors/${authorId}/notify-pending`, { method: 'POST' }),
 
   notifications: (authorId) => request(`/notifications?authorId=${authorId}`),
+
+  // STORY-021 — the score as a series, and how long each check has been failing
+  trustHistory: (authorId, limit = 30) =>
+    request(`/authors/${authorId}/trust-history?limit=${limit}`),
 
   // STORY-008 — what an independent check escalated, and why
   escalations: (authorId) => request(`/authors/${authorId}/escalations`),

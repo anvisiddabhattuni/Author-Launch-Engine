@@ -281,7 +281,7 @@ describe('Every adapter goes through the agent', () => {
   it('routes the social publishers', async () => {
     const { getSocialApi } = await import('../src/services/socialApis.js');
     const before = (await integrationHealth({ sinceHours: 1 })).find((s) => s.service === 'twitter');
-    await getSocialApi('twitter').publish({ content: 'a short post', scheduledFor: null });
+    await getSocialApi('twitter').publish({ content: 'a short post', scheduledFor: null, via: 'social.publish' });
     const after_ = (await integrationHealth({ sinceHours: 1 })).find((s) => s.service === 'twitter');
     assert.ok(after_.calls > (before?.calls ?? 0), 'the call was recorded');
   });
@@ -290,7 +290,7 @@ describe('Every adapter goes through the agent', () => {
     const { getSocialApi } = await import('../src/services/socialApis.js');
     const tooLong = 'x'.repeat(400);
     await assert.rejects(
-      () => getSocialApi('twitter').publish({ content: tooLong, scheduledFor: null }),
+      () => getSocialApi('twitter').publish({ content: tooLong, scheduledFor: null, via: 'social.publish' }),
       /exceeds 280/,
     );
     const { rows } = await query(
@@ -303,7 +303,7 @@ describe('Every adapter goes through the agent', () => {
 
   it('routes the email provider', async () => {
     const { emailApi } = await import('../src/services/emailApi.js');
-    await emailApi.send({ to: 'someone@example.test', subject: 's', body: 'b' });
+    await emailApi.send({ to: 'someone@example.test', subject: 's', body: 'b', via: 'outreach.send' });
     const health = await integrationHealth({ sinceHours: 1 });
     assert.ok(health.some((s) => s.service === 'email'));
   });

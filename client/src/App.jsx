@@ -144,7 +144,7 @@ export function App() {
             path="/templates"
             element={<TemplatesPage user={user} author={author} book={book} />}
           />
-          <Route path="/audit" element={<AuditPage author={author} />} />
+          <Route path="/audit" element={<AuditPage author={author} user={user} />} />
         </Routes>
       )}
     </div>

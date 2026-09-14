@@ -23,6 +23,7 @@
  * applied to a different set of small numbers.
  */
 import { config } from '../config.js';
+import { outboundInventory } from './outboundPaths.js';
 import { pool } from '../db/pool.js';
 
 export const SEVERITY = { INVARIANT: 'invariant', QUALITY: 'quality' };
@@ -124,6 +125,16 @@ export const CHECKS = [
                               WHERE r.author_id = au.id AND r.active)`,
   },
   {
+    id: 'gate.outbound_declared',
+    severity: SEVERITY.INVARIANT,
+    label: 'Every gated outbound path names an invariant that checks it',
+    why: 'REQ-006 / STORY-020. A gate nobody verifies is the state REQ-006 was in before STORY-013.',
+    // Not SQL: the question is about code, not rows, and the three data-level
+    // gate checks are precisely what cannot see it. A gated path that names no
+    // invariant is a promise with nothing behind it.
+    evaluate: () => outboundInventory().unverified.length,
+  },
+  {
     id: 'audit.states_recorded',
     severity: SEVERITY.QUALITY,
     label: 'Every recorded state change carries the states it changed',
@@ -197,8 +208,13 @@ export async function runChecks({ auditIntegrity = null } = {}, client = pool) {
   const results = [];
 
   for (const check of CHECKS) {
-    const { rows } = await client.query(check.sql, check.params ? check.params() : []);
-    const count = rows[0].n;
+    // Most checks count violating rows. `evaluate` is for the ones whose
+    // question is not about rows at all — STORY-020's outbound coverage asks
+    // about code, which is exactly the blind spot the three SQL gate checks
+    // share.
+    const count = check.evaluate
+      ? check.evaluate()
+      : (await client.query(check.sql, check.params ? check.params() : [])).rows[0].n;
     results.push({
       id: check.id,
       severity: check.severity,

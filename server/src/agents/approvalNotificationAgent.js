@@ -249,7 +249,12 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
     if (written.length === 0) continue;
 
     try {
-      const sent = await notifier.send({ to: reviewer.email, subject, body });
+      const sent = await notifier.send({
+        to: reviewer.email,
+        subject,
+        body,
+        via: 'approval.notify_waiting',
+      });
       await pool.query(
         `UPDATE notifications SET status = 'sent', external_id = $2, sent_at = now()
           WHERE batch_id = $1 AND reviewer_id = $3`,

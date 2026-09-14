@@ -3,18 +3,26 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 
 /** REQ-005: the append-only record of every action, agent or human. */
-export function AuditPage({ author }) {
+export function AuditPage({ author, user }) {
   const [entries, setEntries] = useState([]);
   const [integrity, setIntegrity] = useState(null);
   const [error, setError] = useState('');
 
+  // STORY-019: a compliance session reads every tenant's trail. This page used
+  // to pin every request to one author id, so the role existed in the API and
+  // was invisible here — the permission was real and the page still showed one
+  // tenant's rows.
+  const spansTenants = Boolean(user?.permissions?.includes('tenant.read.all'));
+
   useEffect(() => {
     api
-      .auditLog(author.id, 200)
+      .auditLog(spansTenants ? null : author.id, 200)
       .then(setEntries)
       .catch((e) => setError(e.message));
+    // Only a session holding audit.verify may ask; the rest get no panel rather
+    // than a red error for a thing they were never entitled to see.
     api.auditIntegrity().then(setIntegrity).catch(() => {});
-  }, [author.id]);
+  }, [author.id, spansTenants]);
 
   return (
     <>
@@ -89,6 +97,11 @@ export function AuditPage({ author }) {
             <thead>
               <tr>
                 <th>When (UTC)</th>
+                {/* Only meaningful once a session can span tenants (STORY-019).
+                    A compliance officer reading every tenant's trail cannot
+                    tell whose action a row is without it — the column is the
+                    difference between a log and a pile of verbs. */}
+                {spansTenants && <th>Tenant</th>}
                 <th>Actor</th>
                 <th>Action</th>
                 <th>Entity</th>
@@ -99,6 +112,13 @@ export function AuditPage({ author }) {
               {entries.map((entry) => (
                 <tr key={entry.id}>
                   <td className="mono">{new Date(entry.created_at).toISOString().replace('T', ' ').slice(0, 19)}</td>
+                  {spansTenants && (
+                    <td className="mono">
+                      {/* Null is not missing data: a global sweep belongs to no
+                          tenant. Saying so beats an empty cell. */}
+                      {entry.author_id === null ? 'system' : `author ${entry.author_id}`}
+                    </td>
+                  )}
                   <td>{entry.actor}</td>
                   <td className="mono">{entry.action}</td>
                   <td className="mono">

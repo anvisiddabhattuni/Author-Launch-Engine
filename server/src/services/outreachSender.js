@@ -83,6 +83,8 @@ export async function sendOutreachMessage({ messageId }) {
       to: opportunity.contact_email,
       subject: message.subject,
       body: message.body,
+      authorId: message.author_id,
+      via: 'outreach.send',
     });
 
     const { rows } = await query(

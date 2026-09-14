@@ -4,8 +4,9 @@ import { sendOutreachMessage } from '../services/outreachSender.js';
 import { notifyPendingReviews, notifyRaisedEscalations } from '../services/reviewNotifier.js';
 import { notifyAwaitingApproval } from '../agents/approvalNotificationAgent.js';
 import { sealAndVerify } from '../agents/auditSecurityAgent.js';
-import { monitorPressMaterials } from '../agents/trustMonitoringAgent.js';
+import { monitorPressMaterials, trustDashboard } from '../agents/trustMonitoringAgent.js';
 import { publishDue } from '../services/scheduler.js';
+import { alertOnBreaches } from '../services/trustHistory.js';
 
 /**
  * What the worker knows how to do (STORY-065).
@@ -51,6 +52,14 @@ export const RECURRING = [
     describe: (job) => `tell reviewers what is waiting on them for author ${job.author_id}`,
   },
   {
+    // The sweep this story exists for (STORY-021). Author-scoped because the
+    // dashboard is, and because the person who needs telling about a breach is
+    // that tenant's reviewer.
+    kind: 'trust.assess',
+    scope: 'author',
+    describe: (job) => `assess trust and alert on new breaches for author ${job.author_id}`,
+  },
+  {
     // Global: the audit log is one log across every tenant, and an integrity
     // check that ran per author would seal overlapping ranges of it.
     kind: 'audit.seal_and_verify',
@@ -91,6 +100,26 @@ export const HANDLERS = {
    * tightened today should catch work drafted yesterday that is still sitting
    * unapproved.
    */
+  /**
+   * STORY-021's sweep. Before this, the assessment ran only when a human opened
+   * the page — so a broken invariant waited to be noticed, and "when did this
+   * start failing" had no answer. Running it on a timer is what turns the score
+   * into a series and a breach into an event with a time on it.
+   */
+  'trust.assess': async ({ job }) => {
+    const authorId = Number(job.author_id);
+    const dashboard = await trustDashboard({ authorId });
+    const alert = await alertOnBreaches({ authorId, started: dashboard.changed.started });
+    return {
+      status: dashboard.governance.status,
+      score: dashboard.governance.score,
+      startedFailing: dashboard.changed.started.map((e) => e.check_id),
+      recovered: dashboard.changed.recovered.map((e) => e.check_id),
+      alerted: alert.alerted.length,
+      alertSkipped: alert.reason,
+    };
+  },
+
   'trust.monitor_escalations': async ({ job }) => {
     const authorId = Number(job.author_id);
     const scan = await monitorPressMaterials({ authorId });

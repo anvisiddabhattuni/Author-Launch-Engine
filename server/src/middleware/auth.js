@@ -64,6 +64,17 @@ export function authenticate(req, _res, next) {
 const readsAllTenants = (user) => holds(user, PERMISSIONS.TENANT_READ_ALL);
 
 /**
+ * Whether this session may *act* on another tenant's rows.
+ *
+ * Deliberately not the same question as `readsAllTenants`. `assertOwns` used
+ * to short-circuit on the read permission, so granting a role the ability to
+ * see every tenant also granted it the ability to approve, reject, send,
+ * schedule and distribute in every tenant — the hole STORY-022 found by
+ * approving a press release as the read-only compliance role (STORY-022).
+ */
+const actsOnAllTenants = (user) => holds(user, PERMISSIONS.TENANT_ACT_ALL);
+
+/**
  * Pins every request to the caller's tenant.
  *
  * Before this, every list route read its tenant from a query parameter the
@@ -121,7 +132,9 @@ export function tenantParam(req, _res, next, value) {
  */
 export async function assertOwns(req, table, id) {
   if (!req.user) throw unauthorized('Sign in required');
-  if (readsAllTenants(req.user)) return;
+  // Acting, not reading. See `actsOnAllTenants` above for why these are two
+  // permissions rather than one.
+  if (actsOnAllTenants(req.user)) return;
 
   const { rows } = await pool.query(`SELECT author_id FROM ${table} WHERE id = $1`, [id]);
   if (!rows[0]) return; // Let the route's own 404 speak; this is not a tenant failure.

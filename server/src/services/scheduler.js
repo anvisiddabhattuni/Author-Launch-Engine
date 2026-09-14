@@ -171,7 +171,12 @@ export async function publishDue({ now = new Date() } = {}) {
   for (const post of due) {
     try {
       const api = getSocialApi(post.platform);
-      const result = await api.publish({ content: post.content, scheduledFor: post.scheduled_for });
+      const result = await api.publish({
+        content: post.content,
+        scheduledFor: post.scheduled_for,
+        authorId: post.author_id,
+        via: 'social.publish',
+      });
 
       const { rows } = await query(
         `UPDATE scheduled_posts

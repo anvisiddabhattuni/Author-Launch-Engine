@@ -16,8 +16,20 @@ import { pool } from '../db/pool.js';
  */
 export const PERMISSIONS = {
   AUDIT_READ: 'audit.read',
+  /** Approve or reject outbound content. The gate REQ-006 is about (STORY-022). */
+  CONTENT_APPROVE: 'content.approve',
   AUDIT_VERIFY: 'audit.verify',
   TENANT_READ_ALL: 'tenant.read.all',
+  /**
+   * Act on any tenant's rows, not merely read them.
+   *
+   * Split from TENANT_READ_ALL by STORY-022. They were one permission, and
+   * `assertOwns` — which guards approve, reject, send, schedule and distribute
+   * — short-circuited on the read one. That made every read-across-tenants
+   * role a write-across-tenants role, which is how `compliance` came to be
+   * able to approve a press release in someone else's tenant.
+   */
+  TENANT_ACT_ALL: 'tenant.act.all',
   TENANT_MANAGE: 'tenant.manage',
   TEMPLATES_MANAGE: 'templates.manage',
 };

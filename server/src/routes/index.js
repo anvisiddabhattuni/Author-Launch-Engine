@@ -62,6 +62,7 @@ import {
 import { enqueue, retryJob, tick } from '../jobs/queue.js';
 import { login, publicUser } from '../services/auth.js';
 import { thresholds } from '../services/escalationPolicy.js';
+import { assessmentHistory, checkEpisodes } from '../services/trustHistory.js';
 import { publishDue, scheduleDraft } from '../services/scheduler.js';
 import {
   addTemplate,
@@ -384,7 +385,7 @@ router.get('/authors/:authorId/weekly-coverage', asyncRoute(async (req, res) => 
 
 // --- Approval gate (build step 4 precondition) ---
 
-router.post('/drafts/:id/approve', asyncRoute(async (req, res) => {
+router.post('/drafts/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'drafts', Number(req.params.id));
   const draft = await approveDraft({
     draftId: Number(req.params.id),
@@ -394,7 +395,7 @@ router.post('/drafts/:id/approve', asyncRoute(async (req, res) => {
   res.json(draft);
 }));
 
-router.post('/drafts/:id/reject', asyncRoute(async (req, res) => {
+router.post('/drafts/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'drafts', Number(req.params.id));
   const draft = await rejectDraft({
     draftId: Number(req.params.id),
@@ -602,7 +603,7 @@ router.get('/outreach-messages', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/outreach-messages/:id/approve', asyncRoute(async (req, res) => {
+router.post('/outreach-messages/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'outreach_messages', Number(req.params.id));
   const message = await approveOutreach({
     messageId: Number(req.params.id),
@@ -623,7 +624,7 @@ router.post('/outreach-messages/:id/approve', asyncRoute(async (req, res) => {
   res.json(message);
 }));
 
-router.post('/outreach-messages/:id/reject', asyncRoute(async (req, res) => {
+router.post('/outreach-messages/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'outreach_messages', Number(req.params.id));
   const message = await rejectOutreach({
     messageId: Number(req.params.id),
@@ -908,7 +909,7 @@ router.get('/books/:bookId/themes', asyncRoute(async (req, res) => {
   });
 }));
 
-router.post('/pr-materials/:id/approve', asyncRoute(async (req, res) => {
+router.post('/pr-materials/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'pr_materials', Number(req.params.id));
   const material = await approvePrMaterial({
     materialId: Number(req.params.id),
@@ -918,7 +919,7 @@ router.post('/pr-materials/:id/approve', asyncRoute(async (req, res) => {
   res.json(material);
 }));
 
-router.post('/pr-materials/:id/reject', asyncRoute(async (req, res) => {
+router.post('/pr-materials/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   await assertOwns(req, 'pr_materials', Number(req.params.id));
   const material = await rejectPrMaterial({
     materialId: Number(req.params.id),
@@ -1055,6 +1056,32 @@ router.get('/notifications', asyncRoute(async (req, res) => {
     params,
   );
   res.json(rows);
+}));
+
+// --- Trust history and breach episodes (STORY-021 / REQ-007) ---
+
+/**
+ * The score as a series, and every episode of a check being broken.
+ *
+ * Served separately from the dashboard so "is this getting worse" can be asked
+ * without recomputing every check — the dashboard's own assessment is the
+ * expensive part, and a chart should not pay for it.
+ */
+router.get('/authors/:authorId/trust-history', asyncRoute(async (req, res) => {
+  const authorId = Number(req.params.authorId);
+  const [history, episodes] = await Promise.all([
+    assessmentHistory({ authorId, limit: Number(req.query.limit ?? 30) }),
+    checkEpisodes({ authorId }),
+  ]);
+  const open = episodes.filter((e) => e.recovered_at === null);
+  res.json({
+    history,
+    episodes,
+    open: open.length,
+    // The headline an operator wants: not "something is broken" but "this has
+    // been broken since Tuesday and nobody was told".
+    unalerted: open.filter((e) => e.severity === 'invariant' && !e.alerted_at).map((e) => e.check_id),
+  });
 }));
 
 // --- Escalation of low-confidence drafts (STORY-008 / REQ-003) ---
@@ -1268,7 +1295,7 @@ router.post('/authors/:authorId/mix-recommendations/scan', asyncRoute(async (req
   res.status(201).json(await recommendMix({ authorId: Number(req.params.authorId) }));
 }));
 
-router.post('/mix-recommendations/:id/approve', asyncRoute(async (req, res) => {
+router.post('/mix-recommendations/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   res.json(
     await approveMixRecommendation({
       recommendationId: Number(req.params.id),
@@ -1279,7 +1306,7 @@ router.post('/mix-recommendations/:id/approve', asyncRoute(async (req, res) => {
   );
 }));
 
-router.post('/mix-recommendations/:id/reject', asyncRoute(async (req, res) => {
+router.post('/mix-recommendations/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
   res.json(
     await rejectMixRecommendation({
       recommendationId: Number(req.params.id),

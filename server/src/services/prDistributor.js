@@ -161,7 +161,7 @@ export async function distributePressKit({ kitId }) {
   const sent = [];
   for (const { row, contact, matchedBeats } of queued) {
     try {
-      const result = await emailApi.send({ to: contact.email, subject, body });
+      const result = await emailApi.send({ to: contact.email, subject, body, via: 'press.distribute' });
 
       const { rows } = await query(
         `UPDATE pr_distributions SET status = 'sent', external_id = $1, sent_at = now()

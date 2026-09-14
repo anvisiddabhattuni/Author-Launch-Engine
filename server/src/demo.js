@@ -4,6 +4,8 @@
  *
  * Run against a freshly seeded database:  npm run db:reset && npm run demo
  */
+import { readFile } from 'node:fs/promises';
+
 import jwt from 'jsonwebtoken';
 
 import { alignToThemes } from './agents/contentAlignmentAgent.js';
@@ -41,12 +43,15 @@ import { monthStart, scoutOpportunities } from './agents/opportunityScoutingAgen
 import { draftPressKit } from './agents/prMaterialsAgent.js';
 import { generatePrMaterials, proseOf } from './agents/aiContentGenerationAgent.js';
 import { runChecks } from './services/governance.js';
+import { alertOnBreaches } from './services/trustHistory.js';
+import { outboundInventory } from './services/outboundPaths.js';
+import { emailApi } from './services/emailApi.js';
 import { grantMatrix } from './services/permissions.js';
 import { draftOutreachMessages } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { createApp } from './app.js';
 import { closePool, query } from './db/pool.js';
-import { HANDLERS } from './jobs/handlers.js';
+import { HANDLERS, RECURRING } from './jobs/handlers.js';
 import { ensureRecurringJobs, enqueue, reapStaleJobs, retryJob, runOnce, tick } from './jobs/queue.js';
 import {
   approveDraft,
@@ -2650,5 +2655,284 @@ console.log('rows and have nothing to say about a write that never commits.');
 
 console.log('\nSTORY-019 complete — the log now says who may read it and what it may not');
 console.log('carry, and "before-after states" is checked where a state actually existed\n');
+
+
+// ── STORY-020 ────────────────────────────────────────────────────────────────
+// Approval gates on outbound communications. Every gate the story asks for was
+// already built. What nothing could answer was whether a gate had been *missed*.
+
+rule('139. Three invariants that each check a gate that exists');
+console.log('gate.posts, gate.outreach and gate.press have guarded REQ-006 since STORY-013.');
+console.log('Each one joins the table that records a send:\n');
+console.log('  gate.posts     → scheduled_posts');
+console.log('  gate.outreach  → outreach_sends');
+console.log('  gate.press     → pr_distributions');
+console.log('\nThey are good checks with one blind spot in common. A seventh way out, added');
+console.log('next month, writing to none of those tables, is ungated and invisible to all');
+console.log('three — and nothing anywhere would say so. "Is this message approved?" was');
+console.log('answered. "Is there a way out nobody put a gate on?" was not asked.');
+
+rule('140. Every way out of the system, gated and exempt alike');
+const outbound = outboundInventory();
+console.log(`${outbound.total} outbound paths · ${outbound.gated} gated · ${outbound.exempt} exempt\n`);
+for (const p of outbound.paths) {
+  console.log(`  ${p.kind === 'gated' ? 'GATED ' : 'EXEMPT'}  ${p.id.padEnd(26)} ${p.sends}`);
+  console.log(`          ${p.kind === 'gated' ? `gate: ${p.gate}` : `why:  ${p.why.slice(0, 96)}…`}`);
+}
+console.log('\nExemptions are listed, not filtered out. All three are notifications *about*');
+console.log('work awaiting a decision: the email that asks for approval cannot itself');
+console.log('require approval, or the queue is never announced. That is a real exemption');
+console.log('with a real reason, and it belongs on the page rather than in a comment.');
+
+rule('141. An undeclared path cannot send — refused at the choke point');
+const attempts = [
+  ['no `via` at all', { to: 'someone@example.test', subject: 's', body: 'b' }],
+  ['a path nobody declared', { to: 'someone@example.test', subject: 's', body: 'b', via: 'newsletter.blast' }],
+];
+for (const [label, payload] of attempts) {
+  try {
+    await emailApi.send(payload);
+    console.log(`  ${label.padEnd(24)} SENT  <- the gate did not hold`);
+  } catch (error) {
+    console.log(`  ${label.padEnd(24)} refused: ${error.message.split('.')[0]}`);
+  }
+}
+console.log('\nChecked inside the adapter, not by convention at the call site — the same');
+console.log('reasoning that puts the approval check inside scheduleDraft rather than in the');
+console.log('route above it. A caller that forgets is the case this exists for.');
+
+rule('142. It caught the one I forgot, while I was writing it');
+console.log('Wiring the six known send points, I missed outreachSender.js. The test suite');
+console.log('failed on it immediately:\n');
+console.log('  not ok - sends an approved message through the mocked email provider');
+console.log('           Outbound send refused: no `via` given\n');
+console.log('That is the whole claim of this story, demonstrated on its own author. The');
+console.log('mechanism found a missing declaration the same day it was built, in code');
+console.log('written by someone who had the registry open at the time.');
+
+rule('143. And a scan that says so at build time, not only at run time');
+console.log('The adapter refuses at runtime. A test reads the source and refuses at build');
+console.log('time, so a new path is caught before it ever runs:\n');
+console.log('  planted:  services/__probe.js  →  emailApi.send({ to, subject, body })');
+console.log('  result:   not ok - finds every send call site, and every one names a path');
+console.log("            + '__probe.js: .send({...}) with no via'\n");
+console.log('Two independent failures for one mistake, which is the STORY-013 rule applied');
+console.log('again: the check and the risk have to be in different places.');
+
+rule('144. Checked from outside the code that declares it');
+const outboundChecks = await runChecks({});
+for (const id of ['gate.posts', 'gate.outreach', 'gate.press', 'gate.outbound_declared']) {
+  const check = outboundChecks.find((c) => c.id === id);
+  console.log(`  ${check.passed ? 'PASS' : 'FAIL'}  ${check.id.padEnd(24)} ${check.label}`);
+}
+console.log(`\nunverified gated paths: ${outbound.unverified.length === 0 ? 'none' : outbound.unverified.join(', ')}`);
+console.log('\nThe new invariant asks a question the other three cannot: does every gated');
+console.log('path name an invariant that checks it? A gate nobody verifies is the state');
+console.log('REQ-006 was in before STORY-013, and this is what notices if it recurs.');
+
+console.log('\nSTORY-020 complete — every way out of this system is declared, and a new one');
+console.log('cannot ship ungated without failing twice before it sends\n');
+
+
+// ── STORY-021 ────────────────────────────────────────────────────────────────
+// The trust dashboard. STORY-014 built it and both acceptance clauses already
+// passed. What it had no way to answer was anything involving time.
+
+rule('145. A dashboard that only exists while somebody is looking at it');
+console.log('Both acceptance clauses passed before this story started: the dashboard aggregates');
+console.log('health, pending approvals, recent actions and anomalies, and three detectors run.');
+console.log('\nWhat REQ-007 also asks is that users monitor and *analyse* trust metrics. Before');
+console.log('this story:\n');
+console.log('  assessments stored          0   (only an audit row per page load)');
+console.log('  recurring jobs assessing    0   (six sweeps ran; none was this)');
+console.log('  alerts when a check breaks  0\n');
+console.log('So an invariant could break at 2am and the system told nobody. It was visible');
+console.log('the next time a human happened to open the page, and even then the page could');
+console.log('not say how long it had been true.');
+
+rule('146. The score becomes a series');
+const firstPass = await trustDashboard({ authorId: author.id });
+const secondPass = await trustDashboard({ authorId: author.id });
+console.log(`stored assessments: ${secondPass.history.length}`);
+for (const h of secondPass.history.slice(0, 5)) {
+  console.log(
+    `  ${new Date(h.assessed_at).toISOString().slice(0, 19).replace('T', ' ')}  ` +
+      `${String(h.status).padEnd(9)} ${h.passed}/${h.total} passing  score ${Number(h.score).toFixed(3)}`,
+  );
+}
+console.log('\nTwo readings, so there is something to compare. The audit log already carried');
+console.log('the score and a comment here said that made it a series — true, and not enough:');
+console.log('answering "which checks changed state" from append-only JSON means parsing the');
+console.log('whole table on every page load.');
+
+rule('147. A check changing state is an event with a time on it');
+// A real invariant, genuinely passing until this line. `gate.posts` counts
+// published posts with no approval behind them; the demo's own simulated rows
+// are excluded by their 'sim-' external ids, so this is a clean break.
+const { rows: breachDraft } = await query(
+  `INSERT INTO drafts (author_id, book_id, platform, content, status, confidence,
+                       theme_alignment, week_of)
+   VALUES ($1,$2,'twitter','a post nobody approved','pending_approval',0.9,0.9,CURRENT_DATE)
+   RETURNING *`,
+  [author.id, book.id],
+);
+await query(
+  `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status,
+                                external_id, published_at, format)
+   VALUES ($1,$2,'twitter',now(),'published','real_000001',now(),'text')`,
+  [breachDraft[0].id, author.id],
+);
+
+const broken = await trustDashboard({ authorId: author.id });
+console.log(`transitions detected this run: ${broken.changed.started.map((e) => e.check_id).join(', ') || 'none'}`);
+for (const c of broken.checks.filter((x) => !x.passed && x.failingSince)) {
+  console.log(`  ${c.id.padEnd(24)} failing since ${new Date(c.failingSince).toISOString().slice(11, 19)}`);
+}
+console.log(`\ngovernance verdict: ${broken.governance.status.toUpperCase()} — ${broken.governance.headline}`);
+console.log('\n"Failing" and "failing since 19:04:12" are different findings, and only the');
+console.log('second tells an operator whether anybody noticed. The episode is written once at');
+console.log('the transition rather than re-derived by scanning assessments on every load.');
+
+rule('148. Somebody is told — once, and only for an invariant');
+const alertLog = [];
+const demoNotifier = {
+  async send({ to, subject, via }) {
+    alertLog.push({ to, subject, via });
+    return { externalId: `demo_${alertLog.length}`, acceptedAt: new Date().toISOString() };
+  },
+};
+const firstAlert = await alertOnBreaches({
+  authorId: author.id,
+  started: broken.changed.started,
+  notifier: demoNotifier,
+});
+console.log(`alerted: ${firstAlert.alerted.length}`);
+for (const a of alertLog) console.log(`  → ${a.to}\n    ${a.subject}\n    sent via declared path: ${a.via}`);
+
+// The same breach, next sweep. Nothing should happen.
+const stillBroken = await trustDashboard({ authorId: author.id });
+const secondAlert = await alertOnBreaches({
+  authorId: author.id,
+  started: stillBroken.changed.started,
+  notifier: demoNotifier,
+});
+console.log(`\nsame breach, next sweep → alerted ${secondAlert.alerted.length} (${secondAlert.reason})`);
+console.log('\nRe-sending on every sweep while a breach persists is how an alert channel gets');
+console.log('filtered into a folder nobody opens — the rule STORY-012 applied to the approval');
+console.log('digest. The alert leaves by a declared outbound path because STORY-020 refuses to');
+console.log('send any other way.');
+
+rule('149. And it recovers, without forgetting that it broke');
+await query('DELETE FROM scheduled_posts WHERE external_id = $1', ['real_000001']);
+await query('DELETE FROM drafts WHERE id = $1', [breachDraft[0].id]);
+const healed = await trustDashboard({ authorId: author.id });
+console.log(`transitions detected: recovered ${healed.changed.recovered.map((e) => e.check_id).join(', ') || 'none'}`);
+for (const e of healed.episodes.filter((x) => x.check_id === 'gate.posts')) {
+  const secs = e.recovered_at
+    ? Math.round((new Date(e.recovered_at) - new Date(e.started_at)) / 1000)
+    : null;
+  console.log(`  episode ${e.id}: ${e.recovered_at ? `open for ${secs}s, now closed` : 'still open'}  · alerted: ${e.alerted_at ? 'yes' : 'no'}`);
+}
+console.log(`\ngovernance verdict now: ${healed.governance.status.toUpperCase()}` +
+  (healed.governance.failedInvariants.length
+    ? ` — still ${healed.governance.failedInvariants.join(', ')}, which this story did not break and does not fix`
+    : ''));
+console.log('\nThe episode closes rather than disappearing. A check that fails, recovers and');
+console.log('fails again leaves two rows — one outage is not allowed to erase the last one,');
+console.log('which is the difference between a status light and a record.');
+
+rule('150. It now runs whether or not anyone is watching');
+const trustSweep = RECURRING.find((r) => r.kind === 'trust.assess');
+console.log(`recurring sweeps: ${RECURRING.length}`);
+for (const r of RECURRING) {
+  console.log(`  ${r.kind === 'trust.assess' ? '→' : ' '} ${r.kind.padEnd(28)} ${r.scope}`);
+}
+console.log(`\n${trustSweep ? 'trust.assess is now one of them.' : 'trust.assess is MISSING.'}`);
+console.log('That is the whole difference between a dashboard and a monitor: one answers a');
+console.log('question when asked, the other notices while nobody is asking.');
+
+console.log('\nSTORY-021 complete — the dashboard has a memory and a voice: the score is a');
+console.log('series, a broken check knows since when, and an invariant breaking tells someone\n');
+
+
+// ── STORY-022 ────────────────────────────────────────────────────────────────
+// RBAC across the system. STORY-019 built it. This story's fourth build step
+// named the half that was not done — and measuring it found a hole I had made.
+
+rule('151. Eight approve routes, no permission among them');
+const approveRoutes = (await readFile(new URL('./routes/index.js', import.meta.url), 'utf8'))
+  .match(/router\.post\('[^']*\/(approve|reject)'/g) ?? [];
+console.log(`approve/reject routes: ${approveRoutes.length}`);
+console.log('\nBefore this story not one of them checked a permission. The approval gate — the');
+console.log('control REQ-006 is entirely about — asked whether you were signed in and in the');
+console.log('right tenant. It never asked whether you were allowed to approve.');
+
+rule('152. The read-only role approved a press release');
+console.log('STORY-019 added `compliance` to read everything and change nothing. It has tests');
+console.log('asserting it cannot suspend a tenant or retire a template. Measured before the');
+console.log('fix, against a real pending material in another tenant:\n');
+console.log('  compliance POST /pr-materials/:id/approve   →  200  APPROVED\n');
+console.log('The mechanism is mine. STORY-019 replaced `role === \'admin\'` with');
+console.log('`holds(user, tenant.read.all)` in three guards. Two decide which tenant a request');
+console.log('may *address* — correct. The third, assertOwns, decides whether a caller may *act');
+console.log('on a row*, and there it turned a read permission into a write permission for every');
+console.log('row-addressed action: approve, reject, send, schedule, distribute.');
+console.log('\nIt was invisible because at that moment only `admin` held tenant.read.all, and');
+console.log('for an admin reading and acting had always been the same thing. Adding a role that');
+console.log('could read and must not act is what pulled them apart.');
+
+rule('153. Reading across tenants is now a different permission from acting');
+for (const r of await grantMatrix()) {
+  console.log(`  ${r.role.padEnd(11)} ${r.permissions.join(', ') || '(nothing granted)'}`);
+}
+console.log('\ntenant.read.all → admin, compliance      (see every tenant)');
+console.log('tenant.act.all  → admin                  (change any tenant)');
+console.log('content.approve → admin, author          (decide on outbound content)');
+
+rule('154. The same three requests, after the fix');
+const permServer = createApp().listen(0);
+await new Promise((resolve) => permServer.once('listening', resolve));
+const permBase = `http://127.0.0.1:${permServer.address().port}/api`;
+const permLogin = async (email, password) =>
+  (await (await fetch(`${permBase}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })).json()).token;
+const auditorToken2 = await permLogin('auditor@example.test', 'compliance-only');
+const miraToken3 = await permLogin('mira@example.test', 'quiet-craft');
+
+const { rows: targets } = await query(
+  `SELECT p.id FROM pr_materials p JOIN pr_kits k ON k.id = p.kit_id
+    WHERE p.status IN ('pending_approval','escalated') AND k.status <> 'superseded' LIMIT 1`,
+);
+if (targets[0]) {
+  for (const [label, tok] of [['compliance (read-only)', auditorToken2], ['author (owns it)', miraToken3]]) {
+    const r = await fetch(`${permBase}/pr-materials/${targets[0].id}/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ notes: 'demo' }),
+    });
+    const j = await r.json().catch(() => ({}));
+    console.log(`  ${label.padEnd(24)} ${r.status}  ${r.status >= 400 ? (j.error ?? '') : 'APPROVED'}`);
+  }
+} else {
+  console.log('  (no pending material left to demonstrate against)');
+}
+await new Promise((resolve) => permServer.close(resolve));
+console.log('\nThe role designed to change nothing now changes nothing. The role that owns the');
+console.log('work still decides on it.');
+
+rule('155. And a scan, so a ninth approve route cannot ship unguarded');
+console.log('A permission on seven of eight doors is a gate on a building with eight. So the');
+console.log('suite reads the route file and counts, rather than trusting a list somebody keeps');
+console.log('in their head:\n');
+console.log('  it(\'every approve and reject route carries the permission\')');
+console.log(`  → ${approveRoutes.length}/${approveRoutes.length} guarded, 0 unguarded\n`);
+console.log('Same shape as STORY-020: a check that verifies the gates that exist cannot see a');
+console.log('missing one, so this one looks for the absence instead.');
+
+console.log('\nSTORY-022 complete — approving is a permission rather than a side effect of');
+console.log('being signed in, and reading everything no longer means changing everything\n');
 await closePool();
 

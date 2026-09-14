@@ -7,6 +7,7 @@
  */
 
 import { callExternal } from '../agents/apiIntegrationAgent.js';
+import { assertDeclaredPath } from './outboundPaths.js';
 
 let counter = 0;
 
@@ -17,7 +18,8 @@ const publisher = (platform, maxChars) => ({
   // logged and retried on the provider's terms rather than ours. The adapter
   // itself stays a mock; the policy around it is the part that has to be real
   // before a live SDK is dropped in here.
-  async publish({ content, scheduledFor, authorId = null }) {
+  async publish({ content, scheduledFor, authorId = null, via }) {
+    assertDeclaredPath(via);
     return callExternal({
       service: platform,
       operation: 'publish',

@@ -32,6 +32,9 @@ Implemented so far:
 - **STORY-017 — Tenant Management Agent Manages Multi-Tenancy** (Tenant Management Agent), fulfilling `REQ-010` and `REQ-004`
 - **STORY-018 — AI Content Generation Agent Generates PR Materials** (AI Content Generation Agent), fulfilling `REQ-011` and `REQ-004`
 - **STORY-019 — Implement Append-Only Audit Log** (Audit and Security Agent), fulfilling `REQ-005` — **the access control and completeness half; see below**
+- **STORY-020 — Establish Approval Gates for Outbound Communications** (Approval and Notification Agent), fulfilling `REQ-006`
+- **STORY-021 — Develop a Trust Dashboard for Monitoring** (Trust and Monitoring Agent), fulfilling `REQ-007` — **the history and alerting half; see below**
+- **STORY-022 — Implement Role-Based Access Control (RBAC)** (Coordination and Governance Agent), fulfilling `REQ-005` and `REQ-006`
 
 ## What works today
 
@@ -1255,6 +1258,183 @@ check red in every later run, and a red nobody can clear is one people learn to 
 writes one inside a transaction and rolls it back: the triggers block edits to committed rows and
 have nothing to say about a write that never commits.
 
+### STORY-020 — the gate that was never missing, and the one nobody would have noticed
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `ApprovalGate` module managing approval workflows | `server/src/services/approvals.js` (since STORY-001) |
+| 2. `approvals` table tracking pending communications | `001_init.sql`, extended by 002/003/017 |
+| 3. Endpoints for submitting, notifying, logging | `/api/*/approve`, `/api/*/reject`, `/api/authors/:id/notify-pending` |
+| 4. Email notifications | `server/src/services/emailApi.js`, `reviewNotifier.js`, `approvalNotificationAgent.js` |
+| 5. **What was actually missing** | `server/src/services/outboundPaths.js` |
+
+Both of this story's acceptance clauses were already built. The gates have existed since STORY-001,
+and `gate.posts` / `gate.outreach` / `gate.press` have checked them from outside since STORY-013.
+Rebuilding any of that would have been motion.
+
+What none of it could answer is whether a gate had been **missed**. Each of those three invariants
+joins one table that records a send — `scheduled_posts`, `outreach_sends`, `pr_distributions` — so
+each verifies *a gate that exists*. A seventh way out, added next month, writing to none of those
+tables, is ungated and invisible to all three. "Is this message approved?" was answered six ways.
+"Is there a way out that nobody put a gate on?" was never asked.
+
+Counting them for the first time: **six outbound paths, three gated, three not.**
+
+```
+GATED   social.publish       an approved post to a social platform
+GATED   outreach.send        an approved pitch to a podcast, event or venue
+GATED   press.distribute     a complete press kit to matching press contacts
+EXEMPT  review.notify_pending      a digest of materials awaiting review
+EXEMPT  review.notify_escalation   notice that the monitor raised an escalation
+EXEMPT  approval.notify_waiting    the digest of everything waiting on a human
+```
+
+The three ungated ones are **correct**, and that is the interesting part. The email that asks for
+approval cannot itself require approval — that is circular, and the queue would never be announced.
+So the answer is not "gate everything"; it is that an exemption has to be *declared, with its
+reason, somewhere a reviewer can read it*. All three are on the trust dashboard rather than in a
+source comment, for the reason STORY-017 learned: an exclusion nobody can see is indistinguishable
+from a check that never ran.
+
+**Enforced at the choke point, not by convention.** `emailApi.send` and every social publisher now
+require a `via` naming a declared path, and refuse anything else — the same reasoning that puts the
+approval check inside `scheduleDraft` rather than in the route above it. A caller who forgets is
+precisely the case this exists for.
+
+It proved that on its author. Wiring the six known send points, **I missed `outreachSender.js`**, and
+the suite failed on it immediately with `Outbound send refused: no via given` — a missing declaration
+caught the same day the mechanism was built, in code written by someone with the registry open.
+
+A test also reads the source and fails at build time, so a new path is caught before it ever runs.
+Planting a probe file that sends without declaring itself:
+
+```
+not ok - finds every send call site, and every one names a path
+         + '__probe.js: .send({...}) with no via'
+```
+
+Two independent failures for one mistake — the STORY-013 rule again: the check and the risk have to
+be in different places.
+
+The new invariant `gate.outbound_declared` asks what the other three cannot — does every gated path
+name an invariant that checks it? A gated path with no invariant behind it is the state REQ-006 was
+in before STORY-013, and this is what notices if it recurs.
+
+### STORY-021 — a dashboard that only existed while somebody was looking at it
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `TrustDashboard` React component | `client/src/pages/TrustPage.jsx` (since STORY-014) |
+| 2. Backend aggregating audit logs, approvals, health | `server/src/agents/trustMonitoringAgent.js` |
+| 3. Anomaly detection | `server/src/services/anomalies.js` — **statistical, not TensorFlow; see below** |
+| 4. REST endpoints serving the dashboard | `GET /api/authors/:id/trust-dashboard`, `/trust-history` |
+| 5. **What was actually missing** | `server/src/services/trustHistory.js`, `025_trust_history.sql` |
+
+Both acceptance clauses passed before this story started. Measured first: the dashboard already
+showed health, pending approvals, recent actions and anomalies, and three detectors were running.
+
+What REQ-007 also asks is that users **monitor and analyse** trust metrics, and analysis needs a
+second reading to compare the first one to. There wasn't one:
+
+```
+assessments stored          0   (only an audit row per page load)
+recurring jobs assessing    0   (six sweeps ran; none was this)
+alerts when a check breaks  0
+```
+
+So an invariant could break at 2am and the system told nobody. It became visible whenever a human
+next opened the page — and even then the page could not say how long it had been true. **A dashboard
+nobody is looking at reports nothing.**
+
+Three things now exist that didn't. The score is **stored**, so it is a series rather than a
+snapshot. A check **changing state** is an event with a time on it, kept as an episode — so a failing
+check says *failing since 19:04:12*, and a check that fails, recovers and fails again leaves two
+rows rather than one that forgets the first outage. And `trust.assess` joined the six recurring
+sweeps, so the assessment happens whether or not anyone is watching. That last one is the whole
+difference between a dashboard and a monitor: **one answers a question when asked, the other notices
+while nobody is asking.**
+
+An invariant breaking now alerts the author's reviewers — **once**. Only invariants (a quality check
+dipping is worth seeing, not worth waking someone for), only on the transition, and never re-sent
+while the breach persists, because re-sending on every sweep is how an alert channel gets filtered
+into a folder nobody opens. A breach with no reviewer configured writes
+`governance.breach_unreachable` rather than failing silently. The alert leaves by a declared outbound
+path (`trust.alert_breach`) because STORY-020 refuses to send any other way — and refused this one
+until it was declared.
+
+**Why not TensorFlow.js.** The build note asks for it. With three detectors over tens of rows there
+is no training data to learn from, an unexplainable anomaly score is worse than none on a dashboard
+whose entire premise is that a reviewer can read *why*, and it would break the offline-reproducible
+property the tests and demo depend on. The existing detectors each state their sample size and
+decline to conclude below it, which is the property that actually matters here. Named in Known gaps
+rather than quietly skipped.
+
+Two things this story tripped over, both worth keeping:
+
+**STORY-017's isolation check caught the new tables immediately** — they carry `author_id`, and rows
+pointing at deleted authors read as orphans. The easy fix was to add them to the exclusion list
+beside `audit_log`. That would have been wrong: the audit log is *the* record of what was done and
+must outlive the account, while these are a derived read-model of one tenant's scores, and the
+requirements ask for GDPR-compliant deletion. They got cascading foreign keys instead, and the
+isolation check stayed strict. **Widening a security exclusion for convenience is how one gets
+hollowed out.**
+
+**STORY-020's scan caught this story twice.** First for writing `via: ALERT_PATH` — a named constant
+rather than a greppable literal, which hid the declaration from the check built to find it. Then for
+a *comment* explaining that very scan, which contained the pattern it greps for and was read as
+code. The scan now strips comments before reading, and the `via` at each call site is a literal on
+purpose.
+
+### STORY-022 — the read-only role that could approve a press release
+
+| Story build step | Where it lives |
+|---|---|
+| 1. RBAC module in the backend | `server/src/services/permissions.js` (STORY-019) |
+| 2. Roles and permissions in PostgreSQL | `024_rbac.sql`, `026_approval_permissions.sql` |
+| 3. Express middleware checking permissions | `requirePermission` in `server/src/middleware/auth.js` |
+| 4. Integrate with audit log access **and approval processes** | audit log: STORY-019. **Approvals: this story.** |
+
+STORY-019 built the RBAC, and both of this story's acceptance clauses passed before it started. Its
+fourth build step named the half that had not been done — and measuring that found a hole I had
+made three stories earlier.
+
+**Eight approve/reject routes carried no permission check at all.** The approval gate — the control
+REQ-006 is entirely about — asked whether the caller was signed in and in the right tenant. It never
+asked whether they were allowed to *approve*.
+
+**And the `compliance` role could approve content in any tenant.** That role was added by STORY-019
+to read everything and change nothing, with tests asserting it cannot suspend a tenant or retire a
+template. Against a real pending material in another author's tenant:
+
+```
+compliance POST /pr-materials/:id/approve   →  200  APPROVED
+```
+
+The mechanism is worth keeping. STORY-019 replaced `role === 'admin'` with `holds(user,
+'tenant.read.all')` in three guards. Two of them — `enforceTenant` and `tenantParam` — decide which
+tenant a request may *address*, and the substitution was correct. The third, `assertOwns`, decides
+whether a caller may *act on a row*, and there it silently turned a read permission into a write
+permission for all fourteen row-addressed actions: approve, reject, send, schedule, distribute.
+
+It was invisible because at the moment of that change **only `admin` held `tenant.read.all`** — and
+for an admin, reading everything and changing everything had always been the same thing. Adding a
+role that could read and must not act is what pulled the two apart, and nothing was watching the
+seam. A permission split that looks like a no-op is a no-op only until someone holds one half of it.
+
+So reading across tenants and acting across tenants became different permissions, and approving
+became a permission at all:
+
+```
+tenant.read.all → admin, compliance      (see every tenant)
+tenant.act.all  → admin                  (change any tenant)
+content.approve → admin, author          (decide on outbound content)
+```
+
+A permission on seven of eight doors is a gate on a building with eight, so the suite reads the
+route file and counts rather than trusting a list somebody keeps in their head — the STORY-020 shape
+again: a check that verifies the gates that exist cannot see a missing one, so this one looks for
+the absence.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1300,7 +1480,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 138 stages with evidence at each one.
+Prints 155 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1410,6 +1590,22 @@ Prints 138 stages with evidence at each one.
   real posts and cross-checked against their hand-written profile, the same release scored 0.74 with
   its format furniture and 0.87 without, copy that argues every theme escalating on voice alone, and
   both press invariants checked from outside the code that enforces them.
+
+- **Stages 151–155, STORY-022:** eight approve routes with no permission among them, the read-only
+  compliance role approving a press release in another tenant, the split of reading-across-tenants
+  from acting-across-tenants, the same requests refused afterwards, and a scan so a ninth approve
+  route cannot ship unguarded.
+
+- **Stages 145–150, STORY-021:** a dashboard that existed only while somebody was looking at it, the
+  score becoming a series, a real invariant broken and the transition detected with a time on it, the
+  alert going once to two reviewers by a declared path and not again on the next sweep, the episode
+  closing without forgetting it happened, and `trust.assess` joining the six sweeps that already ran
+  on a timer.
+
+- **Stages 139–144, STORY-020:** the blind spot the three gate invariants share, the six ways out of
+  this system with three gated and three exempt-with-reasons, an undeclared path refused at the
+  adapter, the send point this story's own author forgot to declare and the suite catching it, a
+  planted probe caught by the source scan, and the new invariant checked from outside.
 
 - **Stages 133–138, STORY-019:** the audit log any signed-in author could read, the grant table that
   replaced seven `requireRole('admin')` checks, a compliance officer reading every tenant and
@@ -1552,6 +1748,7 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/milestones/:id/press-kit` | Draft the three press materials for a milestone |
 | `POST` | `/api/authors/:authorId/books/:bookId/pr-materials` | Generate PR materials on request, with no milestone (STORY-018) |
 | `GET` | `/api/audit-log?authorId=` | The trail. Requires `audit.read`; scoped to your tenant without `tenant.read.all` (STORY-019) |
+| `GET` | `/api/authors/:authorId/trust-history?limit=` | The score as a series, plus every episode of a check being broken (STORY-021) |
 | `GET` | `/api/audit-integrity` | Tamper verification over the sealed ranges. Requires `audit.verify` |
 | `GET` | `/api/press-kits?authorId=` | Kits with their materials, theme and voice scores, and distributions |
 | `POST` | `/api/pr-materials/:id/approve` · `/reject` | Record a human decision |
@@ -1600,6 +1797,15 @@ These are deliberate deferrals, not oversights:
   the rest by name, at any depth. A credential stored under a field called something else reaches
   the log, and once there it cannot be removed. The list is one regex in `services/auditLog.js`,
   deliberately readable rather than clever.
+- **The outbound registry is declared, not discovered.** `outboundPaths.js` lists every way out and
+  the adapters refuse an undeclared one, so a path cannot *send* without an entry. What no mechanism
+  checks is whether the entry is **honest**: a new path could declare itself `EXEMPT` with a
+  plausible sentence and ship ungated. The registry moves the failure from silent to visible — a
+  reviewer can see the exemption and argue with it — rather than making a wrong exemption
+  impossible.
+- **A new gated path still needs its invariant written by hand.** `gate.outbound_declared` catches a
+  gated path that names no invariant, but nobody has to name one — declaring the path `EXEMPT`
+  avoids the requirement entirely. Same standing limitation as every other check here.
 - **The `audit.states_recorded` check names the entity types it covers.** A new approvable thing
   gets no coverage until somebody adds it to that list — the same standing limitation as every other
   check here, and the reason its first version was wrong in the other direction (it demanded a prior

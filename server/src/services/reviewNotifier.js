@@ -220,7 +220,12 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
 
         let notification = inserted[0];
         try {
-          const result = await notifier.send({ to: reviewer.email, subject, body });
+          const result = await notifier.send({
+            to: reviewer.email,
+            subject,
+            body,
+            via: 'review.notify_escalation',
+          });
           const { rows: sent } = await client.query(
             `UPDATE notifications SET status = 'sent', external_id = $2, sent_at = now()
               WHERE id = $1 RETURNING *`,
@@ -335,7 +340,12 @@ export async function notifyPendingReviews({ authorId, notifier = emailApi }) {
 
         let notification = inserted[0];
         try {
-          const result = await notifier.send({ to: reviewer.email, subject, body });
+          const result = await notifier.send({
+            to: reviewer.email,
+            subject,
+            body,
+            via: 'review.notify_pending',
+          });
           const { rows: sent } = await client.query(
             `UPDATE notifications
                 SET status = 'sent', external_id = $2, sent_at = now()

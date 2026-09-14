@@ -7,6 +7,12 @@ import { verifyAuditLog } from './auditSecurityAgent.js';
 import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { runChecks, scoreOf } from '../services/governance.js';
+import { outboundInventory } from '../services/outboundPaths.js';
+import {
+  assessmentHistory,
+  checkEpisodes,
+  recordAssessment,
+} from '../services/trustHistory.js';
 import { DECIDABLE, assess, thresholds } from '../services/escalationPolicy.js';
 
 /**
@@ -438,11 +444,50 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
       failedInvariants: governance.failedInvariants,
       failedQuality: governance.failedQuality,
       anomaliesFound: anomalies.findings,
-      // On the log so the score is a series rather than a snapshot — the audit
-      // log is already the append-only store this would otherwise need.
       auditIntegrity: auditIntegrity.status,
     },
   });
 
-  return { governance, checks, anomalies, health, queue, recent, assessedAt: now };
+  // Stored, not only logged (STORY-021). The comment that used to sit here said
+  // the audit log already made the score a series, and that was true and not
+  // enough: answering "which checks changed state" from an append-only table of
+  // JSON blobs means parsing the whole thing on every page load. A read-model is
+  // the right shape for a question asked that often.
+  //
+  // Recording also *detects* — a check that moved passing→failing opens an
+  // episode here, which is what lets the page say how long something has been
+  // broken instead of only that it is.
+  const changes = await recordAssessment({ authorId: authorId ?? null, governance, checks, anomalies });
+  const episodes = await checkEpisodes({ authorId: authorId ?? null });
+  const history = await assessmentHistory({ authorId: authorId ?? null, limit: 30 });
+  const openByCheck = new Map(
+    episodes.filter((e) => e.recovered_at === null).map((e) => [e.check_id, e]),
+  );
+
+  // Every way out of the system, gated and exempt alike (STORY-020). Listed
+  // rather than summarised: an exemption a reviewer cannot see is
+  // indistinguishable from a gate nobody built.
+  return {
+    governance,
+    // Each failing check now carries how long it has been failing. "Failing"
+    // and "failing since Tuesday" are different findings, and only the second
+    // one tells an operator whether anybody noticed.
+    checks: checks.map((c) => {
+      const episode = openByCheck.get(c.id);
+      return episode
+        ? { ...c, failingSince: episode.started_at, alertedAt: episode.alerted_at }
+        : c;
+    }),
+    anomalies,
+    health,
+    queue,
+    recent,
+    outbound: outboundInventory(),
+    // The 'analyse' half of REQ-007: a score with nothing to compare it to is a
+    // number, not a metric.
+    history,
+    episodes,
+    changed: { started: changes.started, recovered: changes.recovered },
+    assessedAt: now,
+  };
 }

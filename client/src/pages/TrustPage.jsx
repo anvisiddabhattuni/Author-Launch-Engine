@@ -37,7 +37,7 @@ export function TrustPage({ author }) {
   if (error) return <div className="banner error">{error}</div>;
   if (!data) return <div className="card"><div className="empty">Loading…</div></div>;
 
-  const { governance, checks, anomalies, health, queue, recent } = data;
+  const { governance, checks, anomalies, health, queue, recent, outbound, history, episodes } = data;
   const status = STATUS_COPY[governance.status] ?? { kind: '', label: governance.status };
   const invariants = checks.filter((c) => c.severity === 'invariant');
   const quality = checks.filter((c) => c.severity === 'quality');
@@ -179,6 +179,123 @@ export function TrustPage({ author }) {
               </span>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* STORY-021: the dimension the dashboard did not have. A score with
+          nothing to compare it to is a number, not a metric. */}
+      {history?.length > 0 && (
+        <div className="card">
+          <h2>Trust over time ({history.length} assessments)</h2>
+          <p className="hint">
+            Every assessment is stored, so the score is a series rather than a snapshot. Before this
+            the dashboard recomputed on each load and compared it to nothing — which made “when did
+            this start failing?” and “is this getting worse?” unanswerable.
+          </p>
+          <div className="meta" style={{ alignItems: 'flex-end', gap: 3, minHeight: 60 }}>
+            {[...history].reverse().map((h) => (
+              <span
+                key={h.id}
+                title={`${new Date(h.assessed_at).toISOString().slice(0, 19).replace('T', ' ')} · ${h.status} · ${h.passed}/${h.total}`}
+                style={{
+                  display: 'inline-block',
+                  width: 10,
+                  height: Math.max(4, Math.round(Number(h.score ?? 0) * 56)),
+                  background:
+                    h.status === 'breach' ? '#c0392b' : h.status === 'degraded' ? '#d68910' : '#27ae60',
+                }}
+              />
+            ))}
+          </div>
+          <p className="hint">
+            Oldest left, newest right. Height is the passing fraction; colour is the verdict, because
+            a high score with a broken invariant is still a breach.
+          </p>
+
+          {episodes?.filter((e) => !e.recovered_at).length > 0 && (
+            <>
+              <h3>Currently failing</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Severity</th>
+                    <th>Failing since</th>
+                    <th>Anyone told?</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {episodes
+                    .filter((e) => !e.recovered_at)
+                    .map((e) => (
+                      <tr key={e.id}>
+                        <td className="mono">{e.check_id}</td>
+                        <td>
+                          <span className={`pill ${e.severity === 'invariant' ? 'escalated' : ''}`}>
+                            {e.severity}
+                          </span>
+                        </td>
+                        <td className="mono">
+                          {new Date(e.started_at).toISOString().slice(0, 19).replace('T', ' ')}
+                        </td>
+                        <td className="mono">
+                          {/* An alert nobody sent and an alert nobody read are
+                              different failures, and only the first is ours. */}
+                          {e.severity !== 'invariant'
+                            ? '—'
+                            : e.alerted_at
+                              ? 'alerted'
+                              : 'NOT YET'}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* STORY-020: every way out of the system, exemptions included. The three
+          gate invariants each verify a gate that exists; this is the list that
+          shows whether one was ever missed. */}
+      {outbound && (
+        <div className="card">
+          <h2>
+            Ways out ({outbound.gated} gated · {outbound.exempt} exempt)
+          </h2>
+          <p className="hint">
+            Every path that can send or publish. A gated path names the approval it sits behind and
+            the invariant that checks it from outside; an exempt one says why it has none.
+            Exemptions are listed rather than filtered, because an exclusion nobody can see is
+            indistinguishable from a check that never ran.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Sends</th>
+                <th>Gate, or why not</th>
+              </tr>
+            </thead>
+            <tbody>
+              {outbound.paths.map((p) => (
+                <tr key={p.id}>
+                  <td className="mono">
+                    <span className={`pill ${p.kind === 'gated' ? 'approved' : ''}`}>{p.kind}</span>{' '}
+                    {p.id}
+                  </td>
+                  <td>{p.sends}</td>
+                  <td className="mono">{p.kind === 'gated' ? p.gate : p.why}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {outbound.unverified.length > 0 && (
+            <div className="banner error">
+              Gated with no invariant behind it: {outbound.unverified.join(', ')}
+            </div>
+          )}
         </div>
       )}
 
