@@ -18,7 +18,7 @@ A good update lets the reader answer four things fast:
 3. **What decisions did you make?**
 4. **What are you doing next?**
 
-Plus: **attach screenshots / artifacts** showing the real work whenever possible.
+Plus: **attach screenshots of the running product** showing the real work. Browser, not terminal — see Screenshots below.
 
 ## The 3 rules
 1. **Tie to ONE task.** Always name it: `STORY-001`, release, todo. No "worked on stuff."
@@ -58,7 +58,7 @@ Plus: **attach screenshots / artifacts** showing the real work whenever possible
 - **Progress made** = what actually changed and how a reviewer can verify it (test passed, screen to open, demo command).
 - **Decisions** = written as a trade-off ("chose X over Y because…"), never just "did X."
 - **Next steps** = name the next story/task, not "figuring it out."
-- **Evidence** = at least one captioned screenshot or artifact. Show, don't just tell.
+- **Evidence** = at least one captioned screenshot **of the app in a browser**. Show, don't just tell. See Screenshots below.
 - **Keep it short** — it should tell the story of what changed since the last update, nothing more.
 
 ---
@@ -83,6 +83,50 @@ tags: [colaberry, author-launch-engine]
 Example: `(C) 2026-08-10 — STORY-001 Draft Social Posts.md`
 
 Save in: `09 PM Curriculum/Author Launch Engine/Basecamp Updates/`
+
+---
+
+## Screenshots — from the product, not the terminal
+
+**Anvi's standing preference: screenshots come from the actual website.** Terminal output, demo
+stage dumps and test summaries are *not* screenshots. They can appear in the Evidence section as
+fenced text, but the captioned shots must be the app running in a browser.
+
+```
+npm run db:reset && npm run demo     # populate the database with real data first
+npm run dev                          # then open http://localhost:5173
+```
+Run from `Author-Launch-Engine/`, not the folder above it. 5173 is the UI; 4000 is the API and
+serves JSON, not pages. If the UI looks empty, `npm test` ran last and overwrote the data — reseed
+with the two commands above.
+
+Seeded logins:
+
+| Login | Password | Use it for |
+|---|---|---|
+| `mira@example.test` | `quiet-craft` | the ordinary author view |
+| `auditor@example.test` | `compliance-only` | read-everything, change-nothing (compliance) |
+| `ops@example.test` | `ops-password` | admin / cross-tenant |
+| `tomas@example.test` | `second-shelf` | the second tenant |
+
+**Rules for the shots**
+- Name the **tab and the panel**, so Anvi can find it without hunting: *"Trust tab, Ways out panel"*.
+- **Pairs beat singles** when the story is a difference. Approve as the auditor (403) next to approve
+  as the owner (200) is the story; either alone is a screenshot of a button.
+- Caption every shot with *what it proves*, not what it is.
+- Put the shot that carries the story on its own **first**.
+
+**The rule this preference is really for — check it before writing the update:**
+If a story's work cannot be screenshotted, it is probably **not surfaced in the product**. That has
+been a real bug twice, both found only when a browser shot was asked for:
+
+- STORY-019 — the Audit page pinned every request to one author id, so the compliance role was real
+  in the API and invisible on screen.
+- STORY-023 — the Outreach page showed only `confidence`, so the theme and voice scores the whole
+  story added could not be seen by a reviewer.
+
+So: **try to take the screenshot before you write the update.** Failing to find one is a finding
+about the product, not about the screenshot.
 
 ---
 
@@ -115,7 +159,7 @@ Keep this under ~100 words. No jargon unless you define it.
 - [ ] Tied to one named task
 - [ ] Short — tells the story of what changed since last update, no walls of text
 - [ ] Decisions written as a trade-off ("chose X over Y because…")
-- [ ] Evidence attached — at least one captioned screenshot / artifact
+- [ ] Evidence attached — captioned screenshots **from the browser**, not the terminal
 - [ ] Next steps names the actual next task
 - [ ] Plain-English Recap is short & jargon-free
 - [ ] Never posted to Basecamp yet (Anvi posts only)
