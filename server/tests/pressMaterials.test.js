@@ -473,7 +473,7 @@ describe('TBI: audit trail', () => {
     );
     await assert.rejects(
       () => query('UPDATE audit_log SET actor = $1 WHERE id = $2', ['tamper', rows[0].id]),
-      /append-only/,
+      /append-only|permission denied/,
     );
   });
 });

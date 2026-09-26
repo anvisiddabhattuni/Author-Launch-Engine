@@ -17,10 +17,14 @@
     "worker": "npm run worker --workspace server",
     "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
     "test": "npm run test --workspace server",
-    "demo": "npm run demo --workspace server"
+    "demo": "npm run demo --workspace server",
+    "check:browser": "node client/scripts/browserCheck.mjs",
+    "scan:deps": "npm audit --omit=dev --audit-level=moderate"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "puppeteer-core": "^25.12.0",
+    "yaml": "^2.9.1"
   },
   "engines": {
     "node": ">=20"

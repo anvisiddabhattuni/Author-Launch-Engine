@@ -37,6 +37,10 @@ export const PRIORITIES = {
   // A human approved this email. It is the only work in the queue with a person
   // on the far side of it, and it used to sort last.
   'outreach.send': 90,
+  // Above the producers, below authorised outbound work. An outage noticed
+  // one sweep late is five minutes nobody was told; but it is cheap, and it
+  // never outranks an email a human is waiting on (STORY-027).
+  'system.health_check': 70,
   // The scheduled time has already passed; every minute here is a late post.
   'posts.publish_due': 80,
   // Produces the press materials the two consumers below react to.
@@ -51,6 +55,9 @@ export const PRIORITIES = {
   // A shade lower so the two notifiers have a defined order rather than a tie
   // broken by whichever row happened to be inserted first.
   'approvals.notify_waiting': 19,
+  // Reads what was published and moves nothing (STORY-029). Below the
+  // notifiers: a reading taken five minutes later is the same reading.
+  'engagement.collect': 15,
   // Lowest. It reads history rather than producing or reacting to work, and
   // sealing a few rows later costs nothing — where delaying an approved email
   // or a publish costs something to somebody (STORY-013).
@@ -87,6 +94,12 @@ export const RESOURCES = {
   // One log, one sealer. Two of these at once would seal overlapping ranges and
   // produce two chains claiming to describe the same rows.
   'audit.seal_and_verify': () => 'global:audit_log',
+  // Per author: two collections for one author would append two readings a
+  // second apart, which is not a series, it is a stutter.
+  'engagement.collect': (job) => `author:${job.author_id}:engagement`,
+  // One monitor at a time. The unique index on open outages already makes two
+  // concurrent checks safe; this makes the intent visible on the job row.
+  'system.health_check': () => 'global:health',
   // Per message, not per author: two different approved emails have no reason
   // to wait for each other.
   'outreach.send': (job) => `outreach:${job.payload?.messageId}`,

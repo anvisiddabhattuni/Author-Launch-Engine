@@ -13,16 +13,20 @@ export function AuditPage({ author, user }) {
   // was invisible here — the permission was real and the page still showed one
   // tenant's rows.
   const spansTenants = Boolean(user?.permissions?.includes('tenant.read.all'));
+  const canVerify = Boolean(user?.permissions?.includes('audit.verify'));
 
   useEffect(() => {
     api
       .auditLog(spansTenants ? null : author.id, 200)
       .then(setEntries)
       .catch((e) => setError(e.message));
-    // Only a session holding audit.verify may ask; the rest get no panel rather
-    // than a red error for a thing they were never entitled to see.
-    api.auditIntegrity().then(setIntegrity).catch(() => {});
-  }, [author.id, spansTenants]);
+    // Only a session holding audit.verify may ask, so only that session does.
+    // This used to ask anyway and swallow the 403 — no panel, but a refused
+    // request in the console on every visit, which the STORY-031 browser check
+    // reported as an error. Asking for what you know you cannot have is noise
+    // in exactly the log someone reads when something is actually wrong.
+    if (canVerify) api.auditIntegrity().then(setIntegrity).catch(() => {});
+  }, [author.id, spansTenants, canVerify]);
 
   return (
     <>

@@ -26,13 +26,59 @@ const CONFIDENCE_COPY = {
   clear: { pill: 'approved', label: 'looked, found nothing' },
 };
 
-export function TrustPage({ author }) {
+/** How a component or instance reads at a glance (STORY-027). */
+const UP_COPY = {
+  up: { pill: 'approved', label: 'up' },
+  degraded: { pill: 'pending_approval', label: 'degraded' },
+  down: { pill: 'escalated', label: 'down' },
+  not_deployed: { pill: 'neutral', label: 'not running' },
+  unchecked: { pill: 'neutral', label: 'not checked yet' },
+};
+const upPill = (status) => UP_COPY[status] ?? { pill: 'neutral', label: status ?? 'not checked yet' };
+
+const ago = (iso) => {
+  if (!iso) return 'never';
+  const s = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (s < 90) return `${s}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  return `${Math.round(s / 3600)} h ago`;
+};
+
+export function TrustPage({ author, user }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [checkNote, setCheckNote] = useState('');
 
+  const load = () => api.trustDashboard(author.id).then(setData).catch((e) => setError(e.message));
   useEffect(() => {
-    api.trustDashboard(author.id).then(setData).catch((e) => setError(e.message));
+    load();
   }, [author.id]);
+
+  const canOperate = Boolean(user?.permissions?.includes('system.operate'));
+
+  const checkNow = async () => {
+    setChecking(true);
+    setCheckNote('');
+    try {
+      const result = await api.runHealthCheck();
+      const parts = [
+        `database ${result.database.status}`,
+        `api ${result.components.api?.status ?? '—'}`,
+        `worker ${result.components.worker?.status ?? '—'}`,
+      ];
+      if (result.started.length) parts.push(`outage opened: ${result.started.map((o) => o.component).join(', ')}`);
+      if (result.resolved.length) parts.push(`recovered: ${result.resolved.map((o) => o.component).join(', ')}`);
+      if (result.alert?.alerted?.length) parts.push(`${result.alert.alerted.length} operator(s) paged`);
+      else if (result.alert?.reason && result.started.length) parts.push(`not paged: ${result.alert.reason}`);
+      setCheckNote(parts.join(' · '));
+      await load();
+    } catch (e) {
+      setCheckNote(e.message);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   if (error) return <div className="banner error">{error}</div>;
   if (!data) return <div className="card"><div className="empty">Loading…</div></div>;
@@ -97,6 +143,123 @@ export function TrustPage({ author }) {
 
       <div className="card">
         <h2>System health</h2>
+
+        {/* STORY-027: whether the processes are up, from rows the checks
+            wrote. Before this the panel could say when the worker last ran
+            and nothing about the API it was being read through. */}
+        {health.system && (
+          <>
+            <div className="meta">
+              {['database', 'api', 'worker'].map((component) => {
+                const c = health.system.components[component];
+                const copy = upPill(c.status);
+                return (
+                  <span className={`pill ${copy.pill}`} key={component}>
+                    {component} {copy.label}
+                    {component === 'database' && c.latencyMs != null ? ` · ${c.latencyMs}ms` : ''}
+                    {component !== 'database' && c.instances > 1 ? ` · ${c.instances} instances` : ''}
+                  </span>
+                );
+              })}
+              <span className="pill neutral">
+                last checked {ago(health.system.lastCheckAt)} · {health.system.checksRecorded} checks logged
+              </span>
+              {canOperate && (
+                <button className="ghost" onClick={checkNow} disabled={checking}>
+                  {checking ? 'Checking…' : 'Check now'}
+                </button>
+              )}
+            </div>
+            {checkNote && <p className="hint">{checkNote}</p>}
+
+            {health.system.instances.length > 0 && (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Instance</th>
+                    <th>Status</th>
+                    <th>Heartbeat</th>
+                    <th>Requests</th>
+                    <th>Errors</th>
+                    <th>p95</th>
+                    <th>Why</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.system.instances.map((i) => {
+                    const copy = upPill(i.status);
+                    return (
+                      <tr key={i.deploymentId}>
+                        <td>
+                          {i.component} <span className="mono">{i.instance}</span>
+                          <div className="hint">v{i.version} · started {ago(i.startedAt)}</div>
+                        </td>
+                        <td><span className={`pill ${copy.pill}`}>{copy.label}</span></td>
+                        <td className="mono">{ago(i.lastSeenAt)}</td>
+                        <td className="mono">{i.stats?.requests ?? '—'}</td>
+                        <td className="mono">
+                          {i.stats?.errorRate == null
+                            ? '—'
+                            : <span className={`pill ${i.stats.errorRate > 0.05 ? 'escalated' : i.stats.errorRate > 0 ? 'unnamed' : 'approved'}`}>
+                                {(i.stats.errorRate * 100).toFixed(1)}%
+                              </span>}
+                        </td>
+                        <td className="mono">{i.stats?.p95Ms != null ? `${i.stats.p95Ms}ms` : '—'}</td>
+                        <td className="hint">{i.detail}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+
+            {health.system.outages.length > 0 && (
+              <>
+                <h3>Outages ({health.system.openOutages} open)</h3>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Component</th>
+                      <th>Down since</th>
+                      <th>Noticed</th>
+                      <th>Paged</th>
+                      <th>Recovered</th>
+                      <th>Why</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {health.system.outages.map((o) => (
+                      <tr key={o.id}>
+                        <td>
+                          <span className={`pill ${o.resolved_at ? 'neutral' : 'escalated'}`}>{o.component}</span>
+                        </td>
+                        <td className="mono">{ago(o.down_since)}</td>
+                        <td className="mono">
+                          {ago(o.detected_at)}
+                          <div className="hint">
+                            {Math.round((new Date(o.detected_at) - new Date(o.down_since)) / 1000)}s after · by {o.detected_by}
+                          </div>
+                        </td>
+                        <td className="mono">{o.alerted_at ? ago(o.alerted_at) : <span className="pill unnamed">nobody</span>}</td>
+                        <td className="mono">{o.resolved_at ? ago(o.resolved_at) : <span className="pill escalated">still down</span>}</td>
+                        <td className="hint">{o.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+            <p className="hint">
+              An instance is down when it stops saying it is alive, or when its /ready stops
+              answering — not when it forgets to write a stop row. Outages open on the transition and
+              page the operators once; they close when a check finds the component up again, never
+              because time passed. The database outage is the one this cannot record, because it is
+              recorded in the database.
+            </p>
+          </>
+        )}
+
+        <h3>Background work</h3>
         <div className="meta">
           <span className={`pill ${health.workerSeen ? 'approved' : 'escalated'}`}>
             {health.workerSeen
@@ -122,10 +285,16 @@ export function TrustPage({ author }) {
         {health.integrations?.length > 0 && (
           <>
             <h3>External integrations, last 24 hours</h3>
+            <p className="hint">
+              Every outbound call goes through one gateway with a policy per integration. When a
+              provider fails repeatedly its circuit opens: the gateway stops calling it for a
+              cooldown, alerts the operators once, then lets one call test it.
+            </p>
             <table>
               <thead>
                 <tr>
                   <th>Service</th>
+                  <th>Circuit</th>
                   <th>Calls</th>
                   <th>Attempts</th>
                   <th>Retried</th>
@@ -137,7 +306,26 @@ export function TrustPage({ author }) {
               <tbody>
                 {health.integrations.map((i) => (
                   <tr key={i.service}>
-                    <td>{i.service}</td>
+                    <td>
+                      {i.service}
+                      {/* STORY-038: the policy the gateway applies to this one. */}
+                      <div className="hint">
+                        {i.policy ? `${i.kind} · ${i.policy.timeoutMs / 1000}s × ${i.policy.maxAttempts}` : i.kind}
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`pill ${i.circuit?.state === 'closed' ? 'approved' : 'escalated'}`}>
+                        {i.circuit?.state === 'closed' ? 'closed' : i.circuit?.state?.replace('_', '-')}
+                      </span>
+                      {i.circuit?.state !== 'closed' && (
+                        <div className="hint">
+                          {i.circuit.consecutiveFailures} failed in a row · {i.circuit.alertedAt ? 'operators alerted' : 'not alerted'}
+                          <br />
+                          {i.circuit.lastError}
+                        </div>
+                      )}
+                      {i.short_circuited > 0 && <div className="hint">{i.short_circuited} call(s) not sent</div>}
+                    </td>
                     <td className="mono">{i.calls}</td>
                     <td className="mono">{i.attempts}</td>
                     <td className="mono">
@@ -151,7 +339,7 @@ export function TrustPage({ author }) {
                     <td className="mono">
                       {i.failed > 0 ? <span className="pill escalated">{i.failed}</span> : '—'}
                     </td>
-                    <td className="mono">{i.avg_ms}ms</td>
+                    <td className="mono">{i.avg_ms === null ? '—' : `${i.avg_ms}ms`}</td>
                   </tr>
                 ))}
               </tbody>

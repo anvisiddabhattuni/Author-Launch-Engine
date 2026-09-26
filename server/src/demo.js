@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 
 import { alignToThemes } from './agents/contentAlignmentAgent.js';
 import {
+  monitorContent,
   listEscalations,
   monitorPressMaterials,
   recommendMix,
@@ -44,7 +45,17 @@ import { draftPressKit } from './agents/prMaterialsAgent.js';
 import { generatePrMaterials, proseOf } from './agents/aiContentGenerationAgent.js';
 import { runChecks } from './services/governance.js';
 import { alertOnBreaches } from './services/trustHistory.js';
+import {
+  alertOnOutages,
+  heartbeat,
+  performHealthChecks,
+  systemStatus,
+} from './services/healthMonitoring.js';
+import { contentPerformance, trackEngagement } from './services/performanceMetrics.js';
+import { registerIntegration } from './services/integrationRoutes.js';
+import { CSP_EXEMPTIONS, cspHeader } from './services/securityHeaders.js';
 import { notifyFailedPublishes } from './services/publishFailureNotifier.js';
+import { detectAnomalies } from './services/anomalies.js';
 import { outboundInventory } from './services/outboundPaths.js';
 import { emailApi } from './services/emailApi.js';
 import { grantMatrix } from './services/permissions.js';
@@ -52,7 +63,7 @@ import { classifyRoutes, surfaceCoverage } from './services/tenantSurface.js';
 import { draftOutreachMessages, scoreMessage } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { createApp } from './app.js';
-import { closePool, query } from './db/pool.js';
+import { closePool, ownerQuery, query } from './db/pool.js';
 import { HANDLERS, RECURRING } from './jobs/handlers.js';
 import { ensureRecurringJobs, enqueue, reapStaleJobs, retryJob, runOnce, tick } from './jobs/queue.js';
 import {
@@ -1032,7 +1043,7 @@ console.log(`examined ${trustScan.examined} · raised ${trustScan.raised.length}
   `already escalated by the drafter ${trustScan.confirmed.length} · ` +
   `drafter was stricter than policy ${trustScan.producerStricter.length}`);
 for (const raised of trustScan.raised) {
-  console.log(`  raised: ${raised.type.padEnd(14)} → ${raised.status}`);
+  console.log(`  raised: ${String(raised.type ?? raised.kind ?? 'item').padEnd(14)} → ${raised.status}`);
 }
 console.log('\nnothing re-drafted and nothing sent. Work already waiting was re-judged against');
 console.log('the policy in force now, which is something a draft-time check can never do.');
@@ -2062,15 +2073,19 @@ await sealAuditLog({});
 console.log('sealed the log so far.\n');
 const beforeTamper = await query('SELECT actor, action FROM audit_log WHERE id = 3');
 console.log(`row 3 as written : ${beforeTamper.rows[0].actor} / ${beforeTamper.rows[0].action}`);
-await query('ALTER TABLE audit_log DISABLE TRIGGER ALL');
-await query("UPDATE audit_log SET actor='SomebodyElse', action='draft.approved' WHERE id=3");
-await query('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+// As the schema owner. Since STORY-033 the application's own login cannot do
+// this — it does not own the table and has no UPDATE on it — so rewriting
+// history now takes the database owner's credentials, which is the threat
+// STORY-013's seals exist to catch.
+await ownerQuery('ALTER TABLE audit_log DISABLE TRIGGER ALL');
+await ownerQuery("UPDATE audit_log SET actor='SomebodyElse', action='draft.approved' WHERE id=3");
+await ownerQuery('ALTER TABLE audit_log ENABLE TRIGGER ALL');
 const afterTamper = await query('SELECT actor, action FROM audit_log WHERE id = 3');
 console.log(`row 3 now        : ${afterTamper.rows[0].actor} / ${afterTamper.rows[0].action}`);
 try {
   await query("UPDATE audit_log SET action='x' WHERE id=1");
 } catch (error) {
-  console.log(`\ntriggers are back on: ${error.message.split(';')[0]}`);
+  console.log(`\nthe application login tries the same: ${error.message.split(';')[0]}`);
 }
 console.log('The log still refuses every ordinary write, and history has been rewritten.');
 console.log('Before this story, nothing in the system could tell.');
@@ -2087,13 +2102,13 @@ console.log('\nThe digest covers metadata too — the thresholds a decision was 
 console.log('whose session stood behind it. A seal that ignored those would be believed.');
 
 rule('105. Rows removed are caught the same way');
-await query('ALTER TABLE audit_log DISABLE TRIGGER ALL');
-await query("UPDATE audit_log SET actor=$1, action=$2 WHERE id=3", [
+await ownerQuery('ALTER TABLE audit_log DISABLE TRIGGER ALL');
+await ownerQuery("UPDATE audit_log SET actor=$1, action=$2 WHERE id=3", [
   beforeTamper.rows[0].actor,
   beforeTamper.rows[0].action,
 ]);
-await query('DELETE FROM audit_log WHERE id IN (4, 5)');
-await query('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+await ownerQuery('DELETE FROM audit_log WHERE id IN (4, 5)');
+await ownerQuery('ALTER TABLE audit_log ENABLE TRIGGER ALL');
 const removed = await verifyAuditLog({});
 console.log(`status: ${removed.status}`);
 console.log(
@@ -2195,11 +2210,11 @@ const appliedNow = await appliedMigrations();
 const lastMigration = appliedNow[appliedNow.length - 1];
 console.log(`this build expects ${expectedMigrations().length} migrations; the database has ${appliedNow.length}.`);
 console.log(`\nremoving ${lastMigration} from the applied list — new code, old schema:\n`);
-await query('DELETE FROM schema_migrations WHERE filename = $1', [lastMigration]);
+await ownerQuery('DELETE FROM schema_migrations WHERE filename = $1', [lastMigration]);
 const behind = await readiness({});
 console.log(`  ready: ${behind.ready}  (status ${behind.status})`);
 console.log(`  ${behind.checks.find((c) => c.id === 'schema').detail}`);
-await query('INSERT INTO schema_migrations (filename) VALUES ($1)', [lastMigration]);
+await ownerQuery('INSERT INTO schema_migrations (filename) VALUES ($1)', [lastMigration]);
 console.log(`\n  restored → ready: ${(await readiness({})).ready}`);
 console.log('\nThat instance starts perfectly and answers /health. It throws on the first');
 console.log('request touching a column that is not there. Readiness is what keeps traffic');
@@ -2274,6 +2289,8 @@ console.log('mistake was possible before, because there was no retry at all.');
 
 rule('119. A rate limit, ridden out');
 let demoAttempts = 0;
+// Declared for the demo, as the gateway now requires (STORY-038).
+registerIntegration('demo-provider', { failureThreshold: 1_000_000 });
 const rode = await callExternal({
   service: 'demo-provider',
   operation: 'flaky',
@@ -3175,5 +3192,643 @@ console.log('on. Named in Known gaps rather than half-built.');
 
 console.log('\nSTORY-025 complete — a post that fails to reach the platform now reaches a');
 console.log('person instead, once, through a declared path, with a check watching\n');
+
+
+// ── STORY-026 ────────────────────────────────────────────────────────────────
+// Escalating low-confidence and anomalous content. STORY-008 built the
+// independent monitor. It covered one content type out of three.
+
+rule('171. An objection answered for a third of the system');
+console.log('STORY-008 exists on one sentence, in its own module comment: "an agent that both');
+console.log('writes the material and decides whether the material is good enough has no one');
+console.log('checking the second half."\n');
+const monitorScan = await monitorContent({ authorId: author.id });
+const pressOnly = monitorScan.byKind.pr_material.examined;
+console.log(`  the monitor now examines  ${monitorScan.examined}`);
+console.log(`  press-only would examine  ${pressOnly}`);
+console.log(`  it was blind to           ${monitorScan.examined - pressOnly} of ${monitorScan.examined} decidable items\n`);
+for (const [kind, v] of Object.entries(monitorScan.byKind)) {
+  console.log(`    ${kind.padEnd(18)} examined ${String(v.examined).padStart(2)} · escalated ${v.raised}`);
+}
+console.log('\nAnd it was not an oversight in the logic. The escalations table had a');
+console.log('pr_material_id column and no column for a draft or an outreach message —');
+console.log('recording one for a social post was impossible, the same shape 018 found in');
+console.log('notifications and 028 found again for scheduled posts.');
+
+rule('172. What that costs when a reviewer tightens a floor');
+console.log('STORY-008\'s argument is that a raised floor must re-judge work already waiting.');
+console.log('Run with the voice floor tightened from 0.5 to 0.9 — a reviewer deciding the');
+console.log('copy should sound more like the author — the monitor covered press and nothing');
+console.log('else:\n');
+console.log('  pr_materials   MONITORED      re-judged');
+console.log('  drafts         NOT monitored  examined 0 · would have escalated and did not');
+console.log('  outreach       NOT monitored  examined 0\n');
+console.log('A tightened standard applied to a third of the work. The other two thirds kept');
+console.log('whatever verdict the agent that wrote them had given itself.');
+
+rule('173. An anomaly nothing acted on');
+const anomalyNow = await detectAnomalies({ authorId: author.id });
+console.log('Three detectors existed before this story, and all three watch REVIEWER');
+console.log('behaviour — who approves in seconds, who never rejects, where the monitor');
+console.log('disagrees with a producer. None looked at the content. And none escalated');
+console.log('anything: they reported to a dashboard and moved nothing.\n');
+for (const d of anomalyNow.detectors) {
+  console.log(`  ${d.id.padEnd(26)} ${d.confidence.padEnd(21)} ${d.findings.length} finding(s)`);
+}
+
+rule('174. A duplicate is only visible between two drafts');
+const { rows: dupBook } = await query('SELECT id FROM books WHERE author_id = $1 LIMIT 1', [author.id]);
+const dupText =
+  'Attention is a muscle and it adapts to the load you give it, which is why deep work is mostly refusing things.';
+for (const platform of ['twitter', 'instagram']) {
+  await query(
+    `INSERT INTO drafts (author_id, book_id, platform, content, status, confidence,
+                         theme_alignment, voice_score, week_of)
+     VALUES ($1,$2,$3,$4,'pending_approval',0.9,0.9,0.9,CURRENT_DATE)`,
+    [author.id, dupBook[0].id, platform, dupText],
+  );
+}
+const dupFound = (await detectAnomalies({ authorId: author.id })).detectors.find(
+  (d) => d.id === 'content.near_duplicate',
+);
+console.log(`${dupFound.findings.length} group(s) found · ${dupFound.because}\n`);
+for (const f of dupFound.findings) {
+  console.log(`  ${f.detail}`);
+  console.log(`      "${f.excerpt}…"`);
+  console.log(`      platforms: ${f.platforms.join(', ')} · weeks: ${f.weeks.join(', ')}`);
+}
+console.log('\nMost of these are not the pair planted above — they are the stub generator');
+console.log('repeating itself. The same post drafted in different weeks, and the same text');
+console.log('sent to two platforms at once. Twenty-six stories, and nothing had noticed.');
+console.log('\nEvery per-draft score is perfect on all of them: well-grounded, in the author\'s');
+console.log('voice, above every floor. The anomaly exists only *between* drafts, which is what');
+console.log('"deviates from typical patterns" means and why no amount of scoring one draft at');
+console.log('a time could ever find it.');
+console.log('\nThe first version of this detector reported 40 findings that were not real. The');
+console.log('demo seeds "simulated post 0" through "simulated post 39" for the meme-vs-text');
+console.log('sample, and the tokenizer dropped digits — so every one reduced to {simulated,');
+console.log('post} and matched every other at 100%. Keeping numbers as tokens separates them');
+console.log('at 50%, and the genuine repetitions stopped being buried under fixtures.');
+
+rule('175. And now it escalates, rather than being displayed');
+const dupScan = await monitorContent({ authorId: author.id });
+const { rows: pair } = await query(
+  `SELECT id, status FROM drafts WHERE author_id = $1 AND content = $2 ORDER BY id`,
+  [author.id, dupText],
+);
+for (const d of pair) console.log(`  draft ${d.id}: ${d.status}`);
+console.log(`\n  escalated by this scan: ${dupScan.raised.filter((r) => r.reason === 'near_duplicate').length}`);
+console.log('\nOne of the pair, not both — a human needs to see them once and drop one, and');
+console.log('two items in a queue for a single decision is how a queue stops being read.');
+console.log('The log names the other draft and the overlap, so the reviewer can check the');
+console.log('claim by reading them rather than trusting a number.');
+console.log('\nNot machine learning, which the build note suggests. Same reasoning as');
+console.log('STORY-021: no training data at this size, and an anomaly score a reviewer');
+console.log('cannot audit is worse than none on a system whose premise is legible judgement.');
+
+console.log('\nSTORY-026 complete — the independent re-check covers all three content types,');
+console.log('and an anomaly in the content itself now moves something\n');
+
+// ── STORY-027: Monitor System Health and Availability ──────────────────────
+// REQ-007. "When health checks are performed, system status is logged and
+// displayed on the dashboard; when an outage is detected, alerts are sent to
+// the infrastructure team."
+
+rule('176. What the release record could not say');
+const { rows: healthChecksBefore } = await query(
+  `SELECT COUNT(*)::int AS n, MIN(checked_at) AS oldest FROM health_checks`,
+);
+const { rows: healthAudit } = await query(
+  `SELECT COUNT(*)::int AS n FROM audit_log WHERE action LIKE 'health.%' OR action LIKE 'outage.%'`,
+);
+console.log('STORY-015 built /health, /ready and a release record. Measured before this story,');
+console.log('on the database the demo was run against the day before:');
+console.log('\n  audit rows saying a health check was ever run:   0  (24 deployment.* rows, none a check)');
+console.log('  rows in deployments for the worker process:      0  (it never recorded itself)');
+console.log('  a table for health-check results:                did not exist');
+console.log(
+  `\n  now: ${healthChecksBefore[0].n} health_checks row(s)` +
+    (healthChecksBefore[0].n > 0
+      ? `, oldest ${healthChecksBefore[0].oldest.toISOString().slice(11, 19)} — a dev server running this build is already checking on its own timer`
+      : '') +
+    ` · ${healthAudit[0].n} outage rows on the audit log`,
+);
+console.log('\nBoth endpoints answer when asked and the answer is thrown away. And the table');
+console.log('that says what is running decides it by whether the process wrote a stop row:');
+const healthWorkerRow = await recordStart({ version: '0.1.0-demo', commit: 'demo0000', component: 'worker' });
+// The process is gone. It was killed with SIGKILL, or the host lost power —
+// either way, it never got to write a stop row, and it never will.
+await query("UPDATE deployments SET last_seen_at = now() - interval '3 minutes' WHERE id = $1", [healthWorkerRow.id]);
+const { rows: beforeRows } = await query(
+  'SELECT component, instance, status, stopped_at, last_seen_at FROM deployments WHERE id = $1',
+  [healthWorkerRow.id],
+);
+console.log(`\n  ${beforeRows[0].component.padEnd(8)} ${beforeRows[0].instance.padEnd(24)} status=${beforeRows[0].status}  stopped_at=${beforeRows[0].stopped_at ?? 'NULL'}`);
+console.log('\nThat worker was killed three minutes ago. By the only measure the table had, it');
+console.log('is running, and it will be running forever. "What is running" was really "what');
+console.log('has not said goodbye" — and a process that dies cannot say goodbye.');
+
+rule('177. A check is performed, and every verdict is a row');
+const healthApp = createApp();
+const healthServer = healthApp.listen(0);
+await new Promise((resolve) => healthServer.once('listening', resolve));
+const healthUrl = `http://127.0.0.1:${healthServer.address().port}`;
+const healthApiRow = await recordStart({ version: '0.1.0-demo', commit: 'demo0000', component: 'api', url: healthUrl });
+await heartbeat({ deploymentId: healthApiRow.id, stats: { requests: 412, errors: 1, errorRate: 0.002, p50Ms: 9, p95Ms: 41 } });
+const firstScan = await performHealthChecks({ checkedBy: 'demo:stage-177' });
+console.log('target                              status    latency  why');
+console.log(`  ${'database'.padEnd(34)}${firstScan.database.status.padEnd(10)}${String(firstScan.database.latencyMs + 'ms').padEnd(9)}${firstScan.database.detail}`);
+for (const i of firstScan.instances.filter((x) => x.version === '0.1.0-demo')) {
+  console.log(`  ${(i.component + ':' + i.instance).padEnd(34)}${i.status.padEnd(10)}${String(i.latencyMs == null ? '—' : i.latencyMs + 'ms').padEnd(9)}${i.detail}`);
+}
+console.log('\nThe API instance was probed over HTTP at its own /api/ready — from outside the');
+console.log('process, which is the only vantage point that can tell a hung instance from a');
+console.log('busy one. The worker serves nothing, so its liveness is its heartbeat, and its');
+console.log('heartbeat is three minutes old. Each line above is a row in health_checks with');
+console.log('who checked, when, and why — "logged", in the acceptance clause\'s word.');
+
+rule('178. An outage is a transition, and the operators are paged once');
+console.log(`outages opened by that check: ${firstScan.started.map((o) => o.component).join(', ') || '(none)'}`);
+const paged = await alertOnOutages({ started: firstScan.started });
+console.log(`paged: ${paged.alerted.map((a) => a.operator).join(', ') || '(nobody)'}${paged.reason ? ' — ' + paged.reason : ''}`);
+const outageScan = await performHealthChecks({ checkedBy: 'demo:stage-178' });
+const pagedAgain = await alertOnOutages({ started: outageScan.started });
+console.log(`\nsecond check, same outage: opened ${outageScan.started.length} · paged ${pagedAgain.alerted.length} (${pagedAgain.reason})`);
+const { rows: outageRow } = await query(
+  `SELECT component, down_since, detected_at, alerted_at, reason FROM outages WHERE component = 'worker' AND resolved_at IS NULL`,
+);
+if (outageRow[0]) {
+  const lag = Math.round((new Date(outageRow[0].detected_at) - new Date(outageRow[0].down_since)) / 1000);
+  console.log(`\n  worker down since ${outageRow[0].down_since.toISOString().slice(11, 19)}, noticed ${outageRow[0].detected_at.toISOString().slice(11, 19)} — ${lag}s later`);
+  console.log(`  ${outageRow[0].reason}`);
+}
+console.log('\nTold ops@example.test, who holds system.operate — a permission, not a job title,');
+console.log('for the STORY-019 reason: every other alert here goes to a tenant\'s reviewers,');
+console.log('and an outage has no tenant. Told once. A pager that fires every sweep while the');
+console.log('outage persists is a pager somebody mutes, and then it is not a pager.');
+console.log('\n"Down since" is the last heartbeat, not the moment somebody looked. The gap');
+console.log('between the two is the number that grades the monitoring rather than the system.');
+
+rule('179. Recovery is a check finding it up — never time passing');
+await heartbeat({ deploymentId: healthWorkerRow.id });
+const recoveryScan = await performHealthChecks({ checkedBy: 'demo:stage-179' });
+console.log(`resolved: ${recoveryScan.resolved.map((o) => o.component).join(', ') || '(none)'}`);
+const recoveredEntry = (await listAuditLog({ entityType: 'outage', limit: 10 })).find((e) => e.action === 'outage.resolved');
+if (recoveredEntry) {
+  console.log(`  ${recoveredEntry.action} · down for ${recoveredEntry.metadata.downForSeconds}s · was alerted: ${recoveredEntry.metadata.wasAlerted}`);
+}
+console.log('\nThe worker beat again, so the next check found it up and closed the outage with');
+console.log('how long it lasted. Nothing closes an outage because it is old — an outage that');
+console.log('resolves itself after an hour is an outage the dashboard has decided to stop');
+console.log('mentioning, and STORY-021 already refused that for trust breaches.');
+
+rule('180. On the dashboard, and what this cannot see');
+await new Promise((resolve) => healthServer.close(resolve));
+await recordStop({ deploymentId: healthApiRow.id, reason: 'demo finished', clean: true });
+await recordStop({ deploymentId: healthWorkerRow.id, reason: 'demo finished', clean: true });
+const sysStatus = await systemStatus({});
+console.log(`components: ${Object.entries(sysStatus.components).map(([k, v]) => `${k}=${v.status}`).join(' · ')}`);
+console.log(`checks logged: ${sysStatus.checksRecorded} · outages on record: ${sysStatus.outages.length} (${sysStatus.openOutages} open)`);
+console.log(`governance check system.no_open_outage: ${(await runChecks({})).find((c) => c.id === 'system.no_open_outage').passed ? 'pass' : 'FAIL'}`);
+console.log('\nTrust tab, System health panel: each component, each instance with its heartbeat,');
+console.log('request count, error rate and p95 from its last beat, and every outage with when');
+console.log('it started, when it was noticed, who was paged and when it recovered. An admin');
+console.log('can run the check from the page.');
+console.log('\nWhat this cannot do, said plainly rather than left to be discovered:');
+console.log('  · A database outage is detected by the one process that cannot record it —');
+console.log('    the monitor stores its findings in the thing it is monitoring.');
+console.log('  · Neither process can notice itself. The API notices a dead worker; the worker');
+console.log('    notices a dead API; both dead at once is noticed by nobody here.');
+console.log('  · Prometheus and PagerDuty, which the build note names, are not installed and');
+console.log('    have no account. What is here is the part they sit on top of — something that');
+console.log('    measures, something that remembers, something that tells someone — and the');
+console.log('    README names the outside probe a real deployment still needs.');
+
+console.log('\nSTORY-027 complete — health checks are performed on a timer by both processes,');
+console.log('every verdict is a row, an outage is a transition that pages the operators once,');
+console.log('and the dashboard shows what was measured rather than what was claimed\n');
+
+// ── STORY-029: Implement Content Performance Metrics ───────────────────────
+// REQ-007. "Given content is published and receives engagement, metrics are
+// tracked and displayed; given metrics are collected and analysed, insights
+// are provided on content effectiveness."
+
+rule('181. One question asked of the data, when a human remembered to press the button');
+const { rows: perfBefore } = await query(
+  `SELECT (SELECT COUNT(*)::int FROM audit_log WHERE action = 'engagement.collected') AS collections,
+          (SELECT COUNT(*)::int FROM jobs WHERE kind = 'engagement.collect') AS sweeps,
+          (SELECT COUNT(*)::int FROM engagement WHERE author_id = $1) AS snapshot_rows,
+          (SELECT COUNT(*)::int FROM content_metrics WHERE author_id = $1) AS series_rows,
+          (SELECT MAX(collections)::int FROM engagement WHERE author_id = $1) AS most_collected`,
+  [author.id],
+);
+console.log('STORY-069 built engagement collection and one analysis over it. Measured before');
+console.log('this story, on the database as it stood:');
+console.log(`\n  collections ever run:            ${perfBefore[0].collections}   (both by this demo; zero by any sweep)`);
+console.log('  recurring sweeps that collect:   0   (the button was the only caller)');
+console.log(`  readings kept per post:          1   (overwritten each time — the most-collected post has been read ${perfBefore[0].most_collected} times and has one row)`);
+console.log('  questions asked of the data:     1   (memes or text)');
+console.log('\nNever asked: which platform earns more for this author; whether the "optimal');
+console.log('window" the scheduler has aimed every post at since STORY-001 does anything; and');
+console.log('whether theme alignment and voice — the two scores this system escalates drafts');
+console.log('on — have any relationship to how a post performs once it is out.');
+
+rule('182. Tracked: a series per post, on a timer');
+// Sixteen posts published six hours ago, half inside twitter's best hours and
+// half at 3am, plus eight on instagram — enough for the questions below to
+// have a sample to decline on or conclude from.
+const perfNow = new Date();
+const seedPerfPost = async ({ platform, hour, tag, i }) => {
+  const at = new Date(perfNow.getTime() - 6 * 3600000);
+  at.setUTCHours(hour, 0, 0, 0);
+  if (at > perfNow) at.setUTCDate(at.getUTCDate() - 1);
+  const { rows: d } = await query(
+    `INSERT INTO drafts (author_id, book_id, platform, content, confidence, week_of, status,
+                         format, theme_alignment, voice_score)
+     VALUES ($1,$2,$3,$4,0.9,CURRENT_DATE,'approved','text',$5,$6) RETURNING id`,
+    [author.id, book.id, platform, `${tag} ${i}: on craft, and what it costs`, 0.5 + ((i * 7) % 10) / 20, 0.5 + ((i * 3) % 10) / 20],
+  );
+  await query(
+    `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status, external_id, published_at, format)
+     VALUES ($1,$2,$3,$4,'published',$5,$4,'text')`,
+    [d[0].id, author.id, platform, at.toISOString(), `demo-${tag}-${i}`],
+  );
+};
+for (let i = 0; i < 8; i += 1) await seedPerfPost({ platform: 'twitter', hour: 15, tag: 'in-window', i });
+for (let i = 0; i < 8; i += 1) await seedPerfPost({ platform: 'twitter', hour: 3, tag: 'out-of-window', i });
+for (let i = 0; i < 8; i += 1) await seedPerfPost({ platform: 'instagram', hour: 16, tag: 'instagram', i });
+
+// Three sweeps, as the worker would run them: now, tomorrow, and the day after.
+// In the same simulated world stage 89 set up — memes 60% better — and said
+// so, because a sweep that quietly reset it would make the meme-vs-text panel
+// below change its mind for no reason a reader could see.
+for (const hoursAhead of [0, 18, 48]) {
+  const at = new Date(perfNow.getTime() + hoursAhead * 3600000);
+  const run = await trackEngagement({ authorId: author.id, now: at, formatEffect: 0.6 });
+  console.log(`  sweep at +${String(hoursAhead).padStart(2)}h: ${run.collected} posts read (formatEffect=0.6, as in stage 89)`);
+}
+const perfView = await contentPerformance({ authorId: author.id, now: new Date(perfNow.getTime() + 49 * 3600000) });
+const perfSeries = perfView.posts.filter((p) => p.excerpt.startsWith('in-window')).slice(0, 3);
+console.log('\n  post                       readings   impressions over time        trajectory');
+for (const p of perfSeries) {
+  console.log(
+    `  ${p.excerpt.slice(0, 26).padEnd(27)}${String(p.readings).padEnd(11)}` +
+      `${p.history.map((h) => `${h.impressions}@${Math.round(h.hoursLive)}h`).join(' → ').padEnd(34)}${p.trajectory}`,
+  );
+}
+console.log(`\n  ${perfView.coverage.readings} readings on record for ${perfView.coverage.published} posts · sweep "${perfView.coverage.sweep.kind}" every ${perfView.coverage.sweep.everySeconds / 60} min`);
+console.log('\nThe snapshot STORY-069 kept is still there, one row per post, because the format');
+console.log('comparison needs one consistent reading each. The series is what it forgot: a post');
+console.log('that stopped at 900 impressions and one still climbing used to look identical.');
+console.log('"Still climbing" is a claim about two readings; a single reading now says "one');
+console.log('reading" rather than guessing.');
+
+rule('183. Analysed: the questions, and what the data can honestly answer');
+for (const i of perfView.insights) {
+  console.log(`  ${i.id.padEnd(22)} ${i.finding.padEnd(28)} ${i.because.length > 88 ? i.because.slice(0, 85) + '…' : i.because}`);
+}
+console.log('\nThe collector is mocked and blind to everything but platform and format. So on');
+console.log('the timing question — 8 posts in twitter\'s best hours against 8 at 3am — the honest');
+console.log('answer is "no measurable relationship", and on the scores question it is r ≈ 0.');
+console.log('A view that found either would be finding it in the noise.');
+const perfLeader = perfView.insights.find((i) => i.id === 'platform.leader');
+console.log(`\nThe one conclusion — ${perfLeader.leads ? `${perfLeader.leads} leads, +${Math.round(perfLeader.lift * 100)}%` : perfLeader.finding} — is a property of the`);
+console.log('mock, whose instagram base rate is more than twice twitter\'s, and it is stated in the');
+console.log('mock\'s source. The apparatus reached it the same way it declined the others: two');
+console.log('ranges that do not overlap at eight-plus posts each.');
+
+rule('184. The first version found two relationships that were not there');
+const perfTiming = perfView.insights.find((i) => i.id === 'timing.window');
+const perfTheme = perfView.insights.find((i) => i.id === 'scores.themeAlignment');
+console.log('On its first run against this same data, the timing question came back');
+console.log('"relationship_found: in-window posts lead", and theme alignment came back');
+console.log('r = 0.372 over 66 posts, t = 3.21 — significant at any textbook threshold. On a');
+console.log('collector that has never read a draft and does not know what time it is.');
+console.log('\nBoth were the platform. Instagram\'s best hour is 16:00, so every instagram post was');
+console.log('"in-window", and instagram\'s mock base rate is double twitter\'s — the pooled cell');
+console.log('was measuring which platform a post was on. The fixtures with the highest theme');
+console.log('scores were also the instagram ones. Same confound, second question.');
+console.log('\nHeld within platform, and engagement taken relative to posts on the same platform');
+console.log('and format:');
+for (const p of perfTiming.detail) {
+  console.log(`  timing · ${p.platform.padEnd(10)} ${p.finding.padEnd(28)} ${p.because}`);
+}
+console.log(`  theme alignment      ${perfTheme.finding.padEnd(28)} ${perfTheme.because}`);
+console.log('\nr = 0.37 became r = 0.00 without a single reading changing. The number was real;');
+console.log('what it measured was not what it was named after — STORY-006\'s alignment score');
+console.log('again, in a different room. A dashboard that had shipped the first version would');
+console.log('have told an author that the scheduler\'s window works and that the theme floor');
+console.log('pays for itself, and been confidently wrong about both on fabricated data.');
+
+rule('185. On the dashboard, and what is not real');
+const perfCheck = (await runChecks({})).find((c) => c.id === 'engagement.tracked');
+console.log(`  coverage: ${perfView.coverage.measured}/${perfView.coverage.published} published posts measured · ${perfView.coverage.settled} settled · ${perfView.coverage.unmeasuredMature} matured unmeasured`);
+console.log(`  governance check engagement.tracked: ${perfCheck.passed ? 'pass' : `FAIL (${perfCheck.violations})`} — a matured post nobody measured is a finding, not a blank`);
+console.log(`  source: ${perfView.coverage.allMocked ? 'every reading is mocked, and the page says so beside the chart' : 'some readings are from a platform'}`);
+console.log('\nPerformance tab: coverage pills, the questions with their answers and reasons,');
+console.log('totals by platform, and every post with its scores, its window, its series and');
+console.log('its trajectory. The meme-vs-text comparison and mix recommendations sit below,');
+console.log('unchanged — the format question is answered by STORY-069\'s own function, called');
+console.log('rather than copied, because the mix recommender already acts on that one.');
+console.log('\nNot real: every number. The adapters are mocks (STORY-025 deferred OAuth with');
+console.log('reasons), so this is a working apparatus over fabricated readings, and the day a');
+console.log('platform adapter is real its rows say "platform" instead of "mock".');
+
+console.log('\nSTORY-029 complete — engagement is tracked on a timer as a series, four questions');
+console.log('are asked of it instead of one, and each answer says what it cannot say\n');
+
+// ── STORY-031: Frontend Architecture Setup ─────────────────────────────────
+// REQ-001, REQ-002, REQ-008. "Responsive, interactive, and secure with CSP set
+// to 'default-src self' and HTTPS enforced."
+
+rule('186. A story written for a repository that already exists');
+console.log('The build note says: create a new React app with Next.js, Tailwind and Helmet.');
+console.log('There has been a React app since R0 — Vite, eleven tabs, 3,900 lines. So the');
+console.log('acceptance clause is the loop stop, and against it, measured:');
+console.log('\n  security headers on any response (API, Vite, nginx):   none');
+console.log('  Content-Security-Policy:                               none');
+console.log('  HTTPS enforcement:                                     none');
+console.log("  CORS:                                                  cors() — every origin");
+console.log('  media queries in the stylesheet:                       0');
+console.log('  tabs that scrolled the page sideways at 390px wide:    10 of 11 (Worker by 1,423px)');
+console.log('\nNot rebuilt in Next.js: rewriting a working app to reach a clause about headers');
+console.log('and layout would spend the story on the part nobody asked to change.');
+
+rule('187. The policy, sent — and the one place the clause had to bend');
+const secServer = createApp({ httpsRequired: false }).listen(0);
+await new Promise((resolve) => secServer.once('listening', resolve));
+const secBase = `http://127.0.0.1:${secServer.address().port}`;
+const secR = await fetch(`${secBase}/api/health`, { headers: { origin: 'https://evil.example' } });
+console.log(`  Content-Security-Policy: ${secR.headers.get('content-security-policy')}`);
+console.log(`  X-Frame-Options:         ${secR.headers.get('x-frame-options')}`);
+console.log(`  X-Content-Type-Options:  ${secR.headers.get('x-content-type-options')}`);
+console.log(`  CORS for evil.example:   ${secR.headers.get('access-control-allow-origin') ?? '(none — was *)'}`);
+await new Promise((resolve) => secServer.close(resolve));
+console.log(`\nThe clause asks for "default-src 'self'", and it is there. Applied alone it blanks`);
+console.log('every meme in the product: the artwork is stored as data:image/svg+xml, and img-src');
+console.log('falls back to default-src. So exactly one directive widens it, with its reason:');
+for (const [what, why] of Object.entries(CSP_EXEMPTIONS)) console.log(`\n  ${what}\n    ${why}`);
+console.log('\n`npm run check:browser` drives Chrome through every tab at 390px and 1280px under');
+console.log('this policy — 22 loads, 0 violations, 0 overflow — then re-runs Review and');
+console.log("Templates under the literal \"default-src 'self'\": 12 violations, 0 of 12 memes");
+console.log('shown. The control is what makes the clean run mean something.');
+
+rule('188. HTTPS, enforced where the connection is real');
+const secProd = createApp({ httpsRequired: true }).listen(0);
+await new Promise((resolve) => secProd.once('listening', resolve));
+const secProdBase = `http://127.0.0.1:${secProd.address().port}`;
+const secGet = await fetch(`${secProdBase}/api/authors`, { redirect: 'manual' });
+const secPost = await fetch(`${secProdBase}/api/auth/login`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', redirect: 'manual',
+});
+const secProbe = await fetch(`${secProdBase}/api/health`, { redirect: 'manual' });
+const secTls = await fetch(`${secProdBase}/api/health`, { headers: { 'x-forwarded-proto': 'https' } });
+await new Promise((resolve) => secProd.close(resolve));
+console.log(`  GET  over http            → ${secGet.status} ${secGet.headers.get('location')}`);
+console.log(`  POST over http            → ${secPost.status} (refused, not redirected: the body already crossed in the clear)`);
+console.log(`  /api/health over http     → ${secProbe.status} (the load balancer probes the instance directly)`);
+console.log(`  via the TLS terminator    → ${secTls.status}, HSTS: ${secTls.headers.get('strict-transport-security')}`);
+console.log('\nOn by default in production, off in development — localhost has no certificate.');
+console.log('X-Forwarded-Proto is believed only when enforcement is on, because trusting it');
+console.log('with no proxy in front lets any client declare its own connection secure.');
+console.log(`\nOne policy, three senders: the API through helmet, Vite by importing it, nginx by`);
+console.log(`a copy the test suite compares byte for byte. ${cspHeader().split(';').length} directives, no 'unsafe-inline'.`);
+
+console.log('\nSTORY-031 complete — every response carries the policy, HTTPS is enforced where it');
+console.log('is real, and every tab fits a phone; measured in a browser, not asserted in a string\n');
+
+// ── STORY-032: Backend Architecture Setup ──────────────────────────────────
+// REQ-003, REQ-004, REQ-008. "Input validation using Joi and JWT authentication."
+
+rule('189. Every route, sent garbage');
+const valServer = createApp().listen(0);
+await new Promise((resolve) => valServer.once('listening', resolve));
+const valBase = `http://127.0.0.1:${valServer.address().port}/api`;
+const valTok = (await (await fetch(`${valBase}/auth/login`, {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ email: 'ops@example.test', password: 'ops-password' }),
+})).json()).token;
+const valCall = async (method, path, body) => {
+  const r = await fetch(`${valBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', authorization: `Bearer ${valTok}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+console.log('JWT authentication has existed since STORY-064. Input validation had not: no');
+console.log('library, no schema. Measured before this story by sending malformed input to all');
+console.log('77 routes:');
+console.log('\n  routes that answered 500:          28 of 77');
+console.log('  typical error handed to the caller: invalid input syntax for type bigint: "NaN"');
+console.log('  JavaScript crashes:                 platforms.includes is not a function (and two more)');
+console.log('  garbage accepted and STORED:        POST /authors { name: 123, email: ["x"] } → 201,');
+console.log('                                      email saved as the text {"x"}');
+const valBad = await valCall('POST', '/authors', { name: 123, email: ['x'] });
+const valId = await valCall('POST', '/drafts/abc/approve', {});
+console.log(`\nNow:\n  POST /authors { name: 123, email: ["x"] } → ${valBad.status}`);
+for (const d of valBad.body.details) console.log(`      ${d.part}.${d.path}: ${d.message}`);
+console.log(`  POST /drafts/abc/approve                  → ${valId.status}  ${valId.body.error}`);
+
+rule('190. Validation strips what a route does not declare — and that is only safe if proven');
+const valGood = await valCall('POST', '/authors', { name: '  Demo Validation  ', email: `demo-validation-${Date.now()}@example.test`, isAdmin: true });
+console.log(`  POST /authors { name: "  Demo Validation  ", …, isAdmin: true } → ${valGood.status}`);
+console.log(`      stored name: "${valGood.body.name}"   (trimmed; isAdmin never reached the handler)`);
+console.log('\nUnknown fields are stripped rather than refused, because the UI sends a few that');
+console.log('some handlers ignore, and refusing them would turn a harmless extra into an outage.');
+console.log('Stripping has its own failure: a field a handler needs but the schema forgot is');
+console.log('silently deleted. So tests/inputValidation.test.js reads every handler\'s source from');
+console.log('the live router and fails if it reads a field its schema does not declare — and was');
+console.log('seen to fail when awardName was removed from one schema on purpose.');
+
+rule('191. Authorisation first, validation second');
+const valAuditor = (await (await fetch(`${valBase}/auth/login`, {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ email: 'auditor@example.test', password: 'compliance-only' }),
+})).json()).token;
+const valForbidden = await fetch(`${valBase}/meme-templates`, {
+  method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${valAuditor}` },
+  body: JSON.stringify({ key: 'BAD KEY' }),
+});
+console.log(`  compliance session, POST /meme-templates with a bad body → ${valForbidden.status}`);
+console.log('\nThe first version validated before checking permission, so this returned 400 and a');
+console.log('list of the input rules for an action the caller may not take. A refusal should say');
+console.log('"you may not", and teach nothing about how to ask. The existing RBAC suite caught it.');
+await new Promise((resolve) => valServer.close(resolve));
+console.log('\nNot done: splitting the 1,500-line routes file into controllers. It changes no');
+console.log('behaviour, and every scan that proves a property of the API — tenant walking, input');
+console.log('coverage — reads the live router, so it can be done mechanically when it is wanted.');
+
+console.log('\nSTORY-032 complete — 0 of 77 routes crash on bad input (was 28), nothing malformed is');
+console.log('stored, and a test proves no handler reads a field its schema forgot\n');
+
+// ── STORY-033: Database Architecture Setup ─────────────────────────────────
+// REQ-005, REQ-006, REQ-008. "Secure access with roles and permissions configured."
+
+rule('192. Who the application was, as far as the database knew');
+console.log('STORY-019 built permissions in the application. Measured before this story, the');
+console.log('database under it had none:');
+console.log('\n  the API connected as:   anvi — a Postgres SUPERUSER');
+console.log('  tables it owned:        46 of 46');
+console.log('  audit log protection:   three triggers, which the owner can switch off —');
+console.log('                          and stages 103–105 of this demo did exactly that,');
+console.log('                          through the application\'s own connection');
+console.log('\nApplication permissions decide what a *user* may do. Once the process itself is');
+console.log('compromised they help with nothing, because the process held every key.');
+const { rows: [dbWho] } = await query(
+  `SELECT current_user AS role, r.rolsuper,
+          (SELECT COUNT(*)::int FROM pg_tables WHERE schemaname = 'public' AND tableowner = current_user) AS owns
+     FROM pg_roles r WHERE r.rolname = current_user`,
+);
+console.log(`\nNow: connected as ${dbWho.role} · superuser ${dbWho.rolsuper} · owns ${dbWho.owns} tables`);
+
+rule('193. Asked to do what an attacker holding this connection would try');
+for (const [what, sql] of [
+  ['switch off the audit triggers', 'ALTER TABLE audit_log DISABLE TRIGGER ALL'],
+  ['rewrite an audit row        ', "UPDATE audit_log SET action = 'x' WHERE id = 1"],
+  ['drop a table                ', 'DROP TABLE drafts'],
+  ['forge a migration record    ', "INSERT INTO schema_migrations (filename) VALUES ('999_fake.sql')"],
+  ['grant itself the owner      ', 'GRANT anvi TO ale_app_login'],
+]) {
+  const dbTry = await query(sql).then(() => 'ALLOWED', (e) => `refused — ${e.message}`);
+  console.log(`  ${what}  ${dbTry}`);
+}
+const dbOwnerTry = await ownerQuery("UPDATE audit_log SET action = 'x' WHERE id = 1").then(() => 'ALLOWED', (e) => e.message.split('.')[0]);
+console.log(`\nand the owner, trying an ordinary UPDATE: ${dbOwnerTry}`);
+console.log('\nTwo walls. The privilege stops the application login; the trigger stops a mistaken');
+console.log('write by anyone who has UPDATE. Only disabling the trigger gets past both, and that');
+console.log('now takes the owner\'s credentials — the threat STORY-013\'s seals exist to catch.');
+console.log('A separate login, not SET ROLE on the owner\'s connection: a session that could SET');
+console.log('ROLE could RESET ROLE, and an injected statement would simply switch back.');
+
+rule('194. Reported, not only enforced');
+const dbReady = (await readiness({})).checks.find((c) => c.id === 'privileges');
+console.log(`  /ready privileges: ${dbReady.ok ? 'ok' : 'NOT OK'} — ${dbReady.detail}`);
+const dbRow = (await runChecks({})).find((c) => c.id === 'db.least_privilege');
+console.log(`  Trust tab, db.least_privilege: ${dbRow.passed ? 'pass' : 'FAIL'}`);
+console.log('\nRunning as the owner is refused by /ready in production and reported on the Trust');
+console.log('tab everywhere. A new table from a later migration is granted to the app by default,');
+console.log('and a test fails if the set of tables the app cannot update is anything other than');
+console.log('the declared append-only ones.');
+console.log('\nThe whole test suite and this demo run as ale_app_login. The only things that needed');
+console.log('the owner were the migrations, and the tampering this demo does on purpose.');
+console.log('\nNot done: Sequelize, which the build note names. The schema is 32 hand-written');
+console.log('migrations whose comments carry most of this project\'s reasoning; an ORM on top would');
+console.log('be a second description of the schema free to disagree with the first.');
+
+console.log('\nSTORY-033 complete — the database refuses the application anything it does not need,');
+console.log('including the power to rewrite its own audit log\n');
+
+// ── STORY-034: Deployment Architecture Setup ───────────────────────────────
+// REQ-007, REQ-008. "Containerised for consistent deployment, and secure with
+// vulnerability scanning using Clair."
+
+rule('195. Files reviewed for nineteen stories, read the way Docker reads them');
+const ctrYaml = (await import('yaml')).default;
+const ctrCompose = ctrYaml.parse(await readFile(new URL('../../docker-compose.yml', import.meta.url), 'utf8'));
+console.log('Docker is not installed here and never has been. So the question is what can be');
+console.log('proved without it — and parsing the Compose file as Compose does was enough to find:');
+console.log('\n  services the file defined before this story:  1  (postgres)');
+console.log('  read as *volumes* instead:                    migrate, api, worker, client');
+console.log('\nThe top-level `volumes:` block sat between two services, so YAML nested the rest');
+console.log('under it. `docker compose up` could only ever have started a database.');
+console.log(`\n  now: services ${Object.keys(ctrCompose.services).join(', ')} · volumes ${Object.keys(ctrCompose.volumes).join(', ')}`);
+
+rule('196. Two configs that were each right, and wrong together');
+const ctrNginx = await readFile(new URL('../../client/nginx.conf', import.meta.url), 'utf8');
+console.log('STORY-031 made the API enforce HTTPS in production, reading X-Forwarded-Proto.');
+console.log('In the container stack the API runs in production, behind nginx — and nginx never');
+console.log('forwarded that header. Every browser call through the UI would have looked like');
+console.log('plain http: GETs redirected, POSTs refused. The stack would have refused its own UI.');
+console.log(`\n  nginx now: ${ctrNginx.match(/proxy_set_header X-Forwarded-Proto [^;]+;/)[0]}`);
+console.log('\nNo unit test could have caught it — it exists only where two files meet. The build');
+console.log('note\'s own phrase, "ensuring both services can communicate effectively", is what');
+console.log('prompted checking the seam.');
+console.log('\nAlso fixed: no .dockerignore (every COPY shipped host node_modules and any .env into');
+console.log('an image layer); base images now pinned by digest; nginx replaced by the unprivileged');
+console.log('image, which does not start as root.');
+
+rule('197. The scan that can run here, and the one that cannot');
+const ctrAudit = await new Promise((resolve) => {
+  import('node:child_process').then(({ execFile }) =>
+    execFile('npm', ['audit', '--omit=dev', '--json'], { cwd: new URL('../..', import.meta.url).pathname }, (_e, out) => {
+      try { resolve(JSON.parse(out).metadata.vulnerabilities); } catch { resolve(null); }
+    }));
+});
+console.log('Dependencies, scanned against the advisory database:');
+console.log('  before: 3 moderate in production (qs, via Express — one a denial of service in the');
+console.log('          query-string parser every request passes through), 3 high in development');
+console.log('          (puppeteer-core, added by STORY-031 for the browser check)');
+console.log(`  now:    ${ctrAudit ? `${ctrAudit.total} (critical ${ctrAudit.critical}, high ${ctrAudit.high}, moderate ${ctrAudit.moderate})` : 'could not reach the registry from here'}`);
+console.log('\nIn CI as a gate (`npm audit --omit=dev --audit-level=moderate`) before the tests.');
+console.log('\nImages, scanned by Clair — written, never run: there is no Docker here to build an');
+console.log('image and no registry to scan one from. The job pins quay/clair-action@v0.0.16 and sets');
+console.log('return-code: 1, because the action\'s default is 0 — it reports vulnerabilities and');
+console.log('passes the build. The example in its own README is a scan that can never fail CI.');
+
+console.log('\nSTORY-034 complete — the stack is defined the way Compose reads it, the UI can reach');
+console.log('the API through it, dependencies are scanned and gate the build, and the image scan');
+console.log('is written to fail when it finds something; building and scanning images still needs Docker\n');
+
+// ── STORY-038: API Gateway for Managing and Monitoring Integrations ────────
+// REQ-009, REQ-014. "All external API interactions routed through the gateway;
+// when it fails, the failure is logged and the administrator alerted."
+
+rule('198. The gateway that said everything went through it');
+console.log('STORY-016\'s gateway header: "Every outbound call in this system goes through here:');
+console.log('the social platforms, the email provider, the directory search, and the Anthropic');
+console.log('content API." Measured before this story:');
+console.log('\n  the directory search:        called directly — no timeout, no retry, no record');
+console.log('  on the Trust tab\'s panel:     absent, because the panel listed what was logged');
+console.log('  policy:                      one for everything (10s, 3 attempts)');
+console.log('  a failure:                   logged; nobody told; retried on every call while down');
+const gwHealth = await integrationHealth({ sinceHours: 24 });
+console.log('\nNow, every declared integration and its policy:');
+for (const h of gwHealth.filter((x) => x.policy)) {
+  console.log(`  ${h.service.padEnd(14)} ${h.kind.padEnd(13)} ${String(h.policy.timeoutMs / 1000).padStart(3)}s × ${h.policy.maxAttempts}   calls ${String(h.calls).padStart(3)}   circuit ${h.circuit.state}`);
+}
+console.log('\nAnthropic gets 60s: generation takes tens of seconds, and the shared 10s ceiling');
+console.log('abandoned calls that would have succeeded. An undeclared service is refused outright.');
+
+rule('199. A directory goes down');
+let gwClock = new Date();
+const gwNow = () => gwClock;
+let gwCalls = 0;
+const gwFail = async () => { gwCalls += 1; throw Object.assign(new Error('503 Service Unavailable'), { status: 503 }); };
+for (let i = 1; i <= 3; i += 1) {
+  const r = await callExternal({ service: 'eventFinder', operation: 'search', fn: gwFail, maxAttempts: 1, sleep: async () => {}, now: gwNow }).catch((e) => e.message);
+  console.log(`  call ${i}: ${r}`);
+}
+const gwOpen = (await query("SELECT state, consecutive_failures, alerted_at FROM integration_circuits WHERE service = 'eventFinder'")).rows[0];
+console.log(`\n  circuit: ${gwOpen.state} after ${gwOpen.consecutive_failures} failed calls · operators alerted: ${gwOpen.alerted_at ? 'yes' : 'no'}`);
+const gwLog = (await listAuditLog({ entityType: 'integration', limit: 10 })).filter((e) => e.entity_id === 'eventFinder');
+for (const e of gwLog.reverse()) console.log(`  audit: ${e.action}${e.metadata.operators ? ' → ' + e.metadata.operators.join(', ') : ''}`);
+
+rule('200. And is left alone until it might be back');
+const gwBefore = gwCalls;
+const gwShort = await callExternal({ service: 'eventFinder', operation: 'search', fn: gwFail, maxAttempts: 1, now: gwNow }).catch((e) => e.message);
+console.log(`  next call: ${gwShort}`);
+console.log(`  provider actually called: ${gwCalls - gwBefore} time(s)`);
+const gwScout = await searchAllDirectories({});
+console.log(`\n  the scout meanwhile: ${gwScout.length} listings from the other two directories, none from eventFinder`);
+console.log('  — one directory down is fewer listings this month, not none, and the Trust tab says why.');
+gwClock = new Date(gwClock.getTime() + 301_000);
+const gwTrial = await callExternal({ service: 'eventFinder', operation: 'search', fn: async () => [], maxAttempts: 1, now: gwNow });
+const gwClosed = (await query("SELECT state FROM integration_circuits WHERE service = 'eventFinder'")).rows[0];
+console.log(`\n  five minutes later, one trial call: ${Array.isArray(gwTrial) ? 'answered' : gwTrial} → circuit ${gwClosed.state}`);
+console.log('\nOpened once, alerted once, and a trial that fails re-opens without paging again. A');
+console.log('400 — a post too long for the platform — never counts: that is the provider working.');
+console.log('Email is the one integration that cannot be alerted about by email; its outage is');
+console.log('recorded as unannounceable and shown on the Trust tab instead.');
+
+rule('201. What this is not');
+console.log('The build note names AWS API Gateway or Kong. Both are a network hop in front of the');
+console.log('providers, and neither exists here to configure. What the clause asks for — every');
+console.log('interaction routed through one place, a policy per integration, failures detected,');
+console.log('logged and alerted — is in-process, in the one module every adapter already calls,');
+console.log('and a source scan fails the build if any production code calls out around it.');
+await query("DELETE FROM integration_circuits WHERE service = 'eventFinder'");
+
+console.log('\nSTORY-038 complete — every integration goes through the gateway with its own policy,');
+console.log('and a failing one is stopped, logged and reported to the operators once\n');
 await closePool();
 

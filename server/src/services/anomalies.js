@@ -177,6 +177,133 @@ async function producerDisagreement(client, authorId) {
  * explicitly. A dashboard listing only its findings looks the same whether it
  * checked and found nothing or never checked at all.
  */
+/**
+ * Two drafts that say nearly the same thing (STORY-026).
+ *
+ * Every other detector here watches *reviewer* behaviour — who approves in
+ * seconds, who never rejects, where the monitor disagrees with a producer. None
+ * of them looks at the content, and REQ-006's second clause for this story is
+ * explicitly about content: "an anomaly is detected in generated content; when
+ * it deviates from typical patterns; then it is escalated for human review."
+ *
+ * Near-duplicate output is the content anomaly worth detecting without a model.
+ * A generator repeating itself is a real failure — the author's feed carrying
+ * the same sentence twice in a week is exactly what a person would catch and a
+ * per-draft score cannot, because every individual draft is fine. It is only
+ * anomalous *relative to its neighbours*, which is what "deviates from typical
+ * patterns" means and why no amount of scoring one draft at a time finds it.
+ *
+ * Deliberately not machine learning, for the reason STORY-021 gave about the
+ * same build-note suggestion: no training data at this size, and a score a
+ * reviewer cannot audit is worse than none. Jaccard overlap on distinctive
+ * words is crude and legible — "these two share 82% of their words" is a claim
+ * somebody can check by reading them.
+ */
+async function nearDuplicateContent(client, authorId) {
+  const { rows } = await client.query(
+    `SELECT id, platform, content, status, week_of FROM drafts
+      WHERE ($1::bigint IS NULL OR author_id = $1)
+        AND status = ANY($2)
+      ORDER BY id`,
+    [authorId, ['pending_approval', 'escalated', 'approved']],
+  );
+
+  // Words of four letters or more, **and any run of digits**.
+  //
+  // Dropping digits is what made "simulated post 0" and "simulated post 39"
+  // identical: both reduced to {simulated, post}, and the only thing that
+  // distinguished them was the part being discarded. Keeping numbers as tokens
+  // separates them at 50% overlap without needing a length floor that would
+  // exclude genuinely short social posts — which are short by nature, and where
+  // real repetition matters most.
+  const words = (text) =>
+    new Set(String(text).toLowerCase().match(/[a-z][a-z'-]{3,}|\d+/g) ?? []);
+
+  // A duplicate claim needs enough words to be a claim at all.
+  //
+  // The first version of this had no floor and reported 40 findings on the
+  // demo's "simulated post 0" … "simulated post 39" fixtures: the tokenizer
+  // drops digits, so every one of them reduces to {simulated, post} and matches
+  // every other at 100%. Two words agreeing is not evidence of anything, and
+  // those 40 false positives buried the 10 genuine repetitions underneath them.
+  //
+  // Same rule every other detector in this file already follows — state the
+  // minimum, and decline to conclude below it.
+  // Four, not eight. A social post is short on purpose; the earlier floor of
+  // eight excluded 47 of 62 drafts and lost real repetitions along with the
+  // false ones. Four distinctive tokens is the point below which "they share
+  // all their words" stops being evidence.
+  const MIN_WORDS = 4;
+  const substantial = rows.filter((r) => words(r.content).size >= MIN_WORDS);
+  const tooShort = rows.length - substantial.length;
+
+  // Grouped, not pairwise. Twelve identical drafts are 66 pairs and one
+  // finding, and a reviewer handed 66 rows will read none of them. The first
+  // version of this reported pairs and the demo printed a wall of them, which
+  // is how a detector that is right becomes a detector nobody uses.
+  const groups = [];
+  const placed = new Set();
+
+  for (let i = 0; i < substantial.length; i += 1) {
+    if (placed.has(substantial[i].id)) continue;
+    const a = words(substantial[i].content);
+
+    const members = [substantial[i]];
+    let lowest = 1;
+    for (let j = i + 1; j < substantial.length; j += 1) {
+      if (placed.has(substantial[j].id)) continue;
+      const b = words(substantial[j].content);
+      const overlap = [...a].filter((w) => b.has(w)).length / new Set([...a, ...b]).size;
+      if (overlap >= config.nearDuplicateOverlap) {
+        members.push(substantial[j]);
+        lowest = Math.min(lowest, overlap);
+      }
+    }
+    if (members.length < 2) continue;
+
+    for (const m of members) placed.add(m.id);
+    groups.push({
+      draftIds: members.map((m) => Number(m.id)),
+      platforms: [...new Set(members.map((m) => m.platform))],
+      weeks: [...new Set(members.map((m) => String(m.week_of).slice(0, 10)))],
+      overlap: Number(lowest.toFixed(2)),
+      excerpt: String(members[0].content).replace(/\s+/g, ' ').slice(0, 70),
+      detail:
+        `${members.length} drafts say the same thing (${Math.round(lowest * 100)}% overlap): ` +
+        `${members.map((m) => m.id).join(', ')}`,
+    });
+  }
+
+  const findings = groups;
+
+  return {
+    id: 'content.near_duplicate',
+    label: 'Two drafts that say nearly the same thing',
+    confidence:
+      findings.length > 0
+        ? CONFIDENCE.REPORTED
+        // A duplicate needs a pair, and a pair of substantial drafts. Saying
+        // "clear" below that would be the detector claiming a result it cannot
+        // have.
+        : substantial.length < 2
+          ? CONFIDENCE.INSUFFICIENT
+          : CONFIDENCE.CLEAR,
+    findings,
+    sample: {
+      drafts: rows.length,
+      compared: substantial.length,
+      tooShort,
+      duplicated: findings.reduce((n, g) => n + g.draftIds.length, 0),
+    },
+    because:
+      substantial.length < 2
+        ? `only ${substantial.length} draft(s) long enough to compare — a duplicate needs a pair`
+        : `compared ${substantial.length} drafts of at least ${MIN_WORDS} distinctive words at a ` +
+          `${Math.round(config.nearDuplicateOverlap * 100)}% overlap threshold` +
+          (tooShort > 0 ? `; ${tooShort} too short to judge and not compared` : ''),
+  };
+}
+
 export async function detectAnomalies({ authorId = null } = {}, client = pool) {
   // `authorId` null means an operator asking across every tenant. Passing it
   // through rather than filtering afterwards matters: a reviewer's decision
@@ -185,6 +312,7 @@ export async function detectAnomalies({ authorId = null } = {}, client = pool) {
   const detectors = await Promise.all([
     fastDecisions(client, authorId),
     neverRejects(client, authorId),
+    nearDuplicateContent(client, authorId),
     producerDisagreement(client, authorId),
   ]);
 

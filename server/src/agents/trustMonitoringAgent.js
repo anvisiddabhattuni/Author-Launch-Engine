@@ -7,6 +7,7 @@ import { verifyAuditLog } from './auditSecurityAgent.js';
 import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { runChecks, scoreOf } from '../services/governance.js';
+import { systemStatus } from '../services/healthMonitoring.js';
 import { outboundInventory } from '../services/outboundPaths.js';
 import { classifyRoutes, surfaceCoverage } from '../services/tenantSurface.js';
 import {
@@ -37,6 +38,49 @@ import { DECIDABLE, assess, thresholds } from '../services/escalationPolicy.js';
 export const ACTOR = 'TrustMonitoringAgent';
 
 /**
+ * The three kinds of thing a producer decides about (STORY-026).
+ *
+ * STORY-008 built this monitor on one objection: an agent that writes the
+ * material and also decides whether the material is good enough has nobody
+ * checking the second half. That objection was answered for press materials and
+ * left standing for the other two — not by oversight in the logic but by an
+ * absence in the schema, which had a `pr_material_id` column and no other.
+ *
+ * Written as data rather than three near-identical functions, because three
+ * copies of a re-derivation rule is three chances for it to drift — the same
+ * reason `escalationPolicy` exists at all.
+ */
+const MONITORED = [
+  {
+    kind: 'pr_material',
+    table: 'pr_materials',
+    column: 'pr_material_id',
+    label: (row) => `${row.type} press material`,
+    // Press kits that were superseded are history; STORY-005 already refuses
+    // decisions on withdrawn copy, so re-judging it would spend a reviewer's
+    // attention on something the system will not let them action.
+    from: `pr_materials p JOIN pr_kits k ON k.id = p.kit_id`,
+    where: `k.status <> 'superseded'`,
+  },
+  {
+    kind: 'draft',
+    table: 'drafts',
+    column: 'draft_id',
+    label: (row) => `${row.format === 'meme' ? 'meme' : 'post'} for ${row.platform}`,
+    from: 'drafts p',
+    where: 'TRUE',
+  },
+  {
+    kind: 'outreach_message',
+    table: 'outreach_messages',
+    column: 'outreach_message_id',
+    label: () => 'outreach message',
+    from: 'outreach_messages p',
+    where: 'TRUE',
+  },
+];
+
+/**
  * Re-derives the escalation decision for every press material still awaiting a
  * human, and acts on what it finds.
  *
@@ -44,28 +88,36 @@ export const ACTOR = 'TrustMonitoringAgent';
  * distributed has had its human moment; reopening it would be the monitor
  * overruling a person, which is not what it is for.
  */
-export async function monitorPressMaterials({ authorId }) {
+export async function monitorContent({ authorId, kinds = MONITORED.map((m) => m.kind) }) {
   return withTransaction(async (client) => {
     const limits = thresholds();
-
-    const { rows: materials } = await client.query(
-      `SELECT p.* FROM pr_materials p
-         JOIN pr_kits k ON k.id = p.kit_id
-        WHERE p.author_id = $1
-          AND p.status = ANY($2)
-          AND k.status <> 'superseded'
-        ORDER BY p.id`,
-      [authorId, DECIDABLE],
-    );
 
     const raised = [];
     const confirmed = [];
     const producerStricter = [];
+    let examined = 0;
+    const byKind = {};
+
+    for (const spec of MONITORED.filter((m) => kinds.includes(m.kind))) {
+      const { rows: materials } = await client.query(
+        `SELECT p.* FROM ${spec.from}
+          WHERE p.author_id = $1
+            AND p.status = ANY($2)
+            AND ${spec.where}
+          ORDER BY p.id`,
+        [authorId, DECIDABLE],
+      );
+      examined += materials.length;
+      byKind[spec.kind] = { examined: materials.length, raised: 0 };
 
     for (const material of materials) {
       const verdict = assess({
         confidence: material.confidence,
         themeAlignment: material.theme_alignment,
+        // The floor STORY-018 and STORY-023 added. The monitor was re-deriving
+        // a decision from two of the three numbers the producer used, which
+        // would have made it disagree with a correct producer on voice.
+        voice: material.voice_score ?? null,
       });
 
       const agreed = verdict.status === material.status;
@@ -76,27 +128,28 @@ export async function monitorPressMaterials({ authorId }) {
       // decision that should already have been applied.
       if (verdict.status === 'escalated' && material.status !== 'escalated') {
         const { rows: updated } = await client.query(
-          `UPDATE pr_materials SET status = 'escalated', updated_at = now()
+          `UPDATE ${spec.table} SET status = 'escalated', updated_at = now()
             WHERE id = $1 RETURNING *`,
           [material.id],
         );
 
         const escalation = await record(
-          { material, verdict, limits, detectedBy: 'monitor', agreed: false, client },
+          { material, spec, verdict, limits, detectedBy: 'monitor', agreed: false, client },
         );
 
         await recordAction(
           {
             actor: ACTOR,
             action: 'escalation.raised',
-            entityType: 'pr_material',
+            entityType: spec.kind,
             entityId: material.id,
             authorId,
             before: material,
             after: updated[0],
             metadata: {
               escalationId: Number(escalation.id),
-              materialType: material.type,
+              materialType: spec.label(material),
+              contentKind: spec.kind,
               reasons: verdict.reasons,
               confidence: Number(material.confidence),
               themeAlignment: Number(material.theme_alignment),
@@ -110,7 +163,8 @@ export async function monitorPressMaterials({ authorId }) {
           client,
         );
 
-        raised.push({ ...updated[0], escalationId: Number(escalation.id) });
+        raised.push({ ...updated[0], kind: spec.kind, escalationId: Number(escalation.id) });
+        byKind[spec.kind].raised += 1;
         continue;
       }
 
@@ -119,7 +173,7 @@ export async function monitorPressMaterials({ authorId }) {
       // surprising ones.
       if (material.status === 'escalated' && verdict.status === 'escalated') {
         const escalation = await record(
-          { material, verdict, limits, detectedBy: 'producer', agreed: true, client },
+          { material, spec, verdict, limits, detectedBy: 'producer', agreed: true, client },
         );
         if (escalation.inserted) confirmed.push(material);
         continue;
@@ -129,14 +183,14 @@ export async function monitorPressMaterials({ authorId }) {
       // left exactly as it is: this agent does not clear concerns.
       if (material.status === 'escalated' && verdict.status !== 'escalated') {
         const escalation = await record(
-          { material, verdict, limits, detectedBy: 'producer', agreed: false, client },
+          { material, spec, verdict, limits, detectedBy: 'producer', agreed: false, client },
         );
         if (escalation.inserted) {
           await recordAction(
             {
               actor: ACTOR,
               action: 'escalation.producer_stricter',
-              entityType: 'pr_material',
+              entityType: spec.kind,
               entityId: material.id,
               authorId,
               metadata: {
@@ -159,6 +213,83 @@ export async function monitorPressMaterials({ authorId }) {
       // fine is not a queue anybody reads.
       void agreed;
     }
+    }
+
+    // Clause two of the story: an anomaly detected in generated content is
+    // *escalated*, not merely displayed. Every anomaly detector before this one
+    // reported to a dashboard and moved nothing — which is the STORY-018 shape
+    // again, a number shown and not acted on (STORY-026).
+    //
+    // Run after the per-item re-derivation because it asks a different kind of
+    // question. Every other check scores one draft on its own; a duplicate is
+    // only visible between two, so no amount of per-item scoring can find it.
+    // Deliberately the pool, not the transaction client. `detectAnomalies` runs
+    // its detectors with Promise.all, which is correct on a pool — each gets
+    // its own connection — and wrong on a single client, where concurrent
+    // queries on one connection are a pg deprecation warning today and an error
+    // in pg@9. The detectors only read already-committed rows, so reading
+    // outside this transaction costs nothing.
+    const anomalies = await detectAnomalies({ authorId });
+    const duplicates = anomalies.detectors.find((d) => d.id === 'content.near_duplicate');
+    const spec = MONITORED.find((m) => m.kind === 'draft');
+
+    for (const finding of duplicates?.findings ?? []) {
+      // Escalate every member except the first. The first is not more correct
+      // than the others — it is simply the one a reviewer can keep — and
+      // escalating all of them would put a whole group in front of a human for
+      // one decision. A group of three leaves two escalated, which is the
+      // number of drafts that actually need removing.
+      for (const laterId of finding.draftIds.slice(1)) {
+      const { rows: draftRows } = await client.query(
+        `SELECT * FROM drafts WHERE id = $1 AND status = ANY($2)`,
+        [laterId, DECIDABLE],
+      );
+      const draft = draftRows[0];
+      if (!draft) continue;
+
+      const { rows: updated } = await client.query(
+        `UPDATE drafts SET status = 'escalated', updated_at = now()
+          WHERE id = $1 RETURNING *`,
+        [laterId],
+      );
+
+      const escalation = await record({
+        material: draft,
+        spec,
+        verdict: { status: 'escalated', reasons: ['near_duplicate'] },
+        limits,
+        detectedBy: 'monitor',
+        agreed: false,
+        client,
+      });
+
+      await recordAction(
+        {
+          actor: ACTOR,
+          action: 'escalation.raised',
+          entityType: 'draft',
+          entityId: laterId,
+          authorId,
+          before: draft,
+          after: updated[0],
+          metadata: {
+            escalationId: escalation.id ? Number(escalation.id) : null,
+            contentKind: 'draft',
+            reasons: ['near_duplicate'],
+            keptInstead: finding.draftIds[0],
+            groupSize: finding.draftIds.length,
+            overlap: finding.overlap,
+            note: finding.detail,
+          },
+        },
+        client,
+      );
+
+      raised.push({ ...updated[0], kind: 'draft', reason: 'near_duplicate' });
+      byKind.draft = byKind.draft ?? { examined: 0, raised: 0 };
+      byKind.draft.raised += 1;
+      }
+    }
 
     await recordAction(
       {
@@ -168,29 +299,46 @@ export async function monitorPressMaterials({ authorId }) {
         entityId: authorId,
         authorId,
         metadata: {
-          examined: materials.length,
+          examined,
           raised: raised.length,
           confirmed: confirmed.length,
           producerStricter: producerStricter.length,
+          // Per kind, because "examined 33" hides which third of the system was
+          // actually looked at — the thing that went unnoticed for eighteen
+          // stories (STORY-026).
+          byKind,
+          // Content anomalies are a different kind of finding from a
+          // re-derived threshold decision, and collapsing them would hide
+          // which one moved something.
+          duplicatesEscalated: (duplicates?.findings ?? []).length,
           thresholds: limits,
         },
       },
       client,
     );
 
-    return { examined: materials.length, raised, confirmed, producerStricter };
+    return { examined, byKind, raised, confirmed, producerStricter };
   });
 }
 
-/** One escalation row per material, whoever noticed first. */
-async function record({ material, verdict, limits, detectedBy, agreed, client }) {
+/**
+ * The press-only name STORY-008 introduced, kept as an alias.
+ *
+ * Every caller of it meant "re-check what is waiting"; none of them meant
+ * "re-check only press". Now that the monitor covers all three content types,
+ * the old name would be a lie about scope, so it forwards rather than narrows.
+ */
+export const monitorPressMaterials = ({ authorId }) => monitorContent({ authorId });
+
+/** One escalation row per item, whoever noticed first, whatever kind it is. */
+async function record({ material, spec, verdict, limits, detectedBy, agreed, client }) {
   const { rows } = await client.query(
     `INSERT INTO escalations
-       (author_id, pr_material_id, reasons, confidence, theme_alignment,
-        threshold_confidence, threshold_theme_alignment,
+       (author_id, ${spec.column}, reasons, confidence, theme_alignment, voice_score,
+        threshold_confidence, threshold_theme_alignment, threshold_voice,
         detected_by, producer_status, monitor_status, agreed)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (pr_material_id) DO NOTHING
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     ON CONFLICT DO NOTHING
      RETURNING *`,
     [
       material.author_id,
@@ -198,8 +346,12 @@ async function record({ material, verdict, limits, detectedBy, agreed, client })
       verdict.reasons,
       material.confidence,
       material.theme_alignment,
+      // Voice became a floor for press in STORY-018 and outreach in STORY-023,
+      // and nothing recorded what the floor had been at the time.
+      material.voice_score ?? null,
       limits.confidence,
       limits.themeAlignment,
+      limits.voice,
       detectedBy,
       material.status,
       verdict.status,
@@ -210,7 +362,7 @@ async function record({ material, verdict, limits, detectedBy, agreed, client })
   if (rows[0]) return { ...rows[0], inserted: true };
 
   const { rows: existing } = await client.query(
-    'SELECT * FROM escalations WHERE pr_material_id = $1',
+    `SELECT * FROM escalations WHERE ${spec.column} = $1`,
     [material.id],
   );
   return { ...existing[0], inserted: false };
@@ -228,14 +380,28 @@ export async function listEscalations({ authorId, openOnly = false }) {
       // LEFT JOIN: a dashboard that silently omits every on-demand kit's
       // escalations is worse than no dashboard, because it reads as "nothing
       // is wrong" (STORY-018).
+      // All three content types (STORY-026). This was an inner join on
+      // pr_materials, which was correct while escalations could only be about
+      // press — and silently dropped every draft and outreach escalation the
+      // moment the monitor could raise one. The same failure widening a
+      // required column caused in STORY-018, caught here by the demo rather
+      // than by a user.
       `SELECT e.*,
-              p.type, p.headline, p.status AS material_status, p.kit_id,
-              COALESCE(m.title, 'PR materials requested directly') AS milestone_title,
-              (p.status = ANY($2)) AS open
+              t.target_type, t.target_id,
+              COALESCE(p.type, d.format, 'outreach') AS type,
+              COALESCE(p.headline, LEFT(d.content, 80), o.subject) AS headline,
+              COALESCE(p.status, d.status, o.status) AS material_status,
+              p.kit_id,
+              COALESCE(m.title, CASE WHEN e.pr_material_id IS NOT NULL
+                                     THEN 'PR materials requested directly' END) AS milestone_title,
+              (COALESCE(p.status, d.status, o.status) = ANY($2)) AS open
          FROM escalations e
-         JOIN pr_materials p ON p.id = e.pr_material_id
-         JOIN pr_kits k      ON k.id = p.kit_id
-         LEFT JOIN milestones m ON m.id = k.milestone_id
+         JOIN escalation_targets t ON t.id = e.id
+         LEFT JOIN pr_materials p      ON p.id = e.pr_material_id
+         LEFT JOIN pr_kits k           ON k.id = p.kit_id
+         LEFT JOIN milestones m        ON m.id = k.milestone_id
+         LEFT JOIN drafts d            ON d.id = e.draft_id
+         LEFT JOIN outreach_messages o ON o.id = e.outreach_message_id
         WHERE e.author_id = $1
         ORDER BY e.id DESC`,
       [authorId, DECIDABLE],
@@ -386,13 +552,14 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
   // The expensive one first, and only once: verification walks every seal.
   const auditIntegrity = await verifyAuditLog({});
 
-  const [checks, anomalies, queue, integrations] = await Promise.all([
+  const [checks, anomalies, queue, integrations, system] = await Promise.all([
     runChecks({ auditIntegrity }),
     detectAnomalies({ authorId }),
     authorId ? findAwaitingApproval({ authorId }) : Promise.resolve(null),
     // Every outbound call, by service (STORY-016). A provider degrading is
     // visible here before it is visible as failed work.
     integrationHealth({ sinceHours: 24, authorId }),
+    systemStatus({}),
   ]);
 
   const governance = scoreOf(checks);
@@ -429,6 +596,10 @@ export async function trustDashboard({ authorId, now = new Date() } = {}) {
     auditIntegrity: auditIntegrity.status,
     sealedThrough: auditIntegrity.sealedThrough,
     integrations,
+    // Whether the processes are up, from the checks that measured them
+    // (STORY-027). Until now this panel said "worker last ran 4 min ago" and
+    // could say nothing about the API a reader was looking at it through.
+    system,
   };
 
   await recordAction({

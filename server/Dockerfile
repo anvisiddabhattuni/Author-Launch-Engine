@@ -5,7 +5,11 @@
 # tested artefact, and the README says so beside it. Treating an unbuilt
 # Dockerfile as a finished deployment is the failure this story is most likely
 # to produce.
-FROM node:22-alpine AS deps
+# Base images are pinned by digest (STORY-034). A tag like `22-alpine` is a
+# name for whatever was pushed last; the same Dockerfile built on two days can
+# produce two different images, and a vulnerability scan of one says nothing
+# about the other. The tag stays beside the digest so a person can read it.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY server/package.json ./server/
@@ -13,7 +17,7 @@ COPY client/package.json ./client/
 # The workspace root install, without the client's build toolchain.
 RUN npm ci --omit=dev --workspace server --include-workspace-root
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 # Never root. A container that runs as root turns a code-execution bug into a
 # host problem.

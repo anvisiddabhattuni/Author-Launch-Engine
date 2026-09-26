@@ -47,7 +47,12 @@ async function request(path, options = {}) {
     // a dead database turned into a Sign in button that did nothing and said
     // nothing.
     const serverMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
-    throw new Error(serverMessage || `Request failed with ${response.status}`);
+    // Per-field problems from input validation (STORY-032) ride along, so a
+    // page can point at the line that is wrong instead of printing the prose.
+    throw Object.assign(new Error(serverMessage || `Request failed with ${response.status}`), {
+      status: response.status,
+      details: Array.isArray(payload?.details) ? payload.details : null,
+    });
   }
   return payload;
 }
@@ -200,6 +205,9 @@ export const api = {
   // STORY-069 — meme vs text, and the mix proposals that follow from it
   formatPerformance: (authorId) => request(`/authors/${authorId}/format-performance`),
 
+  // STORY-029 — every published post's series, and what the numbers can say
+  contentPerformance: (authorId) => request(`/authors/${authorId}/content-performance`),
+
   collectEngagement: (authorId, formatEffect = 0) =>
     request(`/authors/${authorId}/engagement/collect`, { method: 'POST', body: { formatEffect } }),
 
@@ -225,6 +233,10 @@ export const api = {
 
   retireMemeTemplate: (key, reason) =>
     request(`/meme-templates/${key}/retire`, { method: 'POST', body: { reason } }),
+
+  // STORY-027 — is the system up, from the checks that measured it
+  systemHealth: () => request('/system/health'),
+  runHealthCheck: () => request('/system/health-check', { method: 'POST' }),
 
   // STORY-065 — background worker run health
   jobs: () => request('/jobs'),

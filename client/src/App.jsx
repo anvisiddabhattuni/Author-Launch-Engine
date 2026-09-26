@@ -113,7 +113,7 @@ export function App() {
           ['/press', 'Press'],
           ['/worker', 'Worker'],
           ['/templates', 'Meme templates'],
-          ['/performance', 'Meme vs text'],
+          ['/performance', 'Performance'],
           ['/trust', 'Trust'],
           ['/audit', 'Audit log'],
         ].map(([to, label]) => (
@@ -135,7 +135,7 @@ export function App() {
           <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/press" element={<PressPage author={author} book={book} />} />
           <Route path="/worker" element={<WorkerPage />} />
-          <Route path="/trust" element={<TrustPage author={author} />} />
+          <Route path="/trust" element={<TrustPage author={author} user={user} />} />
           <Route
             path="/performance"
             element={<PerformancePage author={author} user={user} />}

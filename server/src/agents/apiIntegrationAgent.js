@@ -28,9 +28,9 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { config } from '../config.js';
 import { pool } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { routeFor } from '../services/integrationRoutes.js';
 
 export const ACTOR = 'APIIntegrationAgent';
 
@@ -120,13 +120,46 @@ export async function callExternal({
   operation,
   fn,
   authorId = null,
-  maxAttempts = config.apiMaxAttempts,
-  timeoutMs = config.apiTimeoutMs,
-  backoffMs = config.apiBackoffMs,
+  // Per-integration policy (STORY-038). An explicit argument still wins, so a
+  // test can shorten a timeout without redeclaring the route.
+  maxAttempts,
+  timeoutMs,
+  backoffMs,
   sleep = wait,
+  now = () => new Date(),
 }) {
+  // Refused before anything else if nobody declared this integration.
+  const policy = routeFor(service);
+  maxAttempts ??= policy.maxAttempts;
+  timeoutMs ??= policy.timeoutMs;
+  backoffMs ??= policy.backoffMs;
+
   const callId = randomUUID();
   let lastError = null;
+
+  // The circuit. A provider that has stopped answering is not asked again
+  // until its cooldown has passed — every call used to spend three attempts
+  // and their backoff on it, for as long as it stayed down.
+  const circuit = await admit({ service, policy, now: now() });
+  if (!circuit.allowed) {
+    await logAttempt({
+      service,
+      operation,
+      callId,
+      attempt: 0,
+      outcome: 'short_circuited',
+      status: 503,
+      durationMs: 0,
+      retryable: false,
+      error: `circuit open since ${circuit.openedAt.toISOString()}; next trial after ${circuit.retryAt.toISOString()}`,
+      authorId,
+    });
+    throw new ExternalApiError(
+      `${service} is not being called: it failed ${circuit.failures} time(s) in a row and its circuit ` +
+        `is open until ${circuit.retryAt.toISOString()}`,
+      { status: 503, service, operation },
+    );
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const started = Date.now();
@@ -147,6 +180,7 @@ export async function callExternal({
         durationMs: Date.now() - started,
         authorId,
       });
+      await recordSuccess({ service, now: now() });
 
       return result;
     } catch (error) {
@@ -187,6 +221,11 @@ export async function callExternal({
       await sleep(backoff);
     }
   }
+
+  // Only a failure that says the provider is unwell counts toward opening the
+  // circuit. A 400 for a post that is too long is the provider answering
+  // correctly; counting it would let one bad draft take a platform offline.
+  if (isRetryable(lastError)) await recordFailure({ service, policy, error: lastError, now: now() });
 
   await recordAction({
     actor: ACTOR,
@@ -229,23 +268,222 @@ export async function httpJson(url, { signal, ...init } = {}) {
   return response.json();
 }
 
+// ---------------------------------------------------------------------------
+// The circuit (STORY-038)
+// ---------------------------------------------------------------------------
+
+/**
+ * May a call go out? Closed: yes. Open and cooling down: no. Open and cooled:
+ * one trial is let through as half-open — its result decides whether the
+ * circuit closes or opens again.
+ */
+async function admit({ service, policy, now }) {
+  const { rows } = await pool.query('SELECT * FROM integration_circuits WHERE service = $1', [service]);
+  const c = rows[0];
+  if (!c || c.state === 'closed') return { allowed: true, state: 'closed' };
+
+  const retryAt = new Date(new Date(c.opened_at).getTime() + policy.cooldownMs);
+  if (c.state === 'open' && now < retryAt) {
+    return { allowed: false, openedAt: new Date(c.opened_at), retryAt, failures: c.consecutive_failures };
+  }
+  if (c.state === 'open') {
+    await pool.query(
+      "UPDATE integration_circuits SET state = 'half_open', updated_at = $2 WHERE service = $1 AND state = 'open'",
+      [service, now],
+    );
+  }
+  return { allowed: true, state: 'half_open' };
+}
+
+async function recordSuccess({ service, now }) {
+  const { rows } = await pool.query(
+    `UPDATE integration_circuits
+        SET state = 'closed', consecutive_failures = 0, last_success_at = $2, updated_at = $2
+      WHERE service = $1
+      RETURNING opened_at`,
+    [service, now],
+  );
+  // Only an opened circuit closing is news. A success on a healthy one is
+  // just a success, and writing an audit row for it would bury the ones that
+  // matter under every published post.
+  const previous = rows[0];
+  if (previous?.opened_at) {
+    await pool.query('UPDATE integration_circuits SET opened_at = NULL, alerted_at = NULL WHERE service = $1', [service]);
+    await recordAction({
+      actor: ACTOR,
+      action: 'integration.circuit_closed',
+      entityType: 'integration',
+      entityId: service,
+      metadata: {
+        service,
+        downForSeconds: Math.round((now - new Date(previous.opened_at)) / 1000),
+      },
+    });
+  }
+}
+
+async function recordFailure({ service, policy, error, now }) {
+  const { rows } = await pool.query(
+    `INSERT INTO integration_circuits (service, consecutive_failures, last_failure_at, last_error, updated_at)
+     VALUES ($1, 1, $2, $3, $2)
+     ON CONFLICT (service) DO UPDATE
+       SET consecutive_failures = integration_circuits.consecutive_failures + 1,
+           last_failure_at = $2, last_error = $3, updated_at = $2
+     RETURNING *`,
+    [service, now, String(error?.message ?? 'unknown').slice(0, 500)],
+  );
+  const c = rows[0];
+  // A failed trial re-opens at once; otherwise the threshold decides.
+  const opens = c.state === 'half_open' || (c.state === 'closed' && c.consecutive_failures >= policy.failureThreshold);
+  if (!opens) return;
+
+  await pool.query(
+    "UPDATE integration_circuits SET state = 'open', opened_at = $2, updated_at = $2 WHERE service = $1",
+    [service, now],
+  );
+  await recordAction({
+    actor: ACTOR,
+    action: 'integration.circuit_opened',
+    entityType: 'integration',
+    entityId: service,
+    metadata: {
+      service,
+      consecutiveFailures: c.consecutive_failures,
+      lastError: c.last_error,
+      reopenedAfterTrial: c.state === 'half_open',
+      cooldownSeconds: Math.round(policy.cooldownMs / 1000),
+    },
+  });
+  // Told once per opening, and only on the first — a trial that fails
+  // re-opens the circuit without paging anyone again.
+  if (c.state === 'closed') await alertOperators({ service, policy, circuit: c });
+}
+
+/**
+ * Tells the infrastructure team an integration has stopped answering — the
+ * story's second clause, "logs the failure and alerts the administrator".
+ *
+ * The same recipients STORY-027 pages about outages: whoever holds
+ * `system.operate`. Email is the one integration that cannot be alerted about
+ * this way, and that is recorded rather than attempted.
+ */
+async function alertOperators({ service, policy, circuit }) {
+  if (!policy.alertable) {
+    await recordAction({
+      actor: ACTOR,
+      action: 'integration.alert_unreachable',
+      entityType: 'integration',
+      entityId: service,
+      metadata: {
+        service,
+        reason: `${service} is the channel alerts are sent through, so its own outage cannot be announced by it. Visible on the Trust tab.`,
+      },
+    });
+    return;
+  }
+  // Imported here, not at the top: healthMonitoring imports emailApi, which
+  // imports this module.
+  const { operators } = await import('../services/healthMonitoring.js');
+  const { emailApi } = await import('../services/emailApi.js');
+  const people = await operators();
+  if (people.length === 0) {
+    await recordAction({
+      actor: ACTOR,
+      action: 'integration.alert_unreachable',
+      entityType: 'integration',
+      entityId: service,
+      metadata: { service, reason: 'No active account holds system.operate.' },
+    });
+    return;
+  }
+  const alerted = [];
+  for (const person of people) {
+    try {
+      await emailApi.send({
+        to: person.email,
+        subject: `Integration down: ${service}`,
+        body: [
+          `The ${service} integration has failed ${circuit.consecutive_failures} calls in a row.`,
+          `Last error: ${circuit.last_error}`,
+          '',
+          `The gateway has stopped calling it for ${Math.round(policy.cooldownMs / 1000)}s, then will let one`,
+          'call through to test it. You will not be told again unless it recovers and fails again.',
+          'Trust tab → External integrations.',
+        ].join('\n'),
+        via: 'system.alert_integration',
+      });
+      alerted.push(person.email);
+    } catch (error) {
+      // An alert that fails must not turn one broken integration into a
+      // crashed request for the caller who happened to trip it.
+      console.error(`[gateway] could not alert ${person.email}: ${error.message}`);
+    }
+  }
+  await pool.query('UPDATE integration_circuits SET alerted_at = now() WHERE service = $1', [service]);
+  await recordAction({
+    actor: ACTOR,
+    action: 'integration.alerted',
+    entityType: 'integration',
+    entityId: service,
+    metadata: { service, operators: alerted },
+  });
+}
+
+/** Every circuit that is not closed, for the dashboard and the governance check. */
+export async function circuitStates(client = pool) {
+  const { rows } = await client.query('SELECT * FROM integration_circuits ORDER BY service');
+  return rows;
+}
+
 /** What each integration has been doing, for the trust dashboard and for incidents. */
 export async function integrationHealth({ sinceHours = 24, authorId = null } = {}, client = pool) {
   const { rows } = await client.query(
     `SELECT service,
-            COUNT(*)::int                                        AS attempts,
-            COUNT(DISTINCT call_id)::int                         AS calls,
-            COUNT(*) FILTER (WHERE outcome = 'ok')::int          AS ok,
-            COUNT(*) FILTER (WHERE outcome = 'timed_out')::int   AS timed_out,
-            COUNT(*) FILTER (WHERE outcome = 'retrying')::int    AS retried,
-            COUNT(*) FILTER (WHERE outcome = 'failed')::int      AS failed,
-            ROUND(AVG(duration_ms))::int                         AS avg_ms,
-            MAX(duration_ms)::int                                AS slowest_ms
+            -- A short-circuited call was never made. Counting it as a call and an
+            -- attempt made an open circuit look like heavy traffic to a dead
+            -- provider — the opposite of what happened (found in STORY-038's own
+            -- screenshot).
+            COUNT(*) FILTER (WHERE outcome <> 'short_circuited')::int                AS attempts,
+            COUNT(DISTINCT call_id) FILTER (WHERE outcome <> 'short_circuited')::int AS calls,
+            COUNT(*) FILTER (WHERE outcome = 'ok')::int            AS ok,
+            COUNT(*) FILTER (WHERE outcome = 'timed_out')::int     AS timed_out,
+            COUNT(*) FILTER (WHERE outcome = 'retrying')::int      AS retried,
+            COUNT(*) FILTER (WHERE outcome = 'failed')::int        AS failed,
+            COUNT(*) FILTER (WHERE outcome = 'short_circuited')::int AS short_circuited,
+            ROUND(AVG(duration_ms) FILTER (WHERE outcome <> 'short_circuited'))::int AS avg_ms,
+            MAX(duration_ms)::int                                  AS slowest_ms
        FROM api_interactions
       WHERE created_at > now() - make_interval(hours => $1)
         AND ($2::bigint IS NULL OR author_id = $2 OR author_id IS NULL)
       GROUP BY service ORDER BY service`,
     [sinceHours, authorId],
   );
-  return rows;
+  const circuits = new Map((await circuitStates(client)).map((c) => [c.service, c]));
+  const { INTEGRATIONS } = await import('../services/integrationRoutes.js');
+
+  // Every declared integration, not only the ones with traffic (STORY-038).
+  // The directory search was absent from this panel for twenty stories because
+  // the panel only listed what had been logged — and nothing was logging it.
+  // A declared integration with no calls is shown as such, not left out.
+  const byService = new Map(rows.map((r) => [r.service, r]));
+  const services = [...new Set([...Object.keys(INTEGRATIONS), ...byService.keys()])].sort();
+  return services.map((service) => {
+    const r = byService.get(service) ?? {
+      service, attempts: 0, calls: 0, ok: 0, timed_out: 0, retried: 0, failed: 0, short_circuited: 0,
+      avg_ms: null, slowest_ms: null,
+    };
+    const route = INTEGRATIONS[service];
+    const c = circuits.get(service);
+    return {
+      ...r,
+      // Not in the registry: registered at runtime by the demo or a test.
+      kind: route?.kind ?? 'registered at runtime (demo / tests)',
+      policy: route
+        ? { timeoutMs: route.timeoutMs, maxAttempts: route.maxAttempts, failureThreshold: route.failureThreshold, cooldownMs: route.cooldownMs }
+        : null,
+      circuit: c
+        ? { state: c.state, consecutiveFailures: c.consecutive_failures, openedAt: c.opened_at, lastError: c.last_error, alertedAt: c.alerted_at }
+        : { state: 'closed', consecutiveFailures: 0 },
+    };
+  });
 }

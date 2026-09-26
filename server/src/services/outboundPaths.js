@@ -106,6 +106,25 @@ export const OUTBOUND_PATHS = [
       'ever (STORY-025).',
   },
   {
+    id: 'system.alert_outage',
+    kind: EXEMPT,
+    module: 'services/healthMonitoring.js',
+    sends: 'notice that a component has stopped answering, to accounts holding system.operate',
+    why:
+      'An outage notice carries no tenant content — it names a component and a time. Holding it ' +
+      'behind approval would mean the system asks a human for permission to say it is down, ' +
+      'which it may not be able to ask. Once per outage, never re-sent while it persists (STORY-027).',
+  },
+  {
+    id: 'system.alert_integration',
+    kind: EXEMPT,
+    module: 'agents/apiIntegrationAgent.js',
+    sends: 'notice that an external integration stopped answering, to accounts holding system.operate',
+    why:
+      'Names a provider and its last error; carries no tenant content. Sent once when a circuit opens, ' +
+      'never while it stays open (STORY-038). Not sent for email, which cannot announce its own outage.',
+  },
+  {
     id: 'approval.notify_waiting',
     kind: EXEMPT,
     module: 'agents/approvalNotificationAgent.js',

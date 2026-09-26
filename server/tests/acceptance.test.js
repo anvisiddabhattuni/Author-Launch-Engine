@@ -296,16 +296,16 @@ describe('Append-only audit log (REQ-005)', () => {
     const [entry] = await listAuditLog({ authorId, limit: 1 });
     await assert.rejects(
       () => query('UPDATE audit_log SET action = $1 WHERE id = $2', ['tampered', entry.id]),
-      /append-only/,
+      /append-only|permission denied/,
     );
   });
 
   it('rejects DELETE at the database level', async () => {
     const [entry] = await listAuditLog({ authorId, limit: 1 });
-    await assert.rejects(() => query('DELETE FROM audit_log WHERE id = $1', [entry.id]), /append-only/);
+    await assert.rejects(() => query('DELETE FROM audit_log WHERE id = $1', [entry.id]), /append-only|permission denied/);
   });
 
   it('rejects TRUNCATE at the database level', async () => {
-    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only/);
+    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only|permission denied/);
   });
 });

@@ -1,7 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { config } from '../config.js';
 import { closePool } from '../db/pool.js';
+import { recordStart, recordStop } from '../services/deployment.js';
+import { startHeartbeat, startMonitor } from '../services/healthMonitoring.js';
 
 import { tick } from './queue.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const { version } = JSON.parse(readFileSync(join(here, '../../package.json'), 'utf8'));
 
 /**
  * The background worker (STORY-065).
@@ -17,6 +26,29 @@ import { tick } from './queue.js';
 const poll = config.workerPollSeconds * 1000;
 let stopping = false;
 let current = null;
+
+/**
+ * The worker is an instance too (STORY-027).
+ *
+ * Until this it had no row in `deployments`: the process that runs every
+ * sweep in the system was invisible to the record of what is running, and
+ * "the worker is down" could only be inferred from jobs not finishing. Now
+ * it records itself, beats, and checks on the API — which is the only thing
+ * that can notice the API is gone, since the API cannot notice that itself.
+ */
+let deployment = null;
+let stopHeartbeat = () => {};
+let stopMonitor = () => {};
+const register = () =>
+  recordStart({ version, commit: process.env.GIT_COMMIT ?? '', component: 'worker' });
+try {
+  deployment = await register();
+  stopHeartbeat = startHeartbeat({ deploymentId: deployment.id, reregister: register });
+  stopMonitor = startMonitor({});
+} catch (error) {
+  // Same rule as the API: losing the record is bad, refusing to work is worse.
+  console.error(`[worker] could not record this instance: ${error.message}`);
+}
 
 async function loop() {
   while (!stopping) {
@@ -54,10 +86,18 @@ async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   console.log(`[worker] ${signal} received — finishing the job in hand`);
+  stopHeartbeat();
+  stopMonitor();
   try {
     await current;
   } catch {
     /* already logged */
+  }
+  try {
+    const deploymentId = stopHeartbeat.currentDeploymentId?.() ?? deployment?.id;
+    if (deploymentId) await recordStop({ deploymentId, reason: signal, clean: true });
+  } catch (error) {
+    console.error(`[worker] could not record the stop: ${error.message}`);
   }
   await closePool();
   process.exit(0);

@@ -33,7 +33,12 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
 
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      # Two connections (STORY-033). Migrations as the owner; the app and the
+      # tests as the restricted login, so CI proves the product works without
+      # the power to rewrite its own audit log.
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
+      APP_DB_PASSWORD: ci-app-password
       # The API refuses to start in production without this, which is the point
       # of that check — so CI has to set one rather than the check being untested.
       JWT_SECRET: ci-only-not-a-secret
@@ -46,6 +51,12 @@ jobs:
           cache: npm
 
       - run: npm ci
+      # STORY-034. The vulnerability scan that can run without Docker: every
+      # dependency the production image ships, against the advisory database.
+      # Fails the build on anything moderate or worse; there were three
+      # (qs, via Express) when this was added, and they were fixed, not muted.
+      - name: Scan production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
       - run: npm run db:reset
       - run: npm test
 
@@ -74,3 +85,31 @@ jobs:
       - run: docker build -f server/Dockerfile -t ale-api:${{ github.sha }} .
       - run: docker build -f server/Dockerfile.worker -t ale-worker:${{ github.sha }} .
       - run: docker build -f client/Dockerfile -t ale-client:${{ github.sha }} .
+
+      # STORY-034 — image scanning with Clair, as the story asks. NOT RUN, like
+      # everything in this file: written against quay/clair-action's action.yaml
+      # as published, pinned to the release current when it was written.
+      #
+      # `return-code: '1'` is the line that matters. The action's default is
+      # '0' — it reports vulnerabilities and passes the build anyway — so the
+      # example in its own README is a scan that can never fail CI.
+      - name: Save images for scanning
+        run: |
+          docker save -o api.tar ale-api:${{ github.sha }}
+          docker save -o worker.tar ale-worker:${{ github.sha }}
+          docker save -o client.tar ale-client:${{ github.sha }}
+      - name: Scan the API image
+        uses: quay/clair-action@v0.0.16
+        with: { image-path: api.tar, format: sarif, output: clair-api.sarif, return-code: '1' }
+      - name: Scan the worker image
+        uses: quay/clair-action@v0.0.16
+        with: { image-path: worker.tar, format: sarif, output: clair-worker.sarif, return-code: '1' }
+      - name: Scan the client image
+        uses: quay/clair-action@v0.0.16
+        with: { image-path: client.tar, format: sarif, output: clair-client.sarif, return-code: '1' }
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clair-reports
+          path: clair-*.sarif

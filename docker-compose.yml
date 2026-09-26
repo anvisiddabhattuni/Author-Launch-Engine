@@ -13,7 +13,7 @@
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     container_name: ale-postgres
     environment:
       POSTGRES_USER: postgres
@@ -29,8 +29,6 @@ services:
       timeout: 5s
       retries: 10
 
-volumes:
-  ale-pgdata:
 
   migrate:
     # Migrations run once, as their own unit, before anything serves.
@@ -43,7 +41,10 @@ volumes:
       dockerfile: server/Dockerfile
     command: ['node', 'server/src/db/migrate.js']
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      # The owner migrates; the app and worker below use the restricted login
+      # (STORY-033), whose password this step sets from APP_DB_PASSWORD.
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD before running the stack}
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
     depends_on:
@@ -56,10 +57,14 @@ volumes:
       dockerfile: server/Dockerfile
     ports: ['4000:4000']
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
       GIT_COMMIT: ${GIT_COMMIT:-}
+      # This stack has no TLS terminator in front of nginx, so a browser
+      # reaches it over http and enforcement would refuse every call. Off here;
+      # set ENFORCE_HTTPS=true where a terminator sets X-Forwarded-Proto.
+      ENFORCE_HTTPS: ${ENFORCE_HTTPS:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -69,7 +74,7 @@ volumes:
       context: .
       dockerfile: server/Dockerfile.worker
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
     depends_on:
@@ -86,3 +91,11 @@ volumes:
       dockerfile: client/Dockerfile
     ports: ['8080:8080']
     depends_on: [api]
+
+# At the end, where it belongs (STORY-034). This block used to sit between
+# `postgres` and `migrate`, so YAML read migrate, api, worker and client as
+# *volumes* — the file defined one service, and `docker compose up` could only
+# ever have started a database. Nobody noticed for nineteen stories because
+# the file had never been run; the test suite now parses it the way Compose does.
+volumes:
+  ale-pgdata:

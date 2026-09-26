@@ -32,6 +32,12 @@ export const PERMISSIONS = {
   TENANT_ACT_ALL: 'tenant.act.all',
   TENANT_MANAGE: 'tenant.manage',
   TEMPLATES_MANAGE: 'templates.manage',
+  /**
+   * Run health checks on demand and be told when a component goes down
+   * (STORY-027). "The infrastructure team" as a capability: every other alert
+   * goes to a tenant's reviewers, and an outage belongs to no tenant.
+   */
+  SYSTEM_OPERATE: 'system.operate',
 };
 
 const KNOWN = new Set(Object.values(PERMISSIONS));

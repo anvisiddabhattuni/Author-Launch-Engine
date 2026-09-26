@@ -114,13 +114,13 @@ describe('STORY-013: actions are logged in an append-only log', () => {
     const { rows } = await query('SELECT id FROM audit_log ORDER BY id DESC LIMIT 1');
     await assert.rejects(
       () => query("UPDATE audit_log SET action = 'x' WHERE id = $1", [rows[0].id]),
-      /append-only/,
+      /append-only|permission denied/,
     );
     await assert.rejects(
       () => query('DELETE FROM audit_log WHERE id = $1', [rows[0].id]),
-      /append-only/,
+      /append-only|permission denied/,
     );
-    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only/);
+    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only|permission denied/);
   });
 
   it('protects the seals the same way it protects the log', async () => {
@@ -129,7 +129,7 @@ describe('STORY-013: actions are logged in an append-only log', () => {
     assert.ok(checkpoint);
     await assert.rejects(
       () => query("UPDATE audit_checkpoints SET digest = 'x' WHERE id = $1", [checkpoint.id]),
-      /append-only/,
+      /append-only|permission denied/,
       'a checkpoint anyone can rewrite verifies nothing',
     );
   });

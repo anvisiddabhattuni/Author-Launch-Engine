@@ -52,3 +52,23 @@ export async function withTransaction(fn) {
 }
 
 export const closePool = () => pool.end();
+
+/**
+ * Runs one statement as the schema owner, on a connection opened for it.
+ *
+ * For the two places that legitimately need the owner's power and are not
+ * migrations: the demo, which disables the audit triggers to show that
+ * tampering is detected (STORY-013), and the tests that prove the
+ * application login *cannot* do what the owner can (STORY-033). The
+ * application itself never calls this — which is the point of it being
+ * separate rather than the pool having a switch.
+ */
+export async function ownerQuery(text, params) {
+  const client = new pg.Client({ connectionString: config.migrationDatabaseUrl });
+  await client.connect();
+  try {
+    return await client.query(text, params);
+  } finally {
+    await client.end();
+  }
+}

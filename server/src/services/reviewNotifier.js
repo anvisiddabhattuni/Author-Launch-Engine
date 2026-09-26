@@ -143,15 +143,26 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
       // LEFT JOIN for the same reason as above: an escalation on an on-demand
       // kit is exactly the kind a reviewer most needs to hear about, and an
       // inner join here silently withheld it (STORY-018).
-      `SELECT e.*, p.type, p.headline,
-              COALESCE(m.title, 'PR materials requested directly') AS milestone_title
+      // All three content types (STORY-026). An inner join on pr_materials was
+      // right while only press could be escalated; the moment the monitor could
+      // raise a draft, this query would have raised it and told nobody — the
+      // STORY-025 finding, reintroduced by widening the monitor.
+      `SELECT e.*,
+              t.target_type,
+              COALESCE(p.type, d.format, 'outreach') AS type,
+              COALESCE(p.headline, LEFT(d.content, 80), o.subject) AS headline,
+              COALESCE(m.title, CASE WHEN e.pr_material_id IS NOT NULL
+                                     THEN 'PR materials requested directly' END) AS milestone_title
          FROM escalations e
-         JOIN pr_materials p ON p.id = e.pr_material_id
-         JOIN pr_kits k      ON k.id = p.kit_id
-         LEFT JOIN milestones m ON m.id = k.milestone_id
+         JOIN escalation_targets t ON t.id = e.id
+         LEFT JOIN pr_materials p      ON p.id = e.pr_material_id
+         LEFT JOIN pr_kits k           ON k.id = p.kit_id
+         LEFT JOIN milestones m        ON m.id = k.milestone_id
+         LEFT JOIN drafts d            ON d.id = e.draft_id
+         LEFT JOIN outreach_messages o ON o.id = e.outreach_message_id
         WHERE e.author_id = $1
           AND e.detected_by = 'monitor'
-          AND p.status = 'escalated'
+          AND COALESCE(p.status, d.status, o.status) = 'escalated'
         ORDER BY e.id`,
       [authorId],
     );
@@ -181,17 +192,26 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
 
     for (const escalation of pending) {
       for (const reviewer of reviewers) {
-        const subject =
-          `Escalated by monitoring — ${escalation.type.replace('_', ' ')} for ` +
-          `${escalation.milestone_title}`;
+        // The notice has to describe three kinds of thing now (STORY-026).
+        // `milestone_title` is null for a draft and an outreach message, and
+        // "meme for null" is what a press-shaped subject line produces when
+        // handed something that is not press.
+        const about = escalation.milestone_title
+          ? `${escalation.type.replace('_', ' ')} for ${escalation.milestone_title}`
+          : escalation.target_type === 'draft'
+            ? `${escalation.type.replace('_', ' ')} post`
+            : 'outreach message';
+        const subject = `Escalated by monitoring — ${about}`;
         const body = [
           `Hello ${reviewer.name},`,
           '',
-          'An independent check flagged a press material that the drafting agent had queued for',
+          'An independent check flagged content that the drafting agent had queued for',
           'ordinary approval. It has been moved to escalated and is waiting on you.',
           '',
-          `Material: ${escalation.type.replace('_', ' ')} — "${escalation.headline}"`,
-          `Milestone: ${escalation.milestone_title}`,
+          `Content: ${about} — "${escalation.headline}"`,
+          // Only press has a milestone. Printing "Milestone: null" on a social
+          // draft tells a reviewer something false about what they are reading.
+          ...(escalation.milestone_title ? [`Milestone: ${escalation.milestone_title}`] : []),
           `Raised for: ${escalation.reasons.join(', ')}`,
           `Confidence ${Number(escalation.confidence).toFixed(2)} ` +
             `(floor ${Number(escalation.threshold_confidence).toFixed(2)}) · ` +

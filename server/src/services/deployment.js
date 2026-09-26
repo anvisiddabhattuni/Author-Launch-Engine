@@ -97,6 +97,29 @@ export async function readiness({ draining: override = null } = {}, client = poo
     });
   }
 
+  // Least privilege (STORY-033). The application login should own nothing
+  // and be no superuser; if it is either, the audit log's append-only promise
+  // can be undone by the process that writes it. Refused in production;
+  // reported, not refused, elsewhere — a developer running as the owner is a
+  // choice, and saying so is enough.
+  if (dbOk) {
+    const { rows: [who] } = await client.query(
+      `SELECT current_user AS role, r.rolsuper AS superuser,
+              (SELECT COUNT(*)::int FROM pg_tables WHERE schemaname = 'public' AND tableowner = current_user) AS owns
+         FROM pg_roles r WHERE r.rolname = current_user`,
+    );
+    const elevated = who.superuser || who.owns > 0;
+    checks.push({
+      id: 'privileges',
+      ok: !elevated || config.nodeEnv !== 'production',
+      detail: elevated
+        ? `connected as ${who.role}, which ${who.superuser ? 'is a superuser' : `owns ${who.owns} tables`} — the audit log's append-only rule can be switched off from here` +
+          (config.nodeEnv === 'production' ? '' : ' (allowed outside production)')
+        : `connected as ${who.role}: rows only, no schema, audit log insert-only`,
+      elevated,
+    });
+  }
+
   checks.push({
     id: 'accepting',
     ok: !isDrainingNow,
@@ -122,17 +145,37 @@ export async function readiness({ draining: override = null } = {}, client = poo
  * which commit it is running is the process itself, and a deployment record
  * produced by the deployer describes what it *intended* to start.
  */
-export async function recordStart({ version, commit = '', environment = config.nodeEnv } = {}) {
+export async function recordStart({
+  version,
+  commit = '',
+  environment = config.nodeEnv,
+  // Which process this is (STORY-027). The worker never recorded itself
+  // before — the process that runs every sweep was invisible to the release
+  // record — and `url` is where an API instance can be probed from outside
+  // its own process, which is the only kind of check that can tell a hung
+  // instance from a busy one.
+  component = 'api',
+  url = '',
+} = {}) {
   const expected = expectedMigrations();
   const applied = await appliedMigrations();
 
   const { rows } = await pool.query(
     `INSERT INTO deployments
        (version, commit_sha, environment, migrations_expected, migrations_applied,
-        status, instance)
-     VALUES ($1,$2,$3,$4,$5,'starting',$6)
+        status, instance, component, url, last_seen_at)
+     VALUES ($1,$2,$3,$4,$5,'starting',$6,$7,$8,now())
      RETURNING *`,
-    [version, commit, environment, expected.length, applied.length, `${hostname()}:${process.pid}`],
+    [
+      version,
+      commit,
+      environment,
+      expected.length,
+      applied.length,
+      `${hostname()}:${process.pid}`,
+      component,
+      url,
+    ],
   );
 
   await recordAction({
@@ -144,6 +187,7 @@ export async function recordStart({ version, commit = '', environment = config.n
       version,
       commit,
       environment,
+      component,
       migrationsExpected: expected.length,
       migrationsApplied: applied.length,
       // The number that matters during an incident, said plainly.

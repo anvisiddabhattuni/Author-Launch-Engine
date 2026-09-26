@@ -27,11 +27,16 @@ import {
   isRetryable,
   retryAfterMs,
 } from '../src/agents/apiIntegrationAgent.js';
+import { registerIntegration } from '../src/services/integrationRoutes.js';
 import { closePool, query } from '../src/db/pool.js';
 
 /** No real waiting: backoff is policy, and sleeping proves nothing. */
 const nosleep = () => Promise.resolve();
 const SERVICE = `test-${Date.now()}`;
+// Declared, because since STORY-038 the gateway refuses an integration nobody
+// declared. A threshold these tests never reach: they fail calls on purpose to
+// test retries, and the circuit that would open has its own suite.
+registerIntegration(SERVICE, { failureThreshold: 1_000_000 });
 
 const attemptsFor = async (operation) => {
   const { rows } = await query(

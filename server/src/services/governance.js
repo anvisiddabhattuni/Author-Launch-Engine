@@ -210,6 +210,46 @@ export const CHECKS = [
              AND id > COALESCE((SELECT material_id FROM pr_voice_watermark), 0)`,
   },
   {
+    id: 'integrations.circuits_closed',
+    severity: SEVERITY.QUALITY,
+    label: 'Every external integration is answering',
+    why: 'STORY-038 / REQ-009. An open circuit is a provider the gateway has stopped calling because it stopped answering.',
+    sql: "SELECT COUNT(*)::int AS n FROM integration_circuits WHERE state <> 'closed'",
+  },
+  {
+    id: 'db.least_privilege',
+    severity: SEVERITY.QUALITY,
+    label: 'The application connects to the database with the least power it needs',
+    why:
+      'STORY-033 / REQ-008. As a superuser or table owner, the process that writes the audit log can ' +
+      'switch off the triggers that keep it append-only.',
+    // Asked on the application's own connection, which is the one that matters.
+    sql: `SELECT (r.rolsuper OR EXISTS (SELECT 1 FROM pg_tables
+                                         WHERE schemaname = 'public' AND tableowner = current_user))::int AS n
+            FROM pg_roles r WHERE r.rolname = current_user`,
+  },
+  {
+    id: 'engagement.tracked',
+    severity: SEVERITY.QUALITY,
+    label: 'Every published post that has matured has been measured',
+    why: 'STORY-029 / REQ-007. A post nobody measured is a post the performance view is silently not about.',
+    sql: `SELECT COUNT(*)::int AS n FROM scheduled_posts sp
+           WHERE sp.status = 'published'
+             AND sp.published_at < now() - make_interval(hours => $1)
+             AND NOT EXISTS (SELECT 1 FROM engagement e WHERE e.scheduled_post_id = sp.id)`,
+    params: () => [config.engagementMaturityHours],
+  },
+  {
+    id: 'system.no_open_outage',
+    severity: SEVERITY.QUALITY,
+    label: 'Every component is answering',
+    why: 'STORY-027 / REQ-007. A row here is a component that stopped answering and has not come back.',
+    // Quality, not invariant: an outage is a thing that happens, not a promise
+    // broken. What would be a breach is an outage nobody was told about, and
+    // `outage.unreachable` on the audit log is where that is found.
+    sql: 'SELECT COUNT(*)::int AS n FROM outages WHERE resolved_at IS NULL',
+  },
+  {
     id: 'jobs.no_dead_letters',
     severity: SEVERITY.QUALITY,
     label: 'No scheduled work has been given up on',
@@ -305,10 +345,37 @@ export function scoreOf(results) {
     failedInvariants: failedInvariants.map((r) => r.id),
     failedQuality: failedQuality.map((r) => r.id),
     // The sentence a person should read first.
-    headline: failedInvariants.length > 0
-      ? `${failedInvariants.length} compliance invariant${failedInvariants.length === 1 ? '' : 's'} broken — content reached the outside without the approval this system promises.`
-      : failedQuality.length > 0
-        ? `Gates intact. ${failedQuality.length} governance check${failedQuality.length === 1 ? '' : 's'} degraded.`
-        : 'Every check passing.',
+    // Names what actually broke.
+    //
+    // This used to say "content reached the outside without the approval this
+    // system promises" for *any* failed invariant. That sentence is true of the
+    // gate checks and false of every other one — with only `audit.integrity`
+    // failing, the dashboard reported an escape that had not happened while the
+    // real finding (the log was altered) went unnamed. A headline that is right
+    // for the common case and wrong for the actual one is worse than a generic
+    // one, because it sends the reader to check the wrong thing.
+    headline: (() => {
+      if (failedInvariants.length === 0) {
+        return failedQuality.length > 0
+          ? `Gates intact. ${failedQuality.length} governance check${failedQuality.length === 1 ? '' : 's'} degraded.`
+          : 'Every check passing.';
+      }
+      // `failedInvariants` here is the array of check *objects*; the returned
+      // field of the same name is their ids. Reading it as ids is what 500'd
+      // the dashboard on the first attempt.
+      const ids = failedInvariants.map((r) => r.id);
+      const gates = ids.filter((id) => id.startsWith('gate.'));
+      const others = ids.filter((id) => !id.startsWith('gate.'));
+      const parts = [];
+      if (gates.length > 0) {
+        parts.push(
+          `content reached the outside without the approval this system promises (${gates.join(', ')})`,
+        );
+      }
+      if (others.length > 0) {
+        parts.push(`${others.join(', ')} broken`);
+      }
+      return `${failedInvariants.length} invariant${failedInvariants.length === 1 ? '' : 's'} broken — ${parts.join('; ')}.`;
+    })(),
   };
 }

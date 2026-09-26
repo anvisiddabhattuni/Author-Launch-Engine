@@ -47,9 +47,10 @@ export function UploadPage({ author }) {
     event.preventDefault();
     setBusy(true);
     setStatus(null);
+    let posts = [];
     try {
       // One post per line: "platform | text"
-      const posts = history
+      posts = history
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
@@ -65,7 +66,22 @@ export function UploadPage({ author }) {
       setStatus({ kind: 'ok', message: `Added ${posts.length} prior posts for voice matching.` });
       setHistory('');
     } catch (error) {
-      setStatus({ kind: 'error', message: error.message });
+      // Before STORY-032 a typo'd platform was stored and this said "Added".
+      // Now it is refused per line; say which line, in the author's terms.
+      const lines = (error.details ?? [])
+        .map((d) => d.path.match(/^posts\.(\d+)\.(\w+)/))
+        .filter(Boolean)
+        .map(([, i, field]) => {
+          const n = Number(i) + 1;
+          const shown = posts[Number(i)]?.[field];
+          return field === 'platform'
+            ? `Line ${n}: "${shown}" is not a platform posts are drafted for — use twitter, instagram, facebook or linkedin.`
+            : `Line ${n}: the ${field} is not valid.`;
+        });
+      setStatus({
+        kind: 'error',
+        message: lines.length ? `Nothing was added. ${lines.join(' ')}` : error.message,
+      });
     } finally {
       setBusy(false);
     }

@@ -8,6 +8,8 @@ import {
   tenantParam,
 } from '../middleware/auth.js';
 import { PERMISSIONS, grantMatrix, holds } from '../services/permissions.js';
+import { numericParam, validate } from '../middleware/validate.js';
+import { SCHEMAS } from './schemas.js';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
 import {
@@ -23,6 +25,7 @@ import {
 } from '../agents/tenantManagementAgent.js';
 import { integrationHealth } from '../agents/apiIntegrationAgent.js';
 import { deploymentHistory, readiness } from '../services/deployment.js';
+import { monitorAndAlert, systemStatus } from '../services/healthMonitoring.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
@@ -48,6 +51,7 @@ import {
 } from '../services/approvals.js';
 import { listAuditLog, recordAction } from '../services/auditLog.js';
 import { collectEngagement, compareFormats } from '../services/engagement.js';
+import { contentPerformance } from '../services/performanceMetrics.js';
 import { recordAwardOutcome } from '../services/awardOutcome.js';
 import { AWARD_OUTCOMES, findAwardsAwaitingOutcome, outcomeOf } from '../services/awards.js';
 import { anniversaryYears, findApproachingMilestones } from '../services/milestones.js';
@@ -82,7 +86,19 @@ import { MIN_POSTS_FOR_TRAIT, deriveVoice } from '../services/voiceProfile.js';
 
 export const router = Router();
 
-const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+/**
+ * Wraps a handler so a rejected promise reaches the error middleware.
+ *
+ * Keeps the handler's source on the wrapper (STORY-032): the input-validation
+ * coverage test reads it to find every field a handler reads, and fails when
+ * one is read that its schema does not declare — which is what makes it safe
+ * for validation to strip undeclared fields.
+ */
+const asyncRoute = (fn) => {
+  const wrapped = (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+  wrapped.source = fn.toString();
+  return wrapped;
+};
 
 // Order matters and is the whole point: authenticate answers "is a real person
 // behind this", enforceTenant answers "may they touch this data". Mounted here
@@ -93,11 +109,16 @@ router.use(enforceTenant);
 // Path tenants are checked here rather than in enforceTenant: router-level
 // middleware runs before Express populates req.params, so the check has to hang
 // off the parameter itself to see a value at all.
+// Numeric before tenant: `/authors/abc/books` used to reach Postgres as the
+// string "abc" for any session allowed to read across tenants (STORY-032).
+router.param('authorId', numericParam('authorId'));
 router.param('authorId', tenantParam);
+router.param('bookId', numericParam('bookId'));
+router.param('id', numericParam('id'));
 
 // --- Session (STORY-064 / REQ-005) ---
 
-router.post('/auth/login', asyncRoute(async (req, res) => {
+router.post('/auth/login', validate(SCHEMAS.login), asyncRoute(async (req, res) => {
   const { email, password } = req.body ?? {};
   res.json(await login({ email, password }));
 }));
@@ -132,7 +153,7 @@ router.get('/ready', asyncRoute(async (_req, res) => {
 }));
 
 /** What every external integration has been doing, and how well (STORY-016). */
-router.get('/integrations', asyncRoute(async (req, res) => {
+router.get('/integrations', validate(SCHEMAS.integrations), asyncRoute(async (req, res) => {
   const sinceHours = Number(req.query.sinceHours ?? 24);
   // An admin sees every tenant; an author sees their own calls and the
   // system-wide ones. `enforceTenant` has already filled in `authorId` for a
@@ -159,6 +180,26 @@ router.get('/deployments', asyncRoute(async (_req, res) => {
   res.json(await deploymentHistory({}));
 }));
 
+// --- System health (STORY-027 / REQ-007) ---
+
+/**
+ * What the checks found, assembled from the rows they wrote. Readable by
+ * anyone signed in, like /deployments: whether the system is up is not a
+ * secret from the people using it.
+ */
+router.get('/system/health', asyncRoute(async (_req, res) => {
+  res.json(await systemStatus({}));
+}));
+
+/**
+ * Perform the checks now. Has side effects — it can open an outage and page
+ * the operators — so it is the operators' to run.
+ */
+router.post('/system/health-check', requirePermission(PERMISSIONS.SYSTEM_OPERATE), asyncRoute(async (req, res) => {
+  const result = await monitorAndAlert({ checkedBy: `${req.user.email} (on demand)` });
+  res.json(result);
+}));
+
 // --- Authors, book content and social history (build step 1's backend) ---
 
 router.get('/authors', asyncRoute(async (req, res) => {
@@ -174,7 +215,7 @@ router.get('/authors', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/authors', asyncRoute(async (req, res) => {
+router.post('/authors', validate(SCHEMAS.createAuthor), asyncRoute(async (req, res) => {
   const { name, email, voiceProfile = {} } = req.body;
   if (!name || !email) throw Object.assign(new Error('name and email are required'), { status: 400 });
 
@@ -202,7 +243,7 @@ router.get('/authors/:authorId/books', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/authors/:authorId/books', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books', validate(SCHEMAS.createBook), asyncRoute(async (req, res) => {
   const { title, content, themes = [] } = req.body;
   if (!title || !content) {
     throw Object.assign(new Error('title and content are required'), { status: 400 });
@@ -224,7 +265,7 @@ router.post('/authors/:authorId/books', asyncRoute(async (req, res) => {
   res.status(201).json(rows[0]);
 }));
 
-router.post('/authors/:authorId/social-history', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/social-history', validate(SCHEMAS.socialHistory), asyncRoute(async (req, res) => {
   const { posts } = req.body;
   if (!Array.isArray(posts) || posts.length === 0) {
     throw Object.assign(new Error('posts must be a non-empty array'), { status: 400 });
@@ -259,7 +300,7 @@ router.post('/authors/:authorId/social-history', asyncRoute(async (req, res) => 
 
 // --- Drafting (build step 2) ---
 
-router.post('/authors/:authorId/books/:bookId/drafts', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books/:bookId/drafts', validate(SCHEMAS.draftPosts), asyncRoute(async (req, res) => {
   const drafts = await draftWeeklyPosts({
     authorId: Number(req.params.authorId),
     bookId: Number(req.params.bookId),
@@ -270,7 +311,7 @@ router.post('/authors/:authorId/books/:bookId/drafts', asyncRoute(async (req, re
   res.status(201).json(drafts);
 }));
 
-router.get('/drafts', asyncRoute(async (req, res) => {
+router.get('/drafts', validate(SCHEMAS.listDrafts), asyncRoute(async (req, res) => {
   const conditions = [];
   const params = [];
   for (const [column, value] of [
@@ -385,7 +426,7 @@ router.get('/authors/:authorId/weekly-coverage', asyncRoute(async (req, res) => 
 
 // --- Approval gate (build step 4 precondition) ---
 
-router.post('/drafts/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/drafts/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'drafts', Number(req.params.id));
   const draft = await approveDraft({
     draftId: Number(req.params.id),
@@ -395,7 +436,7 @@ router.post('/drafts/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE
   res.json(draft);
 }));
 
-router.post('/drafts/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/drafts/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'drafts', Number(req.params.id));
   const draft = await rejectDraft({
     draftId: Number(req.params.id),
@@ -413,7 +454,7 @@ router.post('/drafts/:id/schedule', asyncRoute(async (req, res) => {
   res.status(201).json(scheduled);
 }));
 
-router.get('/scheduled-posts', asyncRoute(async (req, res) => {
+router.get('/scheduled-posts', validate(SCHEMAS.listScheduled), asyncRoute(async (req, res) => {
   const params = [];
   let where = '';
   if (req.query.authorId) {
@@ -431,14 +472,14 @@ router.get('/scheduled-posts', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/scheduled-posts/publish-due', asyncRoute(async (req, res) => {
+router.post('/scheduled-posts/publish-due', validate(SCHEMAS.publishDue), asyncRoute(async (req, res) => {
   const published = await publishDue({ now: req.body?.now ? new Date(req.body.now) : new Date() });
   res.json(published);
 }));
 
 // --- Opportunities (STORY-002 build steps 1 and 2) ---
 
-router.post('/authors/:authorId/books/:bookId/opportunities/scout', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books/:bookId/opportunities/scout', validate(SCHEMAS.scout), asyncRoute(async (req, res) => {
   // `types` narrows the scan (STORY-010) — the story asks for a search *for
   // speaking opportunities*, and a podcast is not a speaking engagement.
   const requested = req.body?.types ?? null;
@@ -496,7 +537,7 @@ router.get('/authors/:authorId/opportunity-rejections', asyncRoute(async (req, r
   res.json(rows);
 }));
 
-router.get('/opportunities', asyncRoute(async (req, res) => {
+router.get('/opportunities', validate(SCHEMAS.listOpportunities), asyncRoute(async (req, res) => {
   const conditions = [];
   const params = [];
   // Qualify every column: this query joins outreach_messages, which carries its
@@ -565,7 +606,7 @@ router.get('/authors/:authorId/monthly-opportunities', asyncRoute(async (req, re
 
 // --- Outreach messages (STORY-002 build steps 3 to 5) ---
 
-router.post('/authors/:authorId/books/:bookId/outreach/draft', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books/:bookId/outreach/draft', validate(SCHEMAS.draftOutreach), asyncRoute(async (req, res) => {
   const messages = await draftOutreachMessages({
     authorId: Number(req.params.authorId),
     bookId: Number(req.params.bookId),
@@ -575,7 +616,7 @@ router.post('/authors/:authorId/books/:bookId/outreach/draft', asyncRoute(async 
   res.status(201).json(messages);
 }));
 
-router.get('/outreach-messages', asyncRoute(async (req, res) => {
+router.get('/outreach-messages', validate(SCHEMAS.listOutreach), asyncRoute(async (req, res) => {
   const conditions = [];
   const params = [];
   for (const [column, value] of [
@@ -603,7 +644,7 @@ router.get('/outreach-messages', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/outreach-messages/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/outreach-messages/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'outreach_messages', Number(req.params.id));
   const message = await approveOutreach({
     messageId: Number(req.params.id),
@@ -624,7 +665,7 @@ router.post('/outreach-messages/:id/approve', requirePermission(PERMISSIONS.CONT
   res.json(message);
 }));
 
-router.post('/outreach-messages/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/outreach-messages/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'outreach_messages', Number(req.params.id));
   const message = await rejectOutreach({
     messageId: Number(req.params.id),
@@ -684,7 +725,7 @@ router.get('/authors/:authorId/awards/awaiting-outcome', asyncRoute(async (req, 
  * Command for STORY-005. Recording a win is what triggers the win release; the
  * release is still held for review, and recording a loss draws nothing.
  */
-router.post('/milestones/:id/award-outcome', asyncRoute(async (req, res) => {
+router.post('/milestones/:id/award-outcome', validate(SCHEMAS.awardOutcome), asyncRoute(async (req, res) => {
   await assertOwns(req, 'milestones', Number(req.params.id));
   const { outcome, awardName = null, actor = 'author', notes = '' } = req.body ?? {};
   if (!outcome) {
@@ -704,7 +745,7 @@ router.post('/milestones/:id/award-outcome', asyncRoute(async (req, res) => {
 }));
 
 /** Read model for STORY-004: what is close enough to need a kit already. */
-router.get('/authors/:authorId/milestones/approaching', asyncRoute(async (req, res) => {
+router.get('/authors/:authorId/milestones/approaching', validate(SCHEMAS.approaching), asyncRoute(async (req, res) => {
   const leadTimeDays = req.query.leadTimeDays
     ? Number(req.query.leadTimeDays)
     : config.milestoneLeadTimeDays;
@@ -722,7 +763,7 @@ router.get('/authors/:authorId/milestones/approaching', asyncRoute(async (req, r
 }));
 
 /** Command for STORY-004: draft a kit for every approaching milestone missing one. */
-router.post('/authors/:authorId/milestones/draft-approaching', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/milestones/draft-approaching', validate(SCHEMAS.draftApproaching), asyncRoute(async (req, res) => {
   const result = await draftApproachingKits({
     authorId: Number(req.params.authorId),
     leadTimeDays: req.body?.leadTimeDays ?? config.milestoneLeadTimeDays,
@@ -731,7 +772,7 @@ router.post('/authors/:authorId/milestones/draft-approaching', asyncRoute(async 
   res.status(201).json(result);
 }));
 
-router.post('/authors/:authorId/books/:bookId/milestones', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books/:bookId/milestones', validate(SCHEMAS.createMilestone), asyncRoute(async (req, res) => {
   const { type, title, eventDate, details = '', location = '', awardName = null } = req.body ?? {};
   if (!type || !title || !eventDate) {
     throw Object.assign(new Error('type, title and eventDate are required'), { status: 400 });
@@ -797,7 +838,7 @@ router.post('/authors/:authorId/books/:bookId/pr-materials', asyncRoute(async (r
   res.status(201).json(result);
 }));
 
-router.get('/press-kits', asyncRoute(async (req, res) => {
+router.get('/press-kits', validate(SCHEMAS.listPressKits), asyncRoute(async (req, res) => {
   const params = [];
   let where = '';
   if (req.query.authorId) {
@@ -909,7 +950,7 @@ router.get('/books/:bookId/themes', asyncRoute(async (req, res) => {
   });
 }));
 
-router.post('/pr-materials/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/pr-materials/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'pr_materials', Number(req.params.id));
   const material = await approvePrMaterial({
     materialId: Number(req.params.id),
@@ -919,7 +960,7 @@ router.post('/pr-materials/:id/approve', requirePermission(PERMISSIONS.CONTENT_A
   res.json(material);
 }));
 
-router.post('/pr-materials/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/pr-materials/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   await assertOwns(req, 'pr_materials', Number(req.params.id));
   const material = await rejectPrMaterial({
     materialId: Number(req.params.id),
@@ -955,7 +996,7 @@ router.get('/authors/:authorId/reviewers', asyncRoute(async (req, res) => {
   res.json(rows);
 }));
 
-router.post('/authors/:authorId/reviewers', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/reviewers', validate(SCHEMAS.addReviewer), asyncRoute(async (req, res) => {
   const { name, email, role = 'reviewer' } = req.body ?? {};
   if (!name?.trim() || !email?.trim()) {
     throw Object.assign(new Error('name and email are required'), { status: 400 });
@@ -983,7 +1024,7 @@ router.post('/authors/:authorId/reviewers', asyncRoute(async (req, res) => {
 }));
 
 /** Deactivating keeps the notifications already sent, and the log pointing at them. */
-router.post('/reviewers/:id/active', asyncRoute(async (req, res) => {
+router.post('/reviewers/:id/active', validate(SCHEMAS.reviewerActive), asyncRoute(async (req, res) => {
   await assertOwns(req, 'reviewers', Number(req.params.id));
   const active = req.body?.active !== false;
   const { rows } = await query(
@@ -1037,7 +1078,7 @@ router.post('/authors/:authorId/notify-pending', asyncRoute(async (req, res) => 
   res.status(201).json(result);
 }));
 
-router.get('/notifications', asyncRoute(async (req, res) => {
+router.get('/notifications', validate(SCHEMAS.listNotifications), asyncRoute(async (req, res) => {
   const params = [];
   let where = '';
   if (req.query.authorId) {
@@ -1067,7 +1108,7 @@ router.get('/notifications', asyncRoute(async (req, res) => {
  * without recomputing every check — the dashboard's own assessment is the
  * expensive part, and a chart should not pay for it.
  */
-router.get('/authors/:authorId/trust-history', asyncRoute(async (req, res) => {
+router.get('/authors/:authorId/trust-history', validate(SCHEMAS.trustHistory), asyncRoute(async (req, res) => {
   const authorId = Number(req.params.authorId);
   const [history, episodes] = await Promise.all([
     assessmentHistory({ authorId, limit: Number(req.query.limit ?? 30) }),
@@ -1157,12 +1198,12 @@ router.get('/jobs', asyncRoute(async (req, res) => {
  * with nothing behind it, and either half alone is a broken state somebody
  * cleans up by hand.
  */
-router.post('/tenants', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
+router.post('/tenants', requirePermission(PERMISSIONS.TENANT_MANAGE), validate(SCHEMAS.onboardTenant), asyncRoute(async (req, res) => {
   const { name, email, password, role, voiceProfile } = req.body ?? {};
   res.status(201).json(await onboardTenant({ name, email, password, role, voiceProfile }));
 }));
 
-router.post('/tenants/:authorId/suspend', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
+router.post('/tenants/:authorId/suspend', requirePermission(PERMISSIONS.TENANT_MANAGE), validate(SCHEMAS.suspendTenant), asyncRoute(async (req, res) => {
   res.json(
     await suspendTenant({
       authorId: Number(req.params.authorId),
@@ -1279,8 +1320,16 @@ router.get('/authors/:authorId/format-performance', asyncRoute(async (req, res) 
   });
 }));
 
+/**
+ * Every published post with its series, and what the numbers can and cannot
+ * say (STORY-029). Assembled from the rows the sweep wrote.
+ */
+router.get('/authors/:authorId/content-performance', asyncRoute(async (req, res) => {
+  res.json(await contentPerformance({ authorId: Number(req.params.authorId) }));
+}));
+
 /** Runs a collection pass. Mocked adapters; the audit log says so. */
-router.post('/authors/:authorId/engagement/collect', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/engagement/collect', validate(SCHEMAS.collectEngagement), asyncRoute(async (req, res) => {
   const collected = await collectEngagement({
     authorId: Number(req.params.authorId),
     // Exposed so the demo can simulate a world where memes lead, out loud. It
@@ -1295,7 +1344,7 @@ router.post('/authors/:authorId/mix-recommendations/scan', asyncRoute(async (req
   res.status(201).json(await recommendMix({ authorId: Number(req.params.authorId) }));
 }));
 
-router.post('/mix-recommendations/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/mix-recommendations/:id/approve', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   res.json(
     await approveMixRecommendation({
       recommendationId: Number(req.params.id),
@@ -1306,7 +1355,7 @@ router.post('/mix-recommendations/:id/approve', requirePermission(PERMISSIONS.CO
   );
 }));
 
-router.post('/mix-recommendations/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+router.post('/mix-recommendations/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.decision), asyncRoute(async (req, res) => {
   res.json(
     await rejectMixRecommendation({
       recommendationId: Number(req.params.id),
@@ -1344,7 +1393,7 @@ router.get('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async 
  * it, which is the difference between a guide with evidence behind it and one
  * with an opinion behind it, and the UI shows which.
  */
-router.post('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async (req, res) => {
+router.post('/authors/:authorId/books/:bookId/visual-identity', validate(SCHEMAS.visualIdentity), asyncRoute(async (req, res) => {
   const authorId = Number(req.params.authorId);
   const bookId = Number(req.params.bookId);
   const current = await getActiveIdentity({ bookId });
@@ -1394,7 +1443,7 @@ router.post('/authors/:authorId/books/:bookId/visual-identity', asyncRoute(async
  * the rule in force now: a licence that stops permitting commercial use is a
  * change to the row, and every reader should see the consequence immediately.
  */
-router.get('/meme-templates', asyncRoute(async (req, res) => {
+router.get('/meme-templates', validate(SCHEMAS.listTemplates), asyncRoute(async (req, res) => {
   const templates = await listTemplates();
   // With a book in scope, say how each template sits against that book's
   // identity too (STORY-068). Licensed and on-brand are different questions and
@@ -1430,7 +1479,7 @@ router.get('/meme-templates', asyncRoute(async (req, res) => {
  * changes what every other tenant's generator can reach for, which is exactly
  * the kind of decision the operator role exists for. Browsing stays open.
  */
-router.post('/meme-templates', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), asyncRoute(async (req, res) => {
+router.post('/meme-templates', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), validate(SCHEMAS.addTemplate), asyncRoute(async (req, res) => {
   const body = req.body ?? {};
   for (const field of ['key', 'name', 'layout', 'image_ref']) {
     if (!body[field]) return res.status(400).json({ error: `${field} is required` });
@@ -1443,7 +1492,7 @@ router.post('/meme-templates', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), 
   return res.status(201).json(await addTemplate(body, { user: req.user }));
 }));
 
-router.post('/meme-templates/:key/retire', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), asyncRoute(async (req, res) => {
+router.post('/meme-templates/:key/retire', requirePermission(PERMISSIONS.TEMPLATES_MANAGE), validate(SCHEMAS.retireTemplate), asyncRoute(async (req, res) => {
   res.json(
     await retireTemplate({
       key: req.params.key,
@@ -1477,7 +1526,7 @@ router.post('/jobs/tick', asyncRoute(async (_req, res) => {
 
 // --- Audit trail (REQ-005) ---
 
-router.get('/audit-log', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
+router.get('/audit-log', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.auditLog), asyncRoute(async (req, res) => {
   const rows = await listAuditLog({
     authorId: req.query.authorId,
     entityType: req.query.entityType,

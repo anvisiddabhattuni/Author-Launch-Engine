@@ -1,3 +1,5 @@
+import { callExternal } from '../agents/apiIntegrationAgent.js';
+
 /**
  * Mocked external directories for speaking engagements, podcasts and events
  * (STORY-002 build step 1).
@@ -222,9 +224,20 @@ export const OPPORTUNITY_TYPES = ['speaking', 'podcast', 'event'];
  * matters for a live directory — asking a speaker bureau for its listings and
  * discarding two thirds of them is a different thing from not asking.
  */
-export async function searchAllDirectories({ from = new Date(), types = null } = {}) {
+export async function searchAllDirectories({ from = new Date(), types = null, authorId = null } = {}) {
   const wanted = types === null ? null : new Set(types);
   const chosen = Object.values(directories).filter((d) => wanted === null || wanted.has(d.type));
-  const results = await Promise.all(chosen.map((d) => d.search({ from })));
-  return results.flat();
+  // Through the gateway (STORY-038). These were called directly for twenty
+  // stories while the gateway's own header said they went through it: no
+  // timeout, no retry, no record, and absent from the Trust tab.
+  //
+  // One directory failing no longer fails the scout. A speaker bureau being
+  // down is a reason to have fewer listings this month, not none — and the
+  // failure is on the dashboard, so fewer is not silently mistaken for all.
+  const results = await Promise.allSettled(
+    chosen.map((d) =>
+      callExternal({ service: d.name, operation: 'search', authorId, fn: () => d.search({ from }) }),
+    ),
+  );
+  return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
 }

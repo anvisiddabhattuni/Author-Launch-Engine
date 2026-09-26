@@ -19,13 +19,58 @@ const VERDICT_COPY = {
 
 const pct = (n) => (n === null || n === undefined ? '—' : `${(Number(n) * 100).toFixed(2)}%`);
 
+/** What an analysis concluded (STORY-029). Same three answers for every question. */
+const FINDING_COPY = {
+  insufficient_data: { pill: 'unnamed', label: 'not enough data' },
+  no_measurable_relationship: { pill: 'neutral', label: 'no measurable relationship' },
+  relationship_found: { pill: 'approved', label: 'found' },
+};
+
+const TRAJECTORY_COPY = {
+  unmeasured: { pill: 'escalated', label: 'never measured' },
+  one_reading: { pill: 'neutral', label: 'one reading' },
+  climbing: { pill: 'scheduled', label: 'still climbing' },
+  settled: { pill: 'approved', label: 'settled' },
+};
+
+const ago = (iso) => {
+  if (!iso) return 'never';
+  const s = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (s < 90) return `${s}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 172800) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+};
+
+/** A tiny inline series: impressions per reading, newest last. */
+function Spark({ history }) {
+  if (!history || history.length < 2) return <span className="muted">—</span>;
+  const max = Math.max(...history.map((h) => h.impressions));
+  return (
+    <span className="meta" style={{ gap: 2, alignItems: 'flex-end', height: 18 }} title={history.map((h) => `${h.hoursLive}h: ${h.impressions}`).join('\n')}>
+      {history.map((h, i) => (
+        <span
+          key={i}
+          style={{ display: 'inline-block', width: 5, height: Math.max(2, Math.round((h.impressions / max) * 18)), background: 'var(--accent)', opacity: 0.4 + (0.6 * (i + 1)) / history.length }}
+        />
+      ))}
+    </span>
+  );
+}
+
 export function PerformancePage({ author, user }) {
   const [data, setData] = useState(null);
+  const [perf, setPerf] = useState(null);
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    setData(await api.formatPerformance(author.id));
+    const [formats, performance] = await Promise.all([
+      api.formatPerformance(author.id),
+      api.contentPerformance(author.id),
+    ]);
+    setData(formats);
+    setPerf(performance);
   }, [author.id]);
 
   useEffect(() => {
@@ -58,14 +103,126 @@ export function PerformancePage({ author, user }) {
     );
   }
 
-  if (!data) return <div className="card"><div className="empty">Loading…</div></div>;
+  if (!data || !perf) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const open = data.recommendations.filter((r) => r.status === 'pending_approval');
   const decided = data.recommendations.filter((r) => r.status !== 'pending_approval');
+  const cov = perf.coverage;
 
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
+
+      {/* STORY-029: what is tracked, how, and what the numbers can say. Leads
+          with coverage because a chart is only about the posts it includes. */}
+      <div className="card">
+        <h2>Content performance</h2>
+        <div className="meta">
+          <span className="pill">{cov.published} published</span>
+          <span className={`pill ${cov.measured === cov.published ? 'approved' : 'pending_approval'}`}>{cov.measured} measured</span>
+          <span className="pill">{cov.settled} settled · {cov.tooYoung} under {cov.maturityHours}h</span>
+          {cov.unmeasuredMature > 0 && <span className="pill escalated">{cov.unmeasuredMature} matured unmeasured</span>}
+          <span className="pill neutral">{cov.readings} readings · last {ago(cov.lastReadingAt)}</span>
+          <span className={`pill ${cov.sweep.lastRunAt ? 'approved' : 'unnamed'}`}>
+            sweep {cov.sweep.lastRunAt ? `ran ${ago(cov.sweep.lastRunAt)}` : 'has not run yet'} · every {Math.round(cov.sweep.everySeconds / 60)} min
+          </span>
+          {cov.allMocked && <span className="pill unnamed">all readings mocked</span>}
+        </div>
+        <p className="hint">
+          Every published post is measured on a timer and every reading is kept, so a post has a
+          series rather than a number. Nothing here came from a real platform yet; the collector is
+          mocked and blind to everything but platform, which is why most of the questions below
+          answer “no measurable relationship” — the honest result on data with nothing in it.
+        </p>
+
+        <h3>What the numbers can say</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th>Answer</th>
+              <th>Because</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perf.insights.map((i) => {
+              const copy = FINDING_COPY[i.finding] ?? { pill: 'neutral', label: i.finding };
+              return (
+                <tr key={i.id}>
+                  <td>
+                    {i.question}
+                    <div className="hint">{i.premise}</div>
+                  </td>
+                  <td>
+                    <span className={`pill ${copy.pill}`}>{copy.label}</span>
+                    {i.leads && <div className="mono">{i.leads} {i.lift !== undefined && i.lift !== null ? `+${(i.lift * 100).toFixed(0)}%` : ''}</div>}
+                    {i.direction && <div className="mono">{i.direction} · r = {i.correlation.r}</div>}
+                  </td>
+                  <td className="hint">{i.because}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        <h3>By platform</h3>
+        <table>
+          <thead>
+            <tr><th>Platform</th><th>Posts</th><th>Measured</th><th>Impressions</th><th>Engagements</th><th>Rate</th></tr>
+          </thead>
+          <tbody>
+            {perf.totals.map((t) => (
+              <tr key={t.platform}>
+                <td>{t.platform}</td>
+                <td className="mono">{t.posts}</td>
+                <td className="mono">{t.measured}</td>
+                <td className="mono">{t.impressions.toLocaleString()}</td>
+                <td className="mono">{t.engagements.toLocaleString()}</td>
+                <td className="mono">{pct(t.rate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <h3>Posts ({perf.posts.length})</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Post</th>
+              <th>Published</th>
+              <th>Window</th>
+              <th>Scores</th>
+              <th>Impressions</th>
+              <th>Rate</th>
+              <th>Series</th>
+              <th>Trajectory</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perf.posts.slice(0, 40).map((p) => {
+              const tr = TRAJECTORY_COPY[p.trajectory] ?? { pill: 'neutral', label: p.trajectory };
+              return (
+                <tr key={p.id}>
+                  <td>
+                    <span className="pill">{p.platform}</span> <span className="pill neutral">{p.format}</span>
+                    <div className="hint">{p.excerpt}</div>
+                  </td>
+                  <td className="mono">{String(p.publishedAt).slice(0, 10)} {String(p.publishedHour).padStart(2, '0')}:00</td>
+                  <td>{p.inWindow === null ? '—' : <span className={`pill ${p.inWindow ? 'approved' : 'neutral'}`}>{p.inWindow ? 'in' : 'out'}</span>}</td>
+                  <td className="mono">
+                    theme {p.scores.themeAlignment ?? '—'} · voice {p.scores.voice ?? '—'}
+                  </td>
+                  <td className="mono">{p.latest ? p.latest.impressions.toLocaleString() : '—'}</td>
+                  <td className="mono">{p.latest ? pct(p.latest.engagementRate) : '—'}</td>
+                  <td><Spark history={p.history} /></td>
+                  <td><span className={`pill ${tr.pill}`}>{tr.label}</span> <span className="hint">{p.readings} reading{p.readings === 1 ? '' : 's'}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {perf.posts.length > 40 && <p className="hint">Showing the 40 most recent of {perf.posts.length}.</p>}
+      </div>
 
       <div className="card">
         <h2>Do memes actually do better?</h2>

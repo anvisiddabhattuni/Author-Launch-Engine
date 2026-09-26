@@ -144,6 +144,8 @@ describe('GET /opportunities filters', () => {
 describe('the other list routes respond', () => {
   for (const path of [
     '/health',
+    '/deployments',
+    '/system/health',
     '/authors',
     '/drafts',
     '/outreach-messages',

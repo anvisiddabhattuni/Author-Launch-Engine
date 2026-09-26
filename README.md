@@ -38,6 +38,14 @@ Implemented so far:
 - **STORY-023 — Create AI Content Generation Agent** (AI Content Generation Agent), fulfilling `REQ-006`
 - **STORY-024 — Enable Multi-Tenant Isolation** (Tenant Management Agent), fulfilling `REQ-005`
 - **STORY-025 — Integrate with Social Media Platforms** (API Integration Agent), fulfilling `REQ-006` — **the error-handling half; OAuth deferred, see below**
+- **STORY-026 — Escalate Low-Confidence Content to Human Review** (Coordination and Governance Agent), fulfilling `REQ-006`
+- **STORY-027 — Monitor System Health and Availability** (Infrastructure and Deployment Agent), fulfilling `REQ-007` — **no Prometheus, no PagerDuty; see below**
+- **STORY-029 — Implement Content Performance Metrics** (Trust and Monitoring Agent), fulfilling `REQ-007` — **over mocked engagement; see below**
+- **STORY-031 — Frontend Architecture Setup** (Frontend Development Agent), fulfilling `REQ-001`, `REQ-002` and `REQ-008` — **the trust controls, not a Next.js rewrite; see below**
+- **STORY-032 — Backend Architecture Setup** (Backend Development Agent), fulfilling `REQ-003`, `REQ-004` and `REQ-008` — **input validation on every route; see below**
+- **STORY-033 — Database Architecture Setup** (Database Administration Agent), fulfilling `REQ-005`, `REQ-006` and `REQ-008` — **roles in the database, not Sequelize; see below**
+- **STORY-034 — Deployment Architecture Setup** (DevOps Agent), fulfilling `REQ-007` and `REQ-008` — **partially: images still unbuilt and unscanned; see below**
+- **STORY-038 — API Gateway for Managing and Monitoring Integrations** (API Integration Agent), fulfilling `REQ-009` and `REQ-014` — **in-process, not Kong; see below**
 
 ## What works today
 
@@ -1605,6 +1613,387 @@ depend on — while adding per-author token storage and refresh that nothing cou
 end. That is the "mocks hide the work" trap STORY-016 already found once, in reverse. Named here
 rather than half-built.
 
+### STORY-026 — an objection answered for a third of the system
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `ContentReview` module handling escalation | `server/src/agents/trustMonitoringAgent.js` (STORY-008) |
+| 2. Machine learning for confidence and anomalies | **not done — statistical detectors; see below** |
+| 3. Endpoints for escalating content | `POST /api/authors/:id/trust/scan`, `GET /api/authors/:id/escalations` |
+| 4. **What was actually missing** | `029_escalate_all_content.sql`, `anomalies.js` |
+
+STORY-008 built the independent monitor on one sentence in its own module comment: *"an agent that
+both writes the material and decides whether the material is good enough has no one checking the
+second half."* That objection was answered for **one content type out of three**.
+
+`monitorPressMaterials` queried `FROM pr_materials` and nothing else — and could not have done
+otherwise. The `escalations` table had a `pr_material_id` column and no column for a draft or an
+outreach message, so recording one for a social post was *impossible*. The same shape `018` found in
+`notifications` and `028` found again for scheduled posts.
+
+Measured, reproducibly across runs: **the monitor examined 5 items where 10 were decidable.** It was
+blind to exactly half the work waiting on a human. What that costs shows up the moment a standard
+moves — tighten the voice floor from 0.5 to 0.9 and press gets re-judged while drafts and outreach
+keep whatever verdict the agent that wrote them gave itself.
+
+**Widening it broke two things that had assumed press**, both caught here rather than by a user:
+`listEscalations` and `notifyRaisedEscalations` inner-joined `pr_materials`, so a draft escalation
+would have been dropped from the read-model and **notified nobody** — the STORY-025 finding,
+reintroduced by the fix for a different one.
+
+**The second clause had nothing at all.** Three anomaly detectors existed and every one watched
+*reviewer* behaviour — who approves in seconds, who never rejects, where the monitor disagrees with a
+producer. None looked at content, and none escalated anything; they reported to a dashboard and moved
+nothing.
+
+`content.near_duplicate` looks at the content and escalates. On its first real run it found the
+**stub generator repeating itself**:
+
+```
+2 drafts say the same thing: 3, 8      facebook · Sep 14, Sep 21
+3 drafts say the same thing: 5, 10, 16 twitter  · Sep 14, Sep 21, Oct 12
+3 drafts say the same thing: 14, 60, 61 twitter, instagram · Sep 28, Oct 26
+```
+
+The author's feed would have carried *"On craft, and what it actually costs."* three times. Every
+one of those drafts scores perfectly on its own — well-grounded, in voice, above every floor. **The
+anomaly exists only between drafts**, which is what "deviates from typical patterns" means and why no
+amount of scoring one draft at a time could find it.
+
+**It was wrong twice before it was right, and both are worth recording.** The first version reported
+pairs, so twelve identical drafts arrived as sixty-six findings — a detector nobody would read. The
+second reported **40 false positives**: the demo seeds `simulated post 0` … `simulated post 39`, and
+a tokenizer that dropped digits reduced every one of them to `{simulated, post}`, matching at 100%.
+The fix was not a length floor — that excluded 47 of 62 drafts and lost real repetitions — but
+keeping numbers as tokens, which separates the fixtures at 50% while leaving short social posts
+comparable.
+
+**Why not machine learning.** The build note asks for it. Same answer as STORY-021: no training data
+at this size, and an anomaly score a reviewer cannot audit is worse than none on a system whose
+premise is that every judgement is legible. "These three drafts share 100% of their distinctive
+words, here they are" is a claim somebody can check by reading them.
+
+### STORY-027 — the record that could say "started" and never "died"
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `HealthMonitoring` module performing regular checks | `server/src/services/healthMonitoring.js`, run by `index.js`, `worker.js` and the `system.health_check` sweep |
+| 2. Docker and Prometheus for system monitoring | **not done — nothing installed, nothing to scrape; see below** |
+| 3. PagerDuty for downtime alerts | `alertOnOutages` → the mock email adapter, to accounts holding `system.operate` |
+| 4. **What was actually missing** | `030_health_monitoring.sql`, `requestStats.js` |
+
+STORY-015 built `/health`, `/ready` and a `deployments` table, and read quickly the acceptance clause
+— *"when health checks are performed, system status is logged and displayed"* — looks done. Measured
+before writing anything:
+
+- **Nothing performed a health check.** Both endpoints answered when asked and the answer was thrown
+  away. 24 `deployment.*` rows on the audit log, none of them a check.
+- **`deployments` decided an instance was running by whether it had written a stop row.** A process
+  killed with SIGKILL, or a host that loses power, cannot write one — so the table's answer to "what
+  is running" was really *"what has not said goodbye"*, and it would say `ready` about a dead process
+  forever.
+- **The worker had no row at all.** The process that runs every sweep in the system was invisible to
+  the record of what is running.
+- **There was nobody to tell.** Every alert this system sends goes to a tenant's `reviewers`, and an
+  outage belongs to no tenant.
+
+So liveness became something a process *demonstrates*: every instance writes `last_seen_at` on a
+timer, and a monitor — run by the API every 30 s, by the worker on its sweep, and by an operator from
+the Trust tab — probes the database, reads every heartbeat, probes every API instance at its own
+`/api/ready` over HTTP, and writes one `health_checks` row per target. A component changing state is
+an `outages` row with `down_since` (the last heartbeat, not the moment somebody looked), `detected_at`
+and `alerted_at`; the gap between the first two is the number that grades the monitoring rather than
+the system. Outages close when a check finds the component up. Never because time passed.
+
+**Who gets paged is a permission.** `system.operate`, granted to `admin`, held by `ops@example.test`
+in the seed. STORY-019's argument again — "the infrastructure team" is a capability, and the person
+who must be woken at 3am is not necessarily the person who may suspend a tenant.
+
+**The API and the worker check each other, and neither can check itself.** Each is the only thing
+positioned to notice the other is gone. Both gone at once is noticed by nobody here, and that is the
+outside probe a real deployment still needs.
+
+**The first real outage it caught was the laptop going to sleep**, and it paged the operators about
+the process that was paging them. On waking, the API's monitor fired before its own heartbeat did,
+read its own stale beat, and opened an `api` outage on itself. The checker now refreshes its own
+heartbeat rather than reading it — a process can observe that it is running. The 1,060-second
+detection lag on that outage is left on the record; it is correct, and it is what monitoring from
+inside the thing being monitored looks like.
+
+Measured with real processes, awake: a worker killed with `kill -9` was detected by the running
+API's timer and `ops@example.test` was emailed, unattended, in **284 s** — longer than the 90 s the
+intervals promise, and the record says so rather than the intervals.
+
+**Up is a low bar.** An instance answering every request with a 500 is up, ready, and useless, so
+each API heartbeat carries a snapshot of its last 500 requests — count, error rate, p50, p95 — and
+the Trust tab shows them beside the pill. The row of record is the heartbeat; writing a row per
+request would make the monitoring the heaviest thing the database does.
+
+**Why not Prometheus and PagerDuty.** Neither is installed, neither has an account, and a scrape
+config for a server that does not exist would be the STORY-015 Dockerfile again. What is here is the
+part those sit on top of: something that measures, something that remembers, something that tells
+someone. The notifier is one call site; the metrics they would scrape are the rows this writes.
+
+### STORY-029 — two relationships that were both the platform
+
+| Story build step | Where it lives |
+|---|---|
+| 1. `PerformanceMetrics` module to track and analyse | `server/src/services/performanceMetrics.js`, the `engagement.collect` sweep |
+| 2. PostgreSQL table `content_metrics` | `031_content_metrics.sql` — a history, beside STORY-069's snapshot |
+| 3. REST endpoints for the dashboard | `GET /api/authors/:id/content-performance`, the Performance tab |
+
+STORY-069 built engagement collection and one analysis over it, and against this story's clause —
+*tracked*, *displayed*, *analysed for insights* — what existed was thinner than it looked:
+
+- **Collection ran when a human pressed a button.** Zero recurring sweeps; every collection ever was
+  the demo's. "Tracked" means on a timer.
+- **One reading per post, overwritten.** No history, so "is this post still earning or has it
+  stalled" was unanswerable — a post that stopped at 900 impressions and one still climbing were the
+  same row.
+- **One question was asked of the data.** Memes or text. Nothing asked which platform earns more,
+  whether the scheduler's "optimal window" (STORY-001, every post since) does anything, or whether
+  the two scores this system escalates drafts on — theme alignment and voice — relate to how a post
+  performs once it is out.
+
+So: `content_metrics` keeps every reading, `engagement.collect` fills it on the worker's sweep, the
+mock accrues with age so a series shows a post filling in, and `contentPerformance` asks four
+questions of the result, each in STORY-069's shape — state the sample, decline below it, say what
+the evidence was when concluding. The format question is answered by STORY-069's own function,
+called rather than copied, because the mix recommender already acts on that one.
+
+**The first version found two relationships that were not there.** On the demo data — a collector
+that has never read a draft and does not know what time it is — the timing question came back
+*"in-window posts lead"* and theme alignment came back **r = 0.37 over 66 posts, t = 3.2**,
+significant at any textbook threshold. Both were the platform. Instagram's best hour is 16:00, so
+every instagram post was "in-window", and instagram's mock base rate is double twitter's; the pooled
+cell was measuring which platform a post was on. The fixtures with the highest theme scores happened
+to be the instagram ones. Held within platform, with engagement taken relative to posts on the same
+platform and format, **r = 0.37 became r = 0.00 without a single reading changing.** STORY-006's
+alignment score again — a number named after the right thing, measuring a different one — in a
+different room, and a regression test now plants the confound on purpose.
+
+**Every reading is mocked, and the page says so beside the chart** rather than in this file. The
+adapters are the mocks STORY-025 left with reasons; `content_metrics.source` says `mock` on every
+row and will say `platform` the day one is real.
+
+### STORY-031 — the clause about headers, not the build note about Next.js
+
+| Story build step | Where it lives |
+|---|---|
+| Security headers with Helmet, CSP, HTTPS | `server/src/services/securityHeaders.js` — one policy; `app.js` (helmet), `vite.config.js`, `client/nginx.conf` |
+| Responsive | `client/src/styles.css`, the STORY-031 block |
+| "Create a new React app using Next.js … Tailwind" | **Not done, on purpose** — see below |
+
+Written as *"given a new project repository"*. There has been a React app since R0 — Vite, eleven
+tabs, ~3,900 lines — so the acceptance clause is the loop stop, and against it, measured:
+
+- **No security header on any response.** API, Vite and nginx all sent none. No CSP, no HSTS, no
+  HTTPS enforcement, and `cors()` answered every origin on the internet.
+- **No media query in the stylesheet.** At 390px wide, **10 of 11 tabs scrolled the whole page
+  sideways** — Worker by 1,423px, and Worker overflowed on desktop too.
+
+**The clause's CSP, applied literally, breaks the product.** `default-src 'self'` is there, verbatim.
+But meme artwork is stored as `data:image/svg+xml` (STORY-067), `img-src` falls back to
+`default-src`, and every meme preview on Review and Templates renders as an empty frame. So exactly
+one directive widens it — `img-src 'self' data:` — declared in `CSP_EXEMPTIONS` with its reason, and a
+test fails if any other widening appears without one. No `'unsafe-inline'`: React's `style={{…}}`
+goes through the CSSOM, which CSP does not govern.
+
+**One policy, three senders.** The API sends it through helmet, Vite imports it, and nginx — which
+cannot import JavaScript — carries a copy the test suite compares header by header. Development gets
+it as *Report-Only*, because React fast-refresh injects an inline script and a dev server that blocks
+its own hot reload gets its policy deleted; `vite preview` and nginx enforce.
+
+**HTTPS is enforced where the connection is real.** On by default in production: a plain-http GET is
+redirected (308), anything else is refused (403) rather than redirected, because its body has
+already crossed in the clear. `/api/health` and `/api/ready` stay reachable over http for the load
+balancer. `X-Forwarded-Proto` is trusted only when enforcement is on.
+
+**Proved in a browser, not a header string.** `npm run check:browser` loads every tab in Chrome at
+two widths under the enforced policy: 22 loads, 0 violations, 0 overflow, every meme image shown. Its
+control run, under the literal clause, blocks 12 of 12 images. It also found an unrelated bug: the
+Audit tab asked every author for `/audit-integrity`, which only compliance may read, and swallowed the
+403 — no panel, but a refused request in the console on every visit. It now asks only when the
+session holds `audit.verify`.
+
+**The first responsive fix was wrong, and the check passed it.** It used `overflow-wrap: anywhere` on
+table cells, so every table "fit" a phone by breaking words into three-letter columns — no page
+overflow, nothing readable. The browser check measured overflow, not readability, and reported a
+clean pass; the screenshot is what showed it. The check now also counts *crushed* cells (narrower than
+~5 characters holding a longer word): 56 on Press, 20 on Worker, 1 on Trust under the old rule, 0 now.
+Tables keep a readable width and scroll inside their card.
+
+**Not rebuilt in Next.js or Tailwind.** Rewriting a working app to reach a clause about headers and
+layout would spend the whole story on the part nobody asked to change, and would re-open every
+screen eighteen stories have been checked against. That is a scope decision the backlog owner should
+make knowingly rather than one an implementer makes by default; it is named here for that reason.
+
+### STORY-032 — 28 routes crashed on bad input, and one stored it
+
+| Story build step | Where it lives |
+|---|---|
+| Input validation using Joi | `server/src/middleware/validate.js`, `server/src/routes/schemas.js` |
+| JWT authentication | Since STORY-064 — `middleware/auth.js`; re-asserted in `inputValidation.test.js` |
+| "Structure with controllers, services, models" | Services exist; **routes not split** — see below |
+
+JWT has existed since STORY-064. Input validation had not — no library, no schema. Measured by
+sending malformed input to all 77 routes:
+
+- **28 answered 500.** Every row-addressed route handed `NaN` to Postgres for a non-numeric id and
+  returned the database's own words — `invalid input syntax for type bigint: "NaN"` — to the caller.
+  Three more crashed in JavaScript (`platforms.includes is not a function`).
+- **One stored it.** `POST /authors { name: 123, email: ["x"] }` answered 201 and saved the email as
+  the text `{"x"}`. In the product: an author pasting `twiter | …` into the Upload tab was told
+  *"Added 2 prior posts"* and the typo was stored as a platform.
+
+Now every route that reads a body or query string declares it, per part, and the handler receives
+only what was declared, converted to the declared type. Path ids are checked once, on
+`router.param`, so a route added later that names `:id` is guarded without anyone remembering.
+**0 of 77 routes crash on bad input.** Errors name every wrong field (`details`), and the Upload tab
+turns them into "Line 1: "twiter" is not a platform posts are drafted for".
+
+**Stripping is only safe if proven.** Unknown fields are stripped rather than refused, so the UI's
+harmless extras don't become outages — but that silently deletes any field a handler reads and its
+schema forgot. So `inputValidation.test.js` reads every handler's source from the live router and
+fails on the first field read but not declared; it was seen to fail when `awardName` was removed
+from one schema on purpose.
+
+**Authorisation before validation.** The first version validated first, so a compliance session
+posting a template got a 400 listing the input rules of an action it may not take. The existing
+RBAC suite caught it; validation now sits behind `requirePermission` on all 13 guarded routes.
+
+**Not done: splitting the 1,500-line routes file into controllers.** It changes no behaviour, and
+every scan that proves a property of the API — tenant walking (STORY-024), input coverage — reads the
+live router, so the split can be done mechanically when it is wanted.
+
+### STORY-033 — the account that writes the audit log could erase it
+
+| Story build step | Where it lives |
+|---|---|
+| Role-based access control in the database | `032_database_roles.sql` — `ale_app`, `ale_readonly`, `ale_app_login` |
+| Secure access, reported | `/ready` privileges check; `db.least_privilege` on the Trust tab |
+| "Create schemas using Sequelize" | **Not done, on purpose** — see below |
+
+STORY-019 built permissions in the application. The database under it had none. Measured:
+
+- **The API connected as `anvi`, a Postgres superuser that owned all 46 tables.** Anything that got
+  code running in the API could drop any table or grant itself anything.
+- **The audit log's append-only promise was defeatable by the account that writes it.** Three
+  triggers refuse UPDATE/DELETE/TRUNCATE — and the table owner can switch them off. Stages 103–105 of
+  the demo did exactly that, through the application's own pool.
+
+Now the application runs as **`ale_app_login`**, a member of **`ale_app`**: SELECT/INSERT/UPDATE/DELETE on
+rows, no schema, no TRUNCATE, **insert-only on `audit_log` and `audit_checkpoints`**, read-only on
+`schema_migrations`. **`ale_readonly`** reads everything and writes nothing — the database counterpart
+of STORY-019's `compliance` role. Migrations run as the owner through `MIGRATION_DATABASE_URL`.
+
+- **A separate login, not `SET ROLE`.** A superuser session that can SET ROLE can RESET ROLE, so an
+  injected statement would simply switch back. Only a login that never held the power is a boundary.
+- **Two walls.** The privilege stops the application; the trigger still stops a mistaken UPDATE by
+  anyone who has the privilege — including the owner. Getting past both now takes the owner's
+  credentials, which is the threat STORY-013's seals exist to detect.
+- **The whole suite and the demo run as the restricted login.** The only things that needed the
+  owner were migrations and the demo's deliberate tampering (`ownerQuery` in `db/pool.js`). Six
+  tamper tests now fail at the privilege, before the trigger, and accept either refusal.
+- **Coverage is tested, not listed.** New tables get grants by default privileges, and a test fails
+  if the set of tables the app cannot update is anything other than the declared append-only ones.
+- **Reported.** `/ready` refuses traffic in production when the app is a superuser or owner, and the
+  Trust tab's `db.least_privilege` check fails wherever it is — shown failing with the app pointed at
+  the owner, and passing on the login.
+- **No password in the repository.** `ale_app_login` has none locally (Homebrew trusts localhost);
+  `APP_DB_PASSWORD` is applied by `migrate.js` where one is needed. CI and compose set it.
+
+**Not done: Sequelize.** The schema is 32 hand-written migrations whose comments carry most of this
+project's reasoning. An ORM on top would be a second description of the schema, free to disagree with
+the first — the drift this project has refused everywhere else.
+
+Also found while here: a STORY-029 test asserted "no relationship" on a freshly random sample every
+run, which fails about one run in twenty — what a 95% interval means. Its fixtures are now fixed.
+
+### STORY-034 — nineteen stories of "reviewed, not run"
+
+| Story build step | Where it lives |
+|---|---|
+| Dockerfiles for frontend and backend | `server/Dockerfile`, `server/Dockerfile.worker`, `client/Dockerfile` — digest-pinned, non-root |
+| Docker Compose, services communicating | `docker-compose.yml` — **repaired**; `client/nginx.conf` forwards the scheme |
+| Image scanning with Clair | `.github/workflows/ci.yml`, `images` job — **written, never run** |
+| (added) dependency scanning | `npm run scan:deps`, gating CI before the tests |
+
+**Docker is not installed here and never has been**, so the images have never been built and Clair
+has never scanned one. What *can* be proved without Docker is proved by `containerPolicy.test.js`,
+which reads the files the way Docker and a reviewer would. Against the files as STORY-015 left them it
+fails 12 of 22 checks, and it found two real defects:
+
+- **`docker-compose.yml` defined one service.** The top-level `volumes:` block sat between `postgres`
+  and `migrate`, so YAML read migrate, api, worker and client as *volumes*. `docker compose up` could
+  only ever have started a database. Moved to the end; the test parses the file as Compose does.
+- **The stack would have refused its own UI.** STORY-031 made the API enforce HTTPS in production,
+  reading `X-Forwarded-Proto`; in the stack the API is in production behind nginx, which never sent
+  that header. Every browser call would have looked like plain http. nginx now forwards the client's
+  scheme (the terminator's, or its own), and the local stack sets `ENFORCE_HTTPS=false` because it has
+  no TLS terminator — set it true where one exists.
+
+Also: **no `.dockerignore`**, so every `COPY` shipped host `node_modules`, build output and any `.env`
+into an image layer — now excluded. Base images **pinned by digest** (a tag names whatever was pushed
+last, so a scan of one build says nothing about the next). nginx replaced by
+**`nginx-unprivileged`**, which does not start as root. The app and worker containers use STORY-033's
+restricted login.
+
+**The scan that runs here.** `npm audit` found **3 moderate in production** — `qs`, via Express, one a
+denial of service in the query-string parser every request passes through — and **3 high in
+development**, via `puppeteer-core`, which STORY-031 added for the browser check. Fixed, not muted:
+0 now. In CI as a gate before the tests.
+
+**The scan that does not.** The `images` job builds all three images, `docker save`s them and runs
+`quay/clair-action@v0.0.16` on each, with **`return-code: '1'`** — the action's default is `'0'`,
+which reports vulnerabilities and passes the build, so the example in its own README is a scan that
+can never fail CI. Written against the action's published `action.yaml`; never executed.
+
+### STORY-038 — the gateway whose header was not true
+
+| Story build step | Where it lives |
+|---|---|
+| 1. An API gateway | `callExternal` in `agents/apiIntegrationAgent.js` (STORY-016), extended — **not Kong or AWS**; see below |
+| 2. Routes and policies per integration | `services/integrationRoutes.js` — undeclared services refused |
+| 3. Monitoring and logging | `api_interactions` (STORY-016), `short_circuited` outcome; Trust tab integrations panel |
+| 4. All interactions routed through it | Directory search now routed; source scan in `integrationGateway.test.js` |
+| 5. Failure detection and alerting | Per-integration circuit (`integration_circuits`), `integration.circuit_opened`, operators alerted |
+
+STORY-016's gateway header said every outbound call went through it — *"the social platforms, the
+email provider, the directory search, and the Anthropic content API."* Measured:
+
+- **The directory search did not.** All three directories behind opportunity scouting were called
+  directly: no timeout, no retry, no record — and absent from the Trust tab, which listed only what
+  had been logged. A live directory that hung would have hung the scout.
+- **One policy for everything.** 10 seconds and 3 attempts for email and for an AI generation that
+  takes twenty.
+- **A failure was logged and nobody was told**, and a provider that was down got three attempts with
+  backoff on every call for as long as it stayed down.
+
+Now every integration is **declared** with its own policy — Anthropic 60s × 2 (a retry is a second
+paid generation), directories 8s × 2, social and email on the STORY-016 defaults — and `callExternal`
+refuses a service nobody declared, the way `assertDeclaredPath` refuses an undeclared outbound path
+(STORY-020). The Trust tab lists every declared integration, called or not, with its policy.
+
+**The circuit.** Per integration, in the database so the API and worker share it. After
+`failureThreshold` failed *calls* in a row the circuit opens: the gateway stops calling that provider
+(logged as `short_circuited`, not as a failure), records `integration.circuit_opened` and **emails the
+operators — once**. After the cooldown one trial call goes through; success closes it with how long
+it was down, failure re-opens it without paging again. **A 4xx never counts** — a post too long for
+the platform is the provider answering correctly, and counting it would let one bad draft take a
+platform offline for everyone. **Email cannot be alerted about by email**; its outage is recorded as
+`integration.alert_unreachable` and shown on the Trust tab. One directory being down no longer
+empties the scout: the others' listings still arrive, and the panel shows why there are fewer.
+
+**Found in its own screenshot:** the first version counted a short-circuited call as a call and an
+attempt, so an open circuit looked like heavy traffic to a dead provider — the opposite of what
+happened. Refused calls are now counted separately, with a test.
+
+**Not Kong or AWS API Gateway.** Both are a network hop in front of the providers, and neither exists
+here to configure. What the clause asks for — every interaction through one place, a policy per
+integration, failures detected, logged and alerted — lives in the module every adapter already calls,
+and a source scan fails the build if production code calls out around it.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -1650,7 +2039,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 170 stages with evidence at each one.
+Prints 201 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -1761,6 +2150,40 @@ Prints 170 stages with evidence at each one.
   its format furniture and 0.87 without, copy that argues every theme escalating on voice alone, and
   both press invariants checked from outside the code that enforces them.
 
+- **Stages 171–175, STORY-026:** the independent monitor covering one content type of three, what that
+  costs when a reviewer tightens a floor, three anomaly detectors that all watched reviewers and none
+  watched content, the stub generator caught repeating itself across weeks and platforms, and the
+  40 false positives a tokenizer that dropped digits produced on the first run.
+
+- **Stages 176–180, STORY-027:** a release record that calls a SIGKILLed worker "running" forever, a
+  check that probes the API over HTTP and reads the worker's heartbeat with a row per verdict, an
+  outage opened on the transition and paged to `ops@example.test` once, recovery as a check finding
+  it up rather than time passing, and the three things this monitoring cannot see, said out loud.
+
+- **Stages 198–201, STORY-038:** the gateway that said the directory search went through it, every
+  integration and its policy, a directory going down — circuit opened, operators alerted once, calls
+  stopped, the scout carrying on — and recovery on a trial call.
+
+- **Stages 195–197, STORY-034:** the Compose file that defined one service, the two configs that
+  would have refused the UI together, and the dependency scan that runs here against the image scan
+  that cannot.
+
+- **Stages 192–194, STORY-033:** the superuser the API used to be, the application login asked to
+  do what an attacker would (every attempt refused), the trigger still standing behind the privilege,
+  and the check that reports it.
+
+- **Stages 189–191, STORY-032:** every route sent garbage (28 crashed, one stored it; now none),
+  stripping proven safe by a source scan, and authorisation checked before validation.
+
+- **Stages 186–188, STORY-031:** what the clause asks against what existed, the policy on a real
+  response and the one directive it had to widen, and HTTPS enforced — redirect, refuse, probe,
+  and HSTS only where the connection is real.
+
+- **Stages 181–185, STORY-029:** engagement collected by a button and kept as one overwritten reading,
+  a series per post filled by a sweep, four questions asked of it instead of one, the two
+  "relationships" the first version found that were both the platform, and a page that says every
+  number is mocked beside the chart.
+
 - **Stages 166–170, STORY-025:** a publish failure the system recorded and nobody was told about, the
   notice that names the platform and the provider's own message, announced once however often the
   sweep runs, the three states a bare count would collapse, and the check that counts only failures
@@ -1806,7 +2229,15 @@ award as a shortlisting, so stage 27 can withdraw it when the win is recorded.
 
 ```bash
 npm run db:reset && npm test
+npm run check:browser        # STORY-031: every tab, in Chrome, at 390px and 1280px, under the enforced CSP
+npm run scan:deps            # STORY-034: production dependencies against the advisory database
 ```
+
+`check:browser` builds the client, serves it with `vite preview` under the production policy, signs
+in and loads every tab at a phone and a desktop width, and fails on any CSP violation, any page that
+scrolls sideways, any table crushed until its words break, any broken image or any console error. It then re-runs two tabs under the
+acceptance clause's literal `default-src 'self'` as a control, to show it can see a violation at
+all. Needs Chrome (`CHROME_PATH` to override); it exits 2 — skipped, not passed — without it.
 
 488 tests across 114 suites. For each story the leading suites map one-to-one onto its Gherkin
 scenarios; the rest cover the approval gate, escalation and the append-only log. `routes.test.js`
@@ -1842,6 +2273,11 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `ENGAGEMENT_MATURITY_HOURS` | `48` | How long a post must be live before its metrics count |
 | `EXPERTISE_THRESHOLD` | `0.5` | Below this fit against the *author*, a listing does not qualify on expertise |
 | `MILESTONE_LEAD_TIME_DAYS` | `30` | How far ahead a milestone counts as approaching, and drafting begins |
+| `DATABASE_URL` → app | `postgres://ale_app_login@localhost:5432/author_launch_engine` | What the API, worker, seed and tests connect as (STORY-033): rows only, no schema, audit log insert-only |
+| `MIGRATION_DATABASE_URL` | `DATABASE_URL`, else `postgres://localhost:5432/author_launch_engine` | The schema owner. Used by `db:migrate` / `db:reset` only |
+| `APP_DB_PASSWORD` | — | Applied to `ale_app_login` by `migrate.js` where the server requires passwords. Never in a migration |
+| `ENFORCE_HTTPS` | `true` in production | Redirect plain-http GETs to https, refuse other methods; `/api/health` and `/api/ready` exempt (STORY-031) |
+| `CORS_ORIGINS` | `http://localhost:5173` in dev, none in production | Comma-separated browser origins allowed cross-origin. Was `*` before STORY-031 |
 | `JWT_SECRET` | dev-only default | Session signing key. The server refuses to start with the default when `NODE_ENV=production` |
 | `JWT_TTL` | `12h` | How long a session lasts |
 | `WORKER_POLL_SECONDS` | `5` | How often a worker looks for due work |
@@ -1849,6 +2285,11 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `JOB_MAX_ATTEMPTS` | `3` | Attempts before a job is handed to a human |
 | `JOB_BACKOFF_SECONDS` | `30` | First retry delay; doubles each attempt |
 | `JOB_STALE_SECONDS` | `300` | A job still running after this belongs to a worker that died |
+| `HEARTBEAT_SECONDS` | `15` | How often each process writes "still here" (STORY-027) |
+| `INSTANCE_STALE_SECONDS` | `60` | Quiet for longer than this and an instance is down — four missed beats |
+| `INSTANCE_DEAD_SECONDS` | `600` | Quiet for longer than this and the row is retired as presumed dead |
+| `HEALTH_CHECK_SECONDS` | `30` | How often each process checks on the others, between the worker's sweeps |
+| `PUBLIC_URL` | `http://localhost:$PORT` | Where a monitor can probe this API instance's `/api/ready` from outside it |
 
 ### Content providers
 
@@ -1909,6 +2350,9 @@ material are the verified matches rather than the provider's own claim about wha
 | `GET` | `/api/integrations` | Every external service's call volume, retries and failures |
 | `GET` | `/api/ready` | Readiness — 503 when this instance should not be routed to (public) |
 | `GET` | `/api/deployments` | What is running, and what ran before it |
+| `GET` | `/api/system/health` | Each component and instance with its latest verdict, and every outage (STORY-027) |
+| `GET` | `/api/authors/:id/content-performance` | Every published post's series, totals, and what the numbers can and cannot say (STORY-029) |
+| `POST` | `/api/system/health-check` | Perform the checks now — can open an outage and page (`system.operate`) |
 | `GET` | `/api/authors/:id/trust-dashboard` | Health, pending approvals, recent actions, anomalies |
 | `GET` | `/api/audit-integrity` | Whether the log still says what it said when written |
 | `POST` | `/api/audit-integrity/verify` | Seal what is new and re-check every seal (admin) |
@@ -2080,8 +2524,15 @@ These are deliberate deferrals, not oversights:
   verified locally; the Dockerfiles, compose stack and CI workflow have never been executed, and
   there is no public URL. The list of what needs a platform is in the STORY-015 section above.
 - The worker exists as of STORY-065 but has to be started (`npm run worker`) and is not supervised —
-  nothing restarts it if the process dies, and a machine with no worker running looks identical to a
-  machine with nothing to do. Deployment and process supervision are R5. As of STORY-011 running
+  nothing restarts it if the process dies. As of STORY-027 a worker that dies is *noticed*: it stops
+  beating, the API's monitor opens an outage and pages whoever holds `system.operate`. Restarting it
+  is still a person's job, and a worker never started is `not running`, not an outage.
+- **The monitoring cannot see three things** (STORY-027): a database outage, because the checker
+  records its findings in the database; both processes dying at once, because each notices only the
+  other; and a stalled host, because a sleeping laptop stops the checker along with everything it
+  checks — the first real outage this caught was that, at 1,060 seconds' lag. A real deployment
+  needs one probe that lives outside both processes, hitting `/api/ready` and reading
+  `/api/system/health`; that is the Prometheus in the build note, and it is not installed here. Deployment and process supervision are R5. As of STORY-011 running
   several is safe rather than merely possible: two workers used to break the producer/consumer order
   between agents silently.
 - Priorities and resources are a static table in `coordination.js`, not configuration. A new job kind

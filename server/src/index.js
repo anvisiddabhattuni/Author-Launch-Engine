@@ -12,6 +12,8 @@ import {
   recordStop,
   setDraining,
 } from './services/deployment.js';
+import { startHeartbeat, startMonitor } from './services/healthMonitoring.js';
+import { snapshot as requestStats } from './services/requestStats.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { version } = JSON.parse(readFileSync(join(here, '../package.json'), 'utf8'));
@@ -31,11 +33,26 @@ const server = app.listen(config.port, async () => {
   console.log(`content provider: ${config.aiProvider}`);
 
   try {
-    const deployment = await recordStart({
-      version,
-      commit: process.env.GIT_COMMIT ?? '',
-    });
+    const register = () =>
+      recordStart({
+        version,
+        commit: process.env.GIT_COMMIT ?? '',
+        component: 'api',
+        // Where a monitor can probe this instance from outside it. Overridable
+        // because behind a container network "localhost" is the monitor, not us.
+        url: process.env.PUBLIC_URL ?? `http://localhost:${config.port}`,
+      });
+    const deployment = await register();
     server.deploymentId = deployment.id;
+
+    // Say we are alive on a timer, and check whether everything else is
+    // (STORY-027). Both unref'd, so neither keeps a draining process open.
+    server.stopHeartbeat = startHeartbeat({
+      deploymentId: deployment.id,
+      stats: requestStats,
+      reregister: register,
+    });
+    server.stopMonitor = startMonitor({});
 
     // Readiness is checked rather than assumed. An instance whose code expects
     // a migration nobody applied starts perfectly well and cannot serve a
@@ -87,10 +104,15 @@ async function shutdown(signal) {
   // Do not let the timer itself hold the process open once everything is done.
   forced.unref();
 
+  server.stopHeartbeat?.();
+  server.stopMonitor?.();
+
   server.close(async () => {
     try {
-      if (server.deploymentId) {
-        await recordStop({ deploymentId: server.deploymentId, reason: signal, clean: true });
+      // The id may have moved if the record was recreated under us.
+      const deploymentId = server.stopHeartbeat?.currentDeploymentId?.() ?? server.deploymentId;
+      if (deploymentId) {
+        await recordStop({ deploymentId, reason: signal, clean: true });
       }
     } catch (error) {
       console.error(`[deploy] could not record the stop: ${error.message}`);

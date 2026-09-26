@@ -10,14 +10,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const migrationsDir = resolve(here, 'migrations');
 
 const databaseName = () => {
-  const name = new URL(config.databaseUrl).pathname.replace(/^\//, '');
-  if (!name) throw new Error(`DATABASE_URL has no database name: ${config.databaseUrl}`);
+  const name = new URL(config.migrationDatabaseUrl).pathname.replace(/^\//, '');
+  if (!name) throw new Error(`MIGRATION_DATABASE_URL has no database name: ${config.migrationDatabaseUrl}`);
   return name;
 };
 
 /** Connects to the maintenance database so we can create/drop the target one. */
 const adminClient = () => {
-  const url = new URL(config.databaseUrl);
+  const url = new URL(config.migrationDatabaseUrl);
   url.pathname = '/postgres';
   return new pg.Client({ connectionString: url.toString() });
 };
@@ -48,7 +48,7 @@ async function ensureDatabase({ reset }) {
 }
 
 async function applyMigrations() {
-  const client = new pg.Client({ connectionString: config.databaseUrl });
+  const client = new pg.Client({ connectionString: config.migrationDatabaseUrl });
   await client.connect();
   try {
     await client.query(`
@@ -71,6 +71,16 @@ async function applyMigrations() {
       await client.query(sql);
       await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
       console.log(`applied  ${file}`);
+    }
+
+    // The application login has no password in the repository (STORY-033).
+    // Where the server wants one, it is supplied here from the environment,
+    // out of band, and never written to a migration.
+    if (process.env.APP_DB_PASSWORD) {
+      await client.query(
+        `ALTER ROLE ale_app_login PASSWORD ${client.escapeLiteral(process.env.APP_DB_PASSWORD)}`,
+      );
+      console.log('set      ale_app_login password from APP_DB_PASSWORD');
     }
   } finally {
     await client.end();

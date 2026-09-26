@@ -8,6 +8,8 @@ import { monitorPressMaterials, trustDashboard } from '../agents/trustMonitoring
 import { publishDue } from '../services/scheduler.js';
 import { alertOnBreaches } from '../services/trustHistory.js';
 import { notifyFailedPublishes } from '../services/publishFailureNotifier.js';
+import { monitorAndAlert } from '../services/healthMonitoring.js';
+import { trackEngagement } from '../services/performanceMetrics.js';
 
 /**
  * What the worker knows how to do (STORY-065).
@@ -73,6 +75,22 @@ export const RECURRING = [
     kind: 'audit.seal_and_verify',
     scope: 'global',
     describe: () => 'seal new audit rows and re-verify every seal',
+  },
+  {
+    // Author-scoped, like everything that reads one tenant's posts. Before
+    // STORY-029 engagement was collected when a human pressed a button —
+    // zero sweeps, two collections ever — and "tracked" means on a timer.
+    kind: 'engagement.collect',
+    scope: 'author',
+    describe: (job) => `collect engagement for every published post of author ${job.author_id}`,
+  },
+  {
+    // Global: an outage has no tenant (STORY-027). The worker running this is
+    // what notices a dead API; the API's own timer is what notices a dead
+    // worker. Neither can notice itself.
+    kind: 'system.health_check',
+    scope: 'global',
+    describe: () => 'check every component is answering, and page someone if one is not',
   },
 ];
 
@@ -152,6 +170,30 @@ export const HANDLERS = {
       confirmed: scan.confirmed.length,
       producerStricter: scan.producerStricter.length,
       notified: alerts.notified.length,
+    };
+  },
+
+  /** STORY-029's tracker. Appends a reading per published post; mocked, and says so. */
+  'engagement.collect': async ({ job }) => trackEngagement({ authorId: Number(job.author_id) }),
+
+  /**
+   * STORY-027's monitor. Probes the database and every live instance, logs a
+   * row per target, opens or resolves an outage on the transition, and tells
+   * the operators once per outage.
+   */
+  'system.health_check': async () => {
+    const result = await monitorAndAlert({});
+    return {
+      recorded: result.recorded,
+      database: result.database.status,
+      api: result.components.api?.status ?? null,
+      worker: result.components.worker?.status ?? null,
+      instances: result.instances.length,
+      outagesStarted: result.started.map((o) => o.component),
+      outagesResolved: result.resolved.map((o) => o.component),
+      retired: result.retired.length,
+      alerted: result.alert.alerted.length,
+      alertSkipped: result.alert.reason,
     };
   },
 

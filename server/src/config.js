@@ -13,7 +13,14 @@ const number = (value, fallback) => {
 };
 
 export const config = {
-  databaseUrl: process.env.DATABASE_URL ?? 'postgres://localhost:5432/author_launch_engine',
+  // Two connections, two powers (STORY-033). The application runs as
+  // `ale_app_login`, which can read and write rows and cannot change the
+  // schema, disable a trigger, or update an audit row. Migrations run as the
+  // owner. Setting only DATABASE_URL (as older setups and CI did) makes both
+  // the owner — which works, and which /ready and the Trust tab now report.
+  databaseUrl: process.env.DATABASE_URL ?? 'postgres://ale_app_login@localhost:5432/author_launch_engine',
+  migrationDatabaseUrl:
+    process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL ?? 'postgres://localhost:5432/author_launch_engine',
   port: number(process.env.PORT, 4000),
   aiProvider: process.env.AI_PROVIDER ?? 'stub',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
@@ -68,6 +75,10 @@ export const config = {
   // it lands at exactly 0.000.
   expertiseThreshold: number(process.env.EXPERTISE_THRESHOLD, 0.5),
   minOpportunitiesPerMonth: number(process.env.MIN_OPPORTUNITIES_PER_MONTH, 5),
+  // How much two drafts must share before they count as near-duplicates
+  // (STORY-026). Readable on purpose: a reviewer seeing "these share 82% of
+  // their words" can check the claim by reading them.
+  nearDuplicateOverlap: Number(process.env.NEAR_DUPLICATE_OVERLAP ?? 0.7),
   minThemeAlignment: number(process.env.MIN_THEME_ALIGNMENT, 0.5),
   // How many of the book's own words about a theme a draft has to carry
   // before it counts as arguing that theme rather than name-checking it.
@@ -102,6 +113,31 @@ export const config = {
   jobBackoffSeconds: number(process.env.JOB_BACKOFF_SECONDS, 30),
   // A job still 'running' after this long belongs to a worker that died.
   jobStaleSeconds: number(process.env.JOB_STALE_SECONDS, 300),
+  // Health monitoring (STORY-027). An instance says it is alive this often;
+  // the monitor calls it down once it has been quiet for `instanceStaleSeconds`
+  // — four missed beats, so one slow database round-trip is not an outage —
+  // and retires the row as presumed dead after `instanceDeadSeconds`, at which
+  // point the live set stops listing a process that is not coming back.
+  heartbeatSeconds: number(process.env.HEARTBEAT_SECONDS, 15),
+  instanceStaleSeconds: number(process.env.INSTANCE_STALE_SECONDS, 60),
+  instanceDeadSeconds: number(process.env.INSTANCE_DEAD_SECONDS, 600),
+  // How often each running process performs the checks itself, between the
+  // worker's sweeps. The API checks so a dead worker is noticed; the worker
+  // checks so a dead API is. Neither can notice itself, which is the limit of
+  // self-monitoring and the reason the README still asks for an outside probe.
+  healthCheckSeconds: number(process.env.HEALTH_CHECK_SECONDS, 30),
+  // STORY-031. Redirect/refuse plain http. On by default in production, where
+  // the app sits behind a TLS terminator; off in development, where localhost
+  // has no certificate. Set ENFORCE_HTTPS=false only if something other than
+  // this process is doing the enforcing, and say which in the deploy notes.
+  enforceHttps: (process.env.ENFORCE_HTTPS ?? (process.env.NODE_ENV === 'production' ? 'true' : 'false')) === 'true',
+  // Browser origins allowed to call the API cross-origin. The UI reaches it
+  // same-origin (Vite's proxy in dev, nginx in a container), so production
+  // needs none; it was `*` until STORY-031.
+  corsOrigins: (process.env.CORS_ORIGINS ?? (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5173'))
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
   jwtSecret: process.env.JWT_SECRET ?? 'dev-only-insecure-secret-change-me',
   jwtTtl: process.env.JWT_TTL ?? '12h',
   nodeEnv: process.env.NODE_ENV ?? 'development',

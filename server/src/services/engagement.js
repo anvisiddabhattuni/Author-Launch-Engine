@@ -72,18 +72,27 @@ export function mockMetrics({ externalId, platform, format, hoursLive, formatEff
   const noise = 0.6 + (((seed >>> 9) % 800) / 1000);
   const rate = Math.max(0.0005, base.rate * noise * effect);
 
-  const engagements = Math.max(1, Math.round(impressions * rate));
+  // Volume accrues with age and settles (STORY-029): about half of what a post
+  // will ever earn by 12 hours, 93% by 48 — which is why the maturity window
+  // is 48. The *rate* is untouched, so the format comparison sees the same
+  // number at every age and a series of readings shows a post filling in
+  // rather than a flat line repeated. A mock that never moved would make the
+  // history this story adds a table of identical rows.
+  const growth = Math.max(0.05, 1 - Math.exp(-Number(hoursLive) / 18));
+  const impressionsNow = Math.max(50, Math.round(impressions * growth));
+
+  const engagements = Math.max(1, Math.round(impressionsNow * rate));
   // Split roughly 70/18/12 with a deterministic wobble.
   const likes = Math.round(engagements * 0.7);
   const shares = Math.round(engagements * 0.18);
   const comments = Math.max(0, engagements - likes - shares);
 
   return {
-    impressions,
+    impressions: impressionsNow,
     likes,
     shares,
     comments,
-    engagementRate: Number(((likes + shares + comments) / impressions).toFixed(6)),
+    engagementRate: Number(((likes + shares + comments) / impressionsNow).toFixed(6)),
     hoursLive: Number(Number(hoursLive).toFixed(2)),
   };
 }
@@ -154,6 +163,29 @@ export async function collectEngagement(
       ],
     );
     collected.push(rows[0]);
+
+    // The same reading, appended rather than replaced (STORY-029). The row
+    // above is what the post is doing now; this is what it has done.
+    await client.query(
+      `INSERT INTO content_metrics
+         (scheduled_post_id, draft_id, author_id, platform, format, collected_at,
+          hours_live, impressions, likes, shares, comments, engagement_rate, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'mock')`,
+      [
+        post.id,
+        post.draft_id,
+        post.author_id,
+        post.platform,
+        post.format,
+        now.toISOString(),
+        m.hoursLive,
+        m.impressions,
+        m.likes,
+        m.shares,
+        m.comments,
+        m.engagementRate,
+      ],
+    );
   }
 
   await recordAction(

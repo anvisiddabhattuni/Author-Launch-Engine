@@ -83,7 +83,7 @@ export async function scoutOpportunities({
 
     const expertise = deriveExpertise({ books: allBooks, posts, trackRecord });
 
-    const listings = await searchAllDirectories({ from, types });
+    const listings = await searchAllDirectories({ from, types, authorId });
     const discoveredMonth = monthStart(from);
 
     await recordAction(

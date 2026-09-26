@@ -1,0 +1,15 @@
+# STORY-034. Without this file every `COPY server ./server` sent the whole
+# working tree to the build: host node_modules (compiled for macOS, not the
+# Linux image), the client's dist, git history, and any .env lying around —
+# which would have baked a developer's secrets into an image layer, where
+# deleting them in a later layer does not remove them.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!.env.example
+.git
+.github
+**/*.log
+**/.DS_Store
+client/scripts

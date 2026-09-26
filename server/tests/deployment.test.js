@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { closePool, query } from '../src/db/pool.js';
+import { closePool, ownerQuery, query } from '../src/db/pool.js';
 import {
   ACTOR,
   appliedMigrations,
@@ -59,7 +59,9 @@ describe('STORY-015: readiness is a different question from liveness', () => {
     // that is not there. Readiness is what stops it being routed to.
     const applied = await appliedMigrations();
     const last = applied[applied.length - 1];
-    await query('DELETE FROM schema_migrations WHERE filename = $1', [last]);
+    // As the owner: since STORY-033 the application login cannot rewrite
+    // which migrations ran, which is exactly as it should be.
+    await ownerQuery('DELETE FROM schema_migrations WHERE filename = $1', [last]);
     try {
       const result = await readiness({});
       assert.equal(result.ready, false);
@@ -67,7 +69,7 @@ describe('STORY-015: readiness is a different question from liveness', () => {
       assert.deepEqual(result.missingMigrations, [last]);
       assert.match(result.checks.find((c) => c.id === 'schema').detail, /not applied/);
     } finally {
-      await query('INSERT INTO schema_migrations (filename) VALUES ($1)', [last]);
+      await ownerQuery('INSERT INTO schema_migrations (filename) VALUES ($1)', [last]);
     }
     assert.equal((await readiness({})).ready, true, 'and recovers when it is applied');
   });
