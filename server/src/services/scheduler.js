@@ -3,6 +3,8 @@ import { withTransaction, query } from '../db/pool.js';
 import { recordAction } from './auditLog.js';
 import { getSocialApi } from './socialApis.js';
 
+import { send } from './messageBus.js';
+
 export const ACTOR = 'SchedulingAgent';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -212,6 +214,14 @@ export async function publishDue({ now = new Date() } = {}) {
         before: post,
         after: rows[0],
         metadata: { error: error.message },
+      });
+      // STORY-039: the notifier hears now rather than at its next sweep.
+      await send({
+        from: ACTOR,
+        to: 'APIIntegrationAgent',
+        topic: 'post.publish_failed',
+        authorId: post.author_id,
+        payload: { authorId: Number(post.author_id), scheduledPostId: Number(post.id), error: error.message },
       });
 
       results.push(rows[0]);

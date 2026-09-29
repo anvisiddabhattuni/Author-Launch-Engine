@@ -15,7 +15,9 @@ export default defineConfig({
     headers: uiHeaders({ enforce: false }),
     // Keeps the browser on one origin so no CORS handling is needed in dev.
     proxy: {
-      '/api': 'http://localhost:4000',
+      // A regex, not a prefix: '/api' also matched the UI's own /api-keys page
+      // (STORY-045) and sent it to the API, which answered 404.
+      '^/api(/|$)': 'http://localhost:4000',
     },
   },
   // `vite preview` serves the production build, and enforces — this is what
@@ -24,7 +26,9 @@ export default defineConfig({
     port: 4173,
     headers: uiHeaders({ enforce: true }),
     proxy: {
-      '/api': 'http://localhost:4000',
+      // A regex, not a prefix: '/api' also matched the UI's own /api-keys page
+      // (STORY-045) and sent it to the API, which answered 404.
+      '^/api(/|$)': 'http://localhost:4000',
     },
   },
 });

@@ -1,0 +1,34 @@
+# STORY-056: one Grafana data source per index the aggregation fills (STORY-055).
+# ELASTICSEARCH_URL is read from Grafana's environment, so Compose, Helm and CI
+# point the same files at their own cluster.
+apiVersion: 1
+datasources:
+  - name: Audit log
+    uid: ale-audit
+    type: elasticsearch
+    access: proxy
+    url: ${ELASTICSEARCH_URL}
+    editable: false
+    jsonData: { index: ale-audit, timeField: '@timestamp', maxConcurrentShardRequests: 5 }
+  - name: Data access log
+    uid: ale-access
+    type: elasticsearch
+    access: proxy
+    url: ${ELASTICSEARCH_URL}
+    editable: false
+    jsonData: { index: ale-access, timeField: '@timestamp', maxConcurrentShardRequests: 5 }
+  - name: Security log
+    uid: ale-security
+    type: elasticsearch
+    access: proxy
+    url: ${ELASTICSEARCH_URL}
+    editable: false
+    jsonData: { index: ale-security, timeField: '@timestamp', maxConcurrentShardRequests: 5 }
+  - name: System metrics
+    uid: ale-metrics
+    type: elasticsearch
+    access: proxy
+    url: ${ELASTICSEARCH_URL}
+    isDefault: true
+    editable: false
+    jsonData: { index: ale-metrics, timeField: '@timestamp', maxConcurrentShardRequests: 5 }

@@ -328,7 +328,9 @@ describe('TBI: notifying is not deciding', () => {
     await draftPressKit({ milestoneId: milestone.id });
 
     const result = await notifyPendingReviews({ authorId, notifier: failing });
-    const failed = result.notified.filter((n) => n.status === 'failed');
+    // Reported apart from the ones that went (STORY-040).
+    assert.equal(result.notified.filter((n) => n.status === 'failed').length, 0, 'a failed send was counted as notified');
+    const failed = result.failed;
     assert.ok(failed.length > 0, 'the failure should be recorded, not swallowed');
     assert.match(failed[0].error, /mailbox unavailable/);
 

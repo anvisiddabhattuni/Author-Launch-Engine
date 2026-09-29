@@ -187,9 +187,16 @@ export const CHECKS = [
     // The entity list is fixed in code, which is the standing limitation of
     // every check here: a new approvable thing gets no coverage until somebody
     // adds it. Named in the README's Known gaps rather than left implied.
+    //
+    // `message.sent` (STORY-039) is excluded for the same reason as the
+    // template refusals: a message being sent is its *creation* — no row moved
+    // from one status to another — and the first run after STORY-039 counted
+    // every one as a transition missing its states. The verb list is a
+    // heuristic, and each new use of a listed verb has to be read, not matched.
     sql: `SELECT COUNT(*)::int AS n FROM audit_log
            WHERE (
-                   action ~ '\\.(approved|suspended|restored|retired|distributed|published|sent|scheduled)$'
+                   (action ~ '\\.(approved|suspended|restored|retired|distributed|published|sent|scheduled)$'
+                    AND entity_type <> 'agent_message')
                 OR (action ~ '\\.rejected$'
                     AND entity_type IN ('draft', 'outreach_message', 'pr_material', 'mix_recommendation'))
                  )
@@ -215,6 +222,26 @@ export const CHECKS = [
     label: 'Every external integration is answering',
     why: 'STORY-038 / REQ-009. An open circuit is a provider the gateway has stopped calling because it stopped answering.',
     sql: "SELECT COUNT(*)::int AS n FROM integration_circuits WHERE state <> 'closed'",
+  },
+  {
+    id: 'audit.encrypted',
+    severity: SEVERITY.INVARIANT,
+    label: 'Every audit entry is encrypted with AES-256 under the current key, and opens',
+    why:
+      'STORY-049 / REQ-013. An entry under a key the application no longer holds is unreadable to it; one ' +
+      'that does not open was edited after it was written. Counted by the storage itself, which the ' +
+      'application cannot read directly.',
+    sql: 'SELECT (other_keys + unopened)::int AS n FROM audit_encryption_status()',
+  },
+  {
+    id: 'security_log.complete',
+    severity: SEVERITY.INVARIANT,
+    label: 'Every attempt on an audit log is in the security log',
+    why:
+      'STORY-051 / REQ-013. Each attempt is written to the data access log and the security log in one ' +
+      'transaction; an access record on an audit route with no security entry means the watching stopped.',
+    sql: `SELECT COUNT(*)::int AS n FROM data_access_events e
+           WHERE e.audit_route AND NOT EXISTS (SELECT 1 FROM security_log s WHERE s.request_id = e.request_id)`,
   },
   {
     id: 'db.least_privilege',
@@ -255,6 +282,54 @@ export const CHECKS = [
     label: 'No scheduled work has been given up on',
     why: 'STORY-065. A dead letter is work that stopped and told nobody.',
     sql: "SELECT COUNT(*)::int AS n FROM jobs WHERE status = 'dead_letter'",
+  },
+  {
+    id: 'access.elevated_reviewed',
+    severity: SEVERITY.INVARIANT,
+    label: 'Every account with more than author access got it through a reviewed change',
+    why:
+      'STORY-042 / REQ-011. A role granted without a second admin\'s approval — or before this story, ' +
+      'through onboarding in one request — is access nobody agreed to.',
+    // An invariant: the review is the whole promise. Accounts the seed or a
+    // migration created before anyone could approve are recorded as
+    // 'bootstrap', which only the schema owner can write.
+    sql: `SELECT COUNT(*)::int AS n FROM users u
+           WHERE u.active AND u.role <> 'author'
+             AND NOT EXISTS (
+               SELECT 1 FROM access_changes c
+                WHERE c.user_id = u.id AND c.kind = 'assign_role' AND c.new_role = u.role
+                  AND (c.status = 'bootstrap' OR c.applied_at IS NOT NULL))`,
+  },
+  {
+    id: 'tasks.priority_respected',
+    severity: SEVERITY.QUALITY,
+    label: 'No higher-priority task was kept waiting by a lower one, for no reason',
+    why:
+      'STORY-040 / REQ-010. Every dispatch records the higher-priority tasks it went ahead of and what ' +
+      'blocked each. One with no blocker that then waited is the task manager choosing wrongly.',
+    // Judged by consequence, not by snapshot — and the first version was wrong
+    // for that reason. With several workers the queue is in motion: a task can
+    // be mid-claim by another worker (SKIP LOCKED passes over it) at the
+    // instant this one is chosen, and be running milliseconds later. The demo
+    // flagged two such "inversions"; the higher task started 8ms after. What
+    // would actually be wrong is a higher-priority task left *waiting*, so a
+    // skipped, unblocked task counts only if it then waited more than 5s — or
+    // was never picked up at all.
+    sql: `SELECT COUNT(*)::int AS n
+            FROM audit_log a
+            CROSS JOIN LATERAL jsonb_array_elements(a.metadata->'higherPriorityWaiting') w
+            LEFT JOIN jobs h ON h.id = (w->>'id')::bigint
+           WHERE a.action = 'task.dispatched'
+             AND a.metadata->>'chosenBy' = 'priority'
+             AND w->'blockedBy' = 'null'::jsonb
+             AND (h.id IS NULL OR h.claimed_at IS NULL OR h.claimed_at > a.created_at + interval '5 seconds')`,
+  },
+  {
+    id: 'messages.no_dead_letters',
+    severity: SEVERITY.QUALITY,
+    label: 'No message between agents has been given up on',
+    why: 'STORY-039 / REQ-010. A dead letter is one agent telling another something that never landed.',
+    sql: "SELECT COUNT(*)::int AS n FROM agent_messages WHERE status = 'dead_letter'",
   },
   {
     id: 'audit.sealed',

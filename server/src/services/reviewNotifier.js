@@ -46,7 +46,9 @@ export async function findKitsAwaitingReview({ authorId }, client) {
        JOIN pr_materials p    ON p.kit_id = k.id
       WHERE k.author_id = $1
         AND k.status = 'drafting'
-      GROUP BY k.id, k.author_id, m.title, m.type, m.event_date, m.award_name, m.outcome
+      -- k.created_at named, not implied by k.id: inside a tenant schema
+      -- pr_kits is a view, and a view has no key to imply it from (STORY-041).
+      GROUP BY k.id, k.author_id, k.created_at, m.title, m.type, m.event_date, m.award_name, m.outcome
      HAVING COUNT(*) FILTER (WHERE p.status = ANY($2)) > 0
       ORDER BY COALESCE(m.event_date, k.created_at::date), k.id`,
     [authorId, AWAITING],
@@ -166,7 +168,7 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
         ORDER BY e.id`,
       [authorId],
     );
-    if (pending.length === 0) return { notified: [], skipped: [] };
+    if (pending.length === 0) return { notified: [], failed: [], skipped: [] };
 
     const reviewers = await findReviewers({ authorId }, client);
     if (reviewers.length === 0) {
@@ -184,10 +186,11 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
         },
         client,
       );
-      return { notified: [], skipped: [], unreachable: true };
+      return { notified: [], failed: [], skipped: [], unreachable: true };
     }
 
     const notified = [];
+    const failed = [];
     const skipped = [];
 
     for (const escalation of pending) {
@@ -281,11 +284,14 @@ export async function notifyRaisedEscalations({ authorId, notifier = emailApi })
           client,
         );
 
-        notified.push(notification);
+        // A failed send is not a notification (STORY-040). It used to be
+        // counted as one, so a sweep during an email outage reported every
+        // reviewer told — while the audit row beside it said otherwise.
+        (notification.status === 'sent' ? notified : failed).push(notification);
       }
     }
 
-    return { notified, skipped };
+    return { notified, failed, skipped };
   });
 }
 
@@ -331,10 +337,11 @@ export async function notifyPendingReviews({ authorId, notifier = emailApi }) {
         },
         client,
       );
-      return { notified: [], skipped: [], kits, reviewers, unreachable: true };
+      return { notified: [], failed: [], skipped: [], kits, reviewers, unreachable: true };
     }
 
     const notified = [];
+    const failed = [];
     const skipped = [];
 
     for (const kit of kits) {
@@ -406,10 +413,13 @@ export async function notifyPendingReviews({ authorId, notifier = emailApi }) {
           client,
         );
 
-        notified.push(notification);
+        // A failed send is not a notification (STORY-040). It used to be
+        // counted as one, so a sweep during an email outage reported every
+        // reviewer told — while the audit row beside it said otherwise.
+        (notification.status === 'sent' ? notified : failed).push(notification);
       }
     }
 
-    return { notified, skipped, kits, reviewers, unreachable: false };
+    return { notified, failed, skipped, kits, reviewers, unreachable: false };
   });
 }

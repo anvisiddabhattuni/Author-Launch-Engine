@@ -452,7 +452,7 @@ export async function operators(client = pool) {
  * record: an outage nobody could be told about is a second finding, not a
  * quiet one (STORY-012's rule for an unreachable queue).
  */
-export async function alertOnOutages({ started, notifier = emailApi }) {
+export async function alertOnOutages({ started, notifier = emailApi, findOperators = operators }) {
   if (!started || started.length === 0) return { alerted: [], reason: 'no new outage' };
 
   const { rows: claimed } = await pool.query(
@@ -462,7 +462,7 @@ export async function alertOnOutages({ started, notifier = emailApi }) {
   );
   if (claimed.length === 0) return { alerted: [], reason: 'already alerted by another monitor' };
 
-  const recipients = await operators();
+  const recipients = await findOperators();
   if (recipients.length === 0) {
     // Undo the claim: the outage was not alerted, and a later grant of the
     // permission should be able to hear about it if it is still open.
@@ -528,7 +528,7 @@ export async function alertOnOutages({ started, notifier = emailApi }) {
 export async function monitorAndAlert(options = {}) {
   const result = await performHealthChecks(options);
   const alert = result.recorded
-    ? await alertOnOutages({ started: result.started, notifier: options.notifier })
+    ? await alertOnOutages({ started: result.started, notifier: options.notifier, findOperators: options.findOperators })
     : { alerted: [], reason: 'database unreachable — nothing could be recorded or sent' };
   return { ...result, alert };
 }

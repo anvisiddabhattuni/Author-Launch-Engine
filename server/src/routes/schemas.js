@@ -150,9 +150,102 @@ export const SCHEMAS = {
     body: {
       name: name.required(),
       email: email.required(),
-      password: Joi.string().min(8).max(1000).required(),
+      // No password (STORY-043): the author sets their own from the emailed
+      // link. One sent here is refused rather than stripped, so a client
+      // built against the old API learns it has changed instead of silently
+      // having its password ignored.
+      password: Joi.any().forbidden().messages({ 'any.unknown': 'the author sets their own password from the invitation; do not send one' }),
       role: Joi.string().valid(...ROLES),
       voiceProfile: Joi.object().unknown(true),
+    },
+  },
+
+  accessReport: {
+    query: {
+      authorId: id,
+      tenant: id,
+      user: id,
+      outcome: Joi.string().valid('allowed', 'denied', 'not_found', 'invalid', 'unauthenticated', 'error', 'refused'),
+      hours: Joi.number().integer().min(1).max(24 * 90).default(24),
+    },
+  },
+
+  feedback: {
+    body: Joi.object({
+      rating: Joi.number().integer().min(1).max(5).allow(null),
+      comment: Joi.string().trim().max(2000).allow('', null),
+    }).or('rating', 'comment'),
+  },
+
+  requestChanges: {
+    body: { note: Joi.string().trim().min(10).max(2000).required() },
+  },
+
+  addMaterial: {
+    body: {
+      kind: Joi.string().valid('synopsis', 'excerpt', 'author_note', 'press_quote', 'review').required(),
+      content: Joi.string().trim().min(20).max(50_000).required(),
+    },
+  },
+
+  createApiKey: {
+    body: {
+      name: Joi.string().trim().min(1).max(80).required(),
+      access: Joi.string().valid('read', 'read_write').default('read'),
+      expiresInDays: Joi.number().integer().min(1).max(365).default(90),
+    },
+  },
+
+  governanceScore: {
+    query: { authorId: id, days: Joi.number().integer().min(1).max(365).default(30) },
+  },
+
+  search: {
+    query: {
+      authorId: id,
+      q: Joi.string().max(200).allow('').default(''),
+      source: Joi.string().valid('audit', 'access').allow('').default(''),
+      from: Joi.date().iso(),
+      to: Joi.date().iso(),
+      size: Joi.number().integer().min(1).max(200).default(50),
+    },
+  },
+
+  auditReport: {
+    query: {
+      authorId: id,
+      from: Joi.date().iso(),
+      to: Joi.date().iso(),
+      actor: Joi.string().trim().max(200),
+      action: Joi.string().trim().max(100),
+      format: Joi.string().valid('json', 'csv').default('json'),
+    },
+  },
+
+  notifications: {
+    query: { authorId: id, open: Joi.string().valid('true', 'false') },
+  },
+
+  acknowledge: {
+    body: { note: Joi.string().trim().max(1000).allow('') },
+  },
+
+  securityLog: {
+    query: {
+      authorId: id,
+      outcome: Joi.string().valid('allowed', 'denied', 'not_found', 'invalid', 'unauthenticated', 'error', 'refused'),
+      hours: Joi.number().integer().min(1).max(24 * 90).default(24),
+    },
+  },
+
+  blockAccount: {
+    body: { reason: Joi.string().trim().min(10).max(1000).required() },
+  },
+
+  acceptInvite: {
+    body: {
+      token: Joi.string().max(200).required(),
+      password: Joi.string().min(10).max(1000).required(),
     },
   },
 
@@ -187,6 +280,19 @@ export const SCHEMAS = {
   },
 
   retireTemplate: { body: { reason: text(500) } },
+
+  proposeAccessChange: {
+    body: {
+      kind: Joi.string().valid('grant_permission', 'revoke_permission', 'assign_role').required(),
+      role: Joi.string().valid(...ROLES).when('kind', { is: 'assign_role', then: Joi.forbidden(), otherwise: Joi.required() }),
+      permission: Joi.string().max(60).when('kind', { is: 'assign_role', then: Joi.forbidden(), otherwise: Joi.required() }),
+      userId: id.when('kind', { is: 'assign_role', then: Joi.required(), otherwise: Joi.forbidden() }),
+      newRole: Joi.string().valid(...ROLES).when('kind', { is: 'assign_role', then: Joi.required(), otherwise: Joi.forbidden() }),
+      reason: Joi.string().trim().min(10).max(1000).required(),
+    },
+  },
+
+  decideAccessChange: { body: { note: text(1000) } },
 
   auditLog: { query: { authorId: id, entityType: Joi.string().max(60), limit: limit(1000, 100) } },
 };

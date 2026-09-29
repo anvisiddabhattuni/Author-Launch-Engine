@@ -1,0 +1,88 @@
+# STORY-054. Values for a local cluster by default (images built into the
+# node's Docker, pullPolicy Never). For a real cluster, set image.registry and
+# pullPolicy, and provide secrets via existingSecret rather than --set.
+
+image:
+  registry: ""          # e.g. ghcr.io/you/ — empty uses images built locally
+  tag: dev
+  pullPolicy: Never
+
+# Secrets. Either name an existing Secret with keys app-db-password,
+# owner-db-password, jwt-secret and audit-key, or pass the values (never
+# commit them). The chart refuses to render without one or the other.
+existingSecret: ""
+secrets:
+  appDbPassword: ""
+  ownerDbPassword: ""
+  jwtSecret: ""
+  auditKey: ""          # 32 random bytes, base64 (STORY-049)
+  grafanaAdminPassword: ""   # only with dashboards.enabled (STORY-056)
+
+api:
+  replicas: 2           # load balanced by the Service from the first request
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+  enforceHttps: false   # true behind a TLS-terminating ingress
+
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 300m, memory: 256Mi }
+
+client:
+  replicas: 2
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 96Mi }
+
+postgres:
+  # In-cluster Postgres for a demo; a real deployment points DATABASE_URL at a
+  # managed database instead and sets enabled: false.
+  enabled: true
+  image: postgres:17-alpine
+  storage: 1Gi
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+
+# Demo data, with random passwords printed once in the job's log (STORY-030).
+seed:
+  enabled: false
+
+# People's access to this namespace (STORY-054). Group names come from the
+# cluster's authentication (OIDC, certificates). Empty lists bind nobody.
+rbac:
+  viewers: []           # read pods, logs, events, deployments — nothing secret
+  operators: []         # plus scale, restart and roll out — still no secrets
+  secretAdmins: []      # manage the Secret — nothing else
+
+# STORY-055/056: search and dashboards, off unless asked for.
+# The index is a copy the worker fills from the logs; the app's own pods and
+# Grafana are the only things the NetworkPolicy lets reach it.
+search:
+  enabled: false
+  image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+  heapMb: 512
+  storage: 2Gi
+  resources:
+    requests: { cpu: 250m, memory: 1Gi }
+    limits: { memory: 1536Mi }
+# Grafana, with the trust dashboard provisioned from files/grafana. Needs
+# secrets.grafanaAdminPassword (or grafana-admin-password in existingSecret).
+# Customisations are saved to its volume, so they outlive a restart.
+dashboards:
+  enabled: false
+  image: grafana/grafana:11.2.2
+  storage: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }

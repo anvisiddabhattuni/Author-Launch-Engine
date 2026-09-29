@@ -20,8 +20,10 @@
  * code that is supposed to prevent them.
  */
 import { pool, withTransaction } from '../db/pool.js';
+import { provisionTenant } from '../services/tenantSchemas.js';
 import { recordAction } from '../services/auditLog.js';
-import { upsertUser } from '../services/auth.js';
+import { hashPassword } from '../services/auth.js';
+import { createInvite, devLink, sendWelcome } from '../services/invites.js';
 
 export const ACTOR = 'TenantManagementAgent';
 
@@ -42,7 +44,9 @@ export const ACTOR = 'TenantManagementAgent';
  * "orphaned" audit rows as a breach — a design decision read as a fault, which
  * is how a security check earns the right to be ignored.
  */
-export const OUTLIVES_TENANTS = new Set(['audit_log']);
+// The record of what happened, including who read a tenant's data (STORY-044),
+// is kept after the tenant is gone — it is the evidence, not tenant data.
+export const OUTLIVES_TENANTS = new Set(['audit_log', 'data_access_events']);
 
 export async function tenantTables(client = pool) {
   const { rows } = await client.query(
@@ -68,63 +72,101 @@ export async function tenantTables(client = pool) {
 export async function onboardTenant({
   name,
   email,
-  password,
+  // Optional since STORY-043, and only for the seed and the tests. Through the
+  // API there is none: the author sets their own from an emailed link, and the
+  // admin never knows it.
+  password = null,
   role = 'author',
   voiceProfile = {},
+  // Who is doing the onboarding — the story's trust line asks for the admin's
+  // id on the record, and the row used to name only this agent.
+  onboardedBy = null,
 }) {
+  // A tenant is an author. An account with more power than that is granted
+  // through a reviewed access change, by a second admin (STORY-042) — this
+  // accepted `role: "admin"` and one admin could mint another in one request.
+  if (role !== 'author') {
+    throw Object.assign(
+      new Error(`A new tenant is an author. To give an account the ${role} role, request an access change — another admin must approve it.`),
+      { status: 400 },
+    );
+  }
   if (!name?.trim()) throw Object.assign(new Error('A tenant needs a name'), { status: 400 });
   if (!email?.trim()) throw Object.assign(new Error('A tenant needs an email'), { status: 400 });
-  if (!password || password.length < 8) {
-    throw Object.assign(new Error('A tenant password must be at least 8 characters'), {
-      status: 400,
-    });
+  if (password !== null && password.length < 8) {
+    throw Object.assign(new Error('A tenant password must be at least 8 characters'), { status: 400 });
   }
+  const passwordHash = password === null ? null : await hashPassword(password);
 
-  const { author, user } = await withTransaction(async (client) => {
-    const { rows: existing } = await client.query('SELECT id FROM authors WHERE email = $1', [
-      email,
-    ]);
+  // Author, account and invitation in one transaction (STORY-043). The comment
+  // above always said so; the code committed the author and then created the
+  // account separately, so an account that failed — an address already used by
+  // a staff login — left an author nobody could ever sign in to.
+  const { author, user, invite } = await withTransaction(async (client) => {
+    const { rows: existing } = await client.query(
+      'SELECT 1 FROM authors WHERE lower(email) = lower($1) UNION ALL SELECT 1 FROM users WHERE lower(email) = lower($1)',
+      [email],
+    );
     if (existing[0]) {
-      throw Object.assign(new Error(`A tenant already exists for ${email}`), { status: 409 });
+      throw Object.assign(new Error(`An account already exists for ${email}`), { status: 409 });
     }
-
-    const { rows } = await client.query(
+    const { rows: [created] } = await client.query(
       `INSERT INTO authors (name, email, voice_profile, onboarded_at, tenant_status)
        VALUES ($1,$2,$3, now(), 'active') RETURNING *`,
       [name, email, JSON.stringify(voiceProfile)],
     );
-    return { author: rows[0], client };
-  }).then(async ({ author: created }) => {
-    // The account is created after the author exists, because it references it.
-    const account = await upsertUser({
-      email,
-      name,
-      password,
-      role,
-      authorId: created.id,
-    });
-    return { author: created, user: account };
+    const { rows: [account] } = await client.query(
+      `INSERT INTO users (email, name, password_hash, role, author_id)
+       VALUES ($1,$2,$3,'author',$4) RETURNING *`,
+      [email, name, passwordHash, created.id],
+    );
+    const invitation = passwordHash === null
+      ? await createInvite({ userId: account.id, authorId: created.id, createdBy: onboardedBy?.id ?? null }, client)
+      : null;
+    return { author: created, user: account, invite: invitation };
   });
 
+  // The tenant's own schema (STORY-041) — after the commit, because the
+  // provisioning function checks the author exists and cannot see an
+  // uncommitted one.
+  const schema = await provisionTenant(author.id, { reason: 'onboarded' });
+
+  // And the welcome, last: a mail sent for an account that then rolled back
+  // would be a link to nothing.
+  const welcome = invite
+    ? await sendWelcome({ email, name, token: invite.token, expiresAt: invite.expiresAt, authorId: author.id })
+    : null;
+
   await recordAction({
-    actor: ACTOR,
+    // The person, not the agent (STORY-043's trust line).
+    actor: onboardedBy?.name ?? ACTOR,
     action: 'tenant.onboarded',
     entityType: 'author',
     entityId: author.id,
     authorId: author.id,
+    after: { authorId: Number(author.id), name, email, userId: Number(user.id), role: user.role },
     metadata: {
-      name,
-      email,
-      role,
-      // Named on the log because the story's clause is that onboarding
-      // "ensures data isolation and role-based access" — the role is half of it,
-      // and a tenant created without one is a tenant nobody can sign in to.
-      accountCreated: Boolean(user),
-      isolation: 'author_id column, enforced in middleware and checked from outside',
+      adminId: onboardedBy?.id ?? null,
+      adminName: onboardedBy?.name ?? null,
+      tenant: { id: Number(author.id), name, email },
+      role: user.role,
+      accountCreated: true,
+      schema: schema.schema,
+      isolation: `schema tenant_${author.id} and role ale_tenant_${author.id}, enforced by the database (STORY-041)`,
+      // How the author gets in: their own password from a one-time link, or —
+      // seed and tests only — one set here.
+      access: invite ? 'invitation' : 'password set at onboarding',
+      inviteExpiresAt: invite ? new Date(invite.expiresAt).toISOString() : null,
+      welcomeEmail: welcome?.externalId ?? null,
     },
   });
 
-  return { author, user };
+  return {
+    author,
+    user: { id: Number(user.id), email: user.email, role: user.role, authorId: Number(author.id), activated: passwordHash !== null },
+    schema: { name: schema.schema, objects: schema.objects.length },
+    invite: invite ? { sentTo: email, expiresAt: invite.expiresAt, ...devLink(invite.token) } : null,
+  };
 }
 
 /**
@@ -217,11 +259,14 @@ export async function verifyIsolation({ authorId = null } = {}, client = pool) {
 
     // Orphans: rows pointing at a tenant that is gone. Not a leak on its own,
     // but a row nobody owns is a row no tenant filter will ever exclude.
-    const { rows: orphans } = await client.query(
+    // A table dropped between listing and counting has no rows left to judge
+    // — skipped, not a crash. Seen when a test's scratch table came and went
+    // while another suite walked the schema.
+    const orphans = await client.query(
       `SELECT COUNT(*)::int AS n FROM ${table} t
         WHERE t.author_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM authors a WHERE a.id = t.author_id)`,
-    );
+    ).then((r) => r.rows, (e) => { if (e.code === '42P01') return [{ n: 0 }]; throw e; });
     if (orphans[0].n > 0) {
       findings.push({
         table,

@@ -292,7 +292,9 @@ describe('Scenario: notify stakeholders for approval', () => {
     // REQ-006's clause is "email or in-app alerts". The notifications table is
     // the in-app half, and it is what makes a missed email recoverable.
     const { rows } = await query(
-      "SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_name = 'notifications'",
+      // The shared table, in public: since STORY-041 each tenant schema has a
+      // view of the same name, which this used to count as extra tables.
+      "SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'notifications' AND table_type = 'BASE TABLE'",
     );
     assert.equal(rows[0].n, 1);
   });

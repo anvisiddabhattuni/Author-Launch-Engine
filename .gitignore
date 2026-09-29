@@ -8,3 +8,6 @@ npm-debug.log*
 .DS_Store
 coverage/
 .vite/
+
+# STORY-049: the audit log key — never committed
+server/.keys/

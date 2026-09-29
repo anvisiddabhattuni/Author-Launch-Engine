@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { AttentionCard, GovernanceScoreCard, SearchCard } from './TrustLive.jsx';
 
 /**
  * The trust dashboard (STORY-014).
@@ -50,9 +51,13 @@ export function TrustPage({ author, user }) {
   const [checking, setChecking] = useState(false);
   const [checkNote, setCheckNote] = useState('');
 
+  const [tenant, setTenant] = useState(null);
+  const [accesses, setAccesses] = useState(null);
   const load = () => api.trustDashboard(author.id).then(setData).catch((e) => setError(e.message));
   useEffect(() => {
     load();
+    api.tenantSchema(author.id).then(setTenant).catch(() => setTenant(null));
+    api.accessEvents(author.id).then(setAccesses).catch(() => setAccesses(null));
   }, [author.id]);
 
   const canOperate = Boolean(user?.permissions?.includes('system.operate'));
@@ -105,6 +110,9 @@ export function TrustPage({ author, user }) {
 
   return (
     <>
+      {/* STORY-058 */}
+      <GovernanceScoreCard authorId={author.id} />
+
       <div className="card">
         <h2>Governance</h2>
         <div className={`banner ${status.kind}`}>
@@ -140,6 +148,69 @@ export function TrustPage({ author, user }) {
           <tbody>{quality.map(checkRow)}</tbody>
         </table>
       </div>
+
+      {/* STORY-041: where this author's data lives, and proof that their
+          reads are confined to it — the role this request actually ran as. */}
+      {tenant && (
+        <div className="card">
+          <h2>Your data</h2>
+          <div className="meta">
+            <span className="pill mono">schema {tenant.schema}</span>
+            <span className={`pill ${tenant.thisRequestRanAs === tenant.role ? 'approved' : 'neutral'}`}>
+              this page's reads ran as {tenant.thisRequestRanAs}
+            </span>
+            <span className="pill">
+              {tenant.views.length} views of {tenant.thisRequestRanAs === tenant.role ? 'your' : `${author.name}'s`} rows
+            </span>
+            <span className="pill neutral">{tenant.shared.filter((x) => x.readable).length} shared reference tables</span>
+          </div>
+          <p className="hint">
+            {tenant.thisRequestRanAs === tenant.role
+              ? 'Every page you open reads through your own database schema, as a role that can see nothing outside it. If a query anywhere in the product forgot to filter by author, the database would still return only your rows.'
+              : 'You are signed in with access across tenants, so your reads are not confined to one schema. Authors\' reads are.'}
+          </p>
+        </div>
+      )}
+
+      {/* STORY-044: who has opened this tenant's data, read through the
+          tenant's own view of the access log. */}
+      {accesses && (() => {
+        const others = accesses.filter((e) => Number(e.actor_author_id) !== Number(author.id));
+        const refused = others.filter((e) => e.outcome === 'denied' || e.outcome === 'unauthenticated');
+        return (
+          <div className="card">
+            <h2>Who opened {tenant?.thisRequestRanAs === tenant?.role ? 'your' : `${author.name}'s`} data</h2>
+            <div className="meta">
+              <span className="pill neutral">last {accesses.length} requests</span>
+              <span className="pill">{accesses.length - others.length} by {tenant?.thisRequestRanAs === tenant?.role ? 'you' : 'the author'}</span>
+              <span className={`pill ${others.length ? 'pending_approval' : 'approved'}`}>{others.length - refused.length} by staff</span>
+              <span className={`pill ${refused.length ? 'escalated' : 'approved'}`}>{refused.length} refused attempts</span>
+            </div>
+            <p className="hint">
+              Every request that touches this data is recorded — who made it, what it asked for, and
+              whether it was allowed. Staff reads are shown; attempts from other accounts are shown and
+              were refused.
+            </p>
+            {others.length > 0 && (
+              <table>
+                <thead>
+                  <tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Outcome</th></tr>
+                </thead>
+                <tbody>
+                  {others.slice(0, 12).map((e, i) => (
+                    <tr key={i}>
+                      <td className="mono">{new Date(e.occurred_at).toISOString().slice(0, 19).replace('T', ' ')}</td>
+                      <td>{e.user_email ?? 'no session'}{e.user_role ? <span className="hint"> · {e.user_role}</span> : null}</td>
+                      <td className="mono">{e.method} {e.route}</td>
+                      <td><span className={`pill ${e.outcome === 'allowed' ? 'approved' : 'escalated'}`}>{e.outcome}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="card">
         <h2>System health</h2>
@@ -352,23 +423,11 @@ export function TrustPage({ author, user }) {
         )}
       </div>
 
-      {queue && (
-        <div className="card">
-          <h2>Pending approvals ({queue.total})</h2>
-          <p className="hint">
-            Held for a human across all four kinds of work. {queue.escalated} escalated — something
-            checked them and asked for a person rather than letting them through.
-          </p>
-          <div className="meta">
-            {Object.entries(queue.byKind).map(([kind, n]) => (
-              <span className="pill" key={kind}>
-                {n} {kind === 'mixRecommendation' ? 'mix change' : kind}
-                {n === 1 ? '' : 's'}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* STORY-057: pending approvals and recent actions, live, with priority. */}
+      <AttentionCard authorId={author.id} />
+
+      {/* STORY-055: the logs, searchable over any time range. */}
+      <SearchCard authorId={author.id} />
 
       {/* STORY-021: the dimension the dashboard did not have. A score with
           nothing to compare it to is a number, not a metric. */}
@@ -568,32 +627,6 @@ export function TrustPage({ author, user }) {
         </table>
       </div>
 
-      <div className="card">
-        <h2>Recent actions</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>When</th>
-              <th>Actor</th>
-              <th>Action</th>
-              <th>On</th>
-            </tr>
-          </thead>
-          <tbody>
-            {recent.map((r, i) => (
-              <tr key={`${r.created_at}-${i}`}>
-                <td className="mono">{String(r.created_at).slice(11, 19)}</td>
-                <td className="mono">{r.actor}</td>
-                <td>{r.action}</td>
-                <td className="mono">
-                  {r.entity_type}
-                  {r.entity_id ? ` ${r.entity_id}` : ''}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </>
   );
 }

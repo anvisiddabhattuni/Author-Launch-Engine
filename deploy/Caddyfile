@@ -1,0 +1,15 @@
+# STORY-030. The one public entrance: HTTPS for {$DOMAIN}, certificates from
+# Let's Encrypt, issued and renewed by Caddy. Everything else in the stack is
+# on the internal network only. NOT RUN — no domain or server exists yet.
+{$DOMAIN} {
+	encode gzip
+	# Caddy sets X-Forwarded-Proto: https; nginx (client) passes it to the API,
+	# which refuses plain http when ENFORCE_HTTPS=true (STORY-031).
+	reverse_proxy client:8080
+	header -Server
+}
+
+# Plain http is only ever a redirect.
+http://{$DOMAIN} {
+	redir https://{host}{uri} permanent
+}

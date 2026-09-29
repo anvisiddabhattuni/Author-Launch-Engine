@@ -1,0 +1,6 @@
+apiVersion: v2
+name: author-launch-engine
+description: Author Launch Engine on Kubernetes — API, worker, UI and Postgres, with autoscaling, self-healing and RBAC (STORY-054)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

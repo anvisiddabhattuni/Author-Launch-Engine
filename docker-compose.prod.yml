@@ -1,0 +1,64 @@
+# STORY-030 — the public demo, as an overlay on docker-compose.yml:
+#
+#   DOMAIN=demo.example.com APP_DB_PASSWORD=… JWT_SECRET=… \
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# NOT RUN. It needs what only the project owner can provide: a server with
+# Docker, a domain whose DNS points at it, and the secrets above. See the
+# README's STORY-030 section for the steps and `npm run smoke:deployed` for
+# checking the result.
+#
+# What it changes from the development stack:
+#   - Caddy is the only thing listening publicly (80 and 443), with HTTPS on
+#     DOMAIN; the API, client and database publish no ports.
+#   - The API refuses plain http (ENFORCE_HTTPS, STORY-031), trusting the
+#     proxy's X-Forwarded-Proto.
+#   - The demo seed runs in production mode: every account gets a random
+#     password, printed once in the seed's log (not the published ones).
+services:
+  postgres:
+    ports: !reset []
+
+  api:
+    ports: !reset []
+    environment:
+      ENFORCE_HTTPS: 'true'
+      CORS_ORIGINS: https://${DOMAIN:?set DOMAIN to the demo's domain}
+      APP_URL: https://${DOMAIN}
+
+  client:
+    ports: !reset []
+
+  seed:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ['node', 'server/src/db/seed.js']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@postgres:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      AUDIT_KEY_FILE: /run/secrets/audit_key
+    secrets: [audit_key]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: [seed]
+
+  caddy:
+    # Pinned by tag only: the digest must come from the registry on the first
+    # real pull (docker compose pull; docker inspect), not be written from memory.
+    # STORY-034 pins every other image by digest; do the same here once pulled.
+    image: caddy:2.8-alpine
+    ports: ['80:80', '443:443']
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the demo's domain}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [client]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

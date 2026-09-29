@@ -125,6 +125,36 @@ export const OUTBOUND_PATHS = [
       'never while it stays open (STORY-038). Not sent for email, which cannot announce its own outage.',
   },
   {
+    id: 'security.alert_access',
+    kind: EXEMPT,
+    module: 'services/dataAccess.js',
+    sends: 'notice that one account or address keeps being refused tenant data, to accounts holding access.manage',
+    why:
+      'Names an account, a count and the routes it tried; carries no tenant content. Held for approval, ' +
+      'the warning that someone is trying doors would wait on the people it is meant to warn. Once per ' +
+      'account per window (STORY-044).',
+  },
+  {
+    id: 'security.alert_audit_access',
+    kind: EXEMPT,
+    module: 'services/securityNotifications.js',
+    sends: 'notice of a refused attempt on the audit logs, to accounts holding audit.verify',
+    why:
+      'Names who tried, what, when, from where and why it was refused; carries no tenant content. Held for ' +
+      'approval, the warning would wait on the people it warns. Once per person or address per ten minutes; ' +
+      'later attempts join the open alert (STORY-052).',
+  },
+  {
+    id: 'tenant.welcome',
+    kind: EXEMPT,
+    module: 'services/invites.js',
+    sends: 'a one-time link for a new author to set their own password',
+    why:
+      'Carries no tenant content — a greeting and a link — to the address the tenant is being created for. ' +
+      'Holding it for approval would hold the account shut; onboarding is itself an admin action, recorded ' +
+      'with the admin who took it (STORY-043).',
+  },
+  {
     id: 'approval.notify_waiting',
     kind: EXEMPT,
     module: 'agents/approvalNotificationAgent.js',

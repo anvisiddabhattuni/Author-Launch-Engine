@@ -78,6 +78,11 @@ export function LoginPage({ onSignedIn }) {
           </div>
         </form>
 
+        {/* STORY-030: the published demo passwords, shown only where they are
+            the passwords. The production image is built with
+            VITE_SHOW_DEMO_LOGINS=false, and its seed sets random ones. */}
+        {import.meta.env.VITE_SHOW_DEMO_LOGINS !== 'false' && (
+          <>
         <p className="hint" style={{ marginTop: 18 }}>
           Seeded demo logins — these are printed by <span className="mono">npm run db:reset</span>{' '}
           and are not secret:
@@ -108,6 +113,8 @@ export function LoginPage({ onSignedIn }) {
             </tr>
           </tbody>
         </table>
+          </>
+        )}
       </div>
     </div>
   );

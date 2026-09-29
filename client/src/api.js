@@ -38,7 +38,7 @@ async function request(path, options = {}) {
     // An expired or rejected token should return the user to the login screen
     // rather than showing a wall of failed panels. Login itself is exempt: a
     // wrong password is a message, not a lost session.
-    if (response.status === 401 && path !== '/auth/login') {
+    if (response.status === 401 && path !== '/auth/login' && path !== '/auth/accept-invite') {
       session.clear();
       onSessionLost();
     }
@@ -237,6 +237,73 @@ export const api = {
   // STORY-027 — is the system up, from the checks that measured it
   systemHealth: () => request('/system/health'),
   runHealthCheck: () => request('/system/health-check', { method: 'POST' }),
+
+  // STORY-042 — reviewed changes to who may do what
+  // STORY-043: onboarding by invitation.
+  tenants: () => request('/tenants'),
+  onboardTenant: (body) => request('/tenants', { method: 'POST', body }),
+  resendInvite: (authorId) => request(`/tenants/${authorId}/invite`, { method: 'POST' }),
+  suspendTenant: (authorId, reason) => request(`/tenants/${authorId}/suspend`, { method: 'POST', body: { reason } }),
+  restoreTenant: (authorId) => request(`/tenants/${authorId}/restore`, { method: 'POST' }),
+  acceptInvite: async (token, password) => {
+    const result = await request('/auth/accept-invite', { method: 'POST', body: { token, password } });
+    session.set(result.token);
+    return result.user;
+  },
+  access: () => request('/access'),
+  proposeAccessChange: (body) => request('/access/changes', { method: 'POST', body }),
+  approveAccessChange: (id, note = '') => request(`/access/changes/${id}/approve`, { method: 'POST', body: { note } }),
+  rejectAccessChange: (id, note = '') => request(`/access/changes/${id}/reject`, { method: 'POST', body: { note } }),
+  withdrawAccessChange: (id) => request(`/access/changes/${id}/withdraw`, { method: 'POST' }),
+
+  // STORY-041 — the caller's own schema, and who this request ran as
+  tenantSchema: (authorId) => request(`/authors/${authorId}/tenant-schema`),
+  // STORY-057/058: what needs attention, and the governance score.
+  attention: (authorId) => request(`/authors/${authorId}/attention`),
+  governanceScore: (authorId, days = 30) => request(`/authors/${authorId}/governance-score?days=${days}`),
+  // STORY-055: the search index.
+  search: (authorId, params) =>
+    request(`/authors/${authorId}/search?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),
+  searchStatus: (authorId) => request(`/authors/${authorId}/search/status`),
+  // STORY-028: audit log reports.
+  auditReport: (params = {}) =>
+    request(`/audit-reports?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),
+  auditReportCsv: async (params = {}) => {
+    const q = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, v]) => v !== '' && v != null)), format: 'csv' });
+    const r = await fetch(`/api/audit-reports?${q}`, { headers: { Authorization: `Bearer ${session.get()}` } });
+    if (!r.ok) throw new Error(`Report download failed: ${r.status}`);
+    return { text: await r.text(), filename: /filename="([^"]+)"/.exec(r.headers.get('content-disposition') ?? '')?.[1] ?? 'audit-report.csv' };
+  },
+  // STORY-052: alerts to security officers.
+  securityNotifications: () => request('/security/notifications'),
+  acknowledgeNotification: (id, note = '') => request(`/security/notifications/${id}/acknowledge`, { method: 'POST', body: { note } }),
+  // STORY-051: the security log.
+  securityLog: (params = {}) =>
+    request(`/security/audit-access?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),
+  // STORY-050: who may read and manage the audit logs.
+  auditAccessPolicy: () => request('/security/audit-access-policy'),
+  // STORY-048: the feedback loop.
+  rateDraft: (draftId, body) => request(`/drafts/${draftId}/feedback`, { method: 'POST', body }),
+  applyFeedback: (authorId, bookId) => request(`/authors/${authorId}/books/${bookId}/feedback/apply`, { method: 'POST' }),
+  // STORY-047: a reviewer's third answer.
+  requestChanges: (draftId, note) => request(`/drafts/${draftId}/request-changes`, { method: 'POST', body: { note } }),
+  // STORY-046: the model fitted to each book.
+  bookModel: (authorId, bookId) => request(`/authors/${authorId}/books/${bookId}/model`),
+  addBookMaterial: (authorId, bookId, body) => request(`/authors/${authorId}/books/${bookId}/materials`, { method: 'POST', body }),
+  // STORY-045: per-tenant API keys.
+  apiKeys: (authorId) => request(`/authors/${authorId}/api-keys`),
+  createApiKey: (authorId, body) => request(`/authors/${authorId}/api-keys`, { method: 'POST', body }),
+  revokeApiKey: (authorId, id) => request(`/authors/${authorId}/api-keys/${id}/revoke`, { method: 'POST' }),
+  // STORY-044: the access audit.
+  accessEvents: (authorId) => request(`/authors/${authorId}/access-events`),
+  accessReport: (params = {}) =>
+    request(`/security/access?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),
+  blockAccount: (userId, reason) => request(`/security/accounts/${userId}/block`, { method: 'POST', body: { reason } }),
+  unblockAccount: (userId) => request(`/security/accounts/${userId}/unblock`, { method: 'POST' }),
+
+  // STORY-039 — messages between agents
+  messages: () => request('/messages'),
+  redeliverMessage: (id) => request(`/messages/${id}/redeliver`, { method: 'POST' }),
 
   // STORY-065 — background worker run health
   jobs: () => request('/jobs'),

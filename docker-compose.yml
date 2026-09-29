@@ -47,6 +47,10 @@ services:
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD before running the stack}
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+      # STORY-049: the audit log's AES-256 key, as a mounted secret — never an
+      # env var beside the database URL, never in the image.
+      AUDIT_KEY_FILE: /run/secrets/audit_key
+    secrets: [audit_key]
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +69,8 @@ services:
       # reaches it over http and enforcement would refuse every call. Off here;
       # set ENFORCE_HTTPS=true where a terminator sets X-Forwarded-Proto.
       ENFORCE_HTTPS: ${ENFORCE_HTTPS:-false}
+      AUDIT_KEY_FILE: /run/secrets/audit_key
+    secrets: [audit_key]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -77,6 +83,8 @@ services:
       DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+      AUDIT_KEY_FILE: /run/secrets/audit_key
+    secrets: [audit_key]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -99,3 +107,10 @@ services:
 # the file had never been run; the test suite now parses it the way Compose does.
 volumes:
   ale-pgdata:
+
+# STORY-049: the audit log key. Created once with
+#   mkdir -p server/.keys && openssl rand -base64 32 > server/.keys/audit.key && chmod 600 server/.keys/audit.key
+# and mounted read-only into the three services that open the database.
+secrets:
+  audit_key:
+    file: ./server/.keys/audit.key

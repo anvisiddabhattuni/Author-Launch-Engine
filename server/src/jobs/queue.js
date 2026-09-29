@@ -4,6 +4,7 @@ import { recordAction } from '../services/auditLog.js';
 import { planFor, priorityFor, recordDispatch, resourceFor } from '../services/coordination.js';
 
 import { HANDLERS, RECURRING, describeJob } from './handlers.js';
+import { dispatch } from '../services/messageBus.js';
 
 /**
  * The job queue (STORY-065).
@@ -53,8 +54,8 @@ export async function enqueue(
 
   const { rows } = await client.query(
     `INSERT INTO jobs (kind, idempotency_key, author_id, payload, run_at, max_attempts,
-                       priority, resource, coordination)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                       priority, resource, coordination, agent, requires)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING *`,
     [
@@ -67,6 +68,8 @@ export async function enqueue(
       plan.priority,
       plan.resource,
       JSON.stringify(plan.coordination),
+      plan.agent,
+      plan.requires,
     ],
   );
   return { job: rows[0] ?? null, created: Boolean(rows[0]) };
@@ -109,9 +112,9 @@ export async function ensureRecurringJobs({ now = new Date(), everySeconds } = {
       // statement (STORY-011).
       `WITH targets AS (SELECT id FROM authors ORDER BY id FOR SHARE)
        INSERT INTO jobs (kind, idempotency_key, author_id, run_at, max_attempts,
-                         priority, resource, coordination)
+                         priority, resource, coordination, agent, requires)
        SELECT $1, $1 || ':' || t.id || ':' || $2, t.id, $2::timestamptz, $3,
-              $4, replace($5, '{authorId}', t.id::text), $6::jsonb
+              $4, replace($5, '{authorId}', t.id::text), $6::jsonb, $7, $8
          FROM targets t
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING *`,
@@ -122,6 +125,8 @@ export async function ensureRecurringJobs({ now = new Date(), everySeconds } = {
         priorityFor(spec.kind),
         resourceFor({ kind: spec.kind, author_id: '{authorId}' }),
         JSON.stringify(planFor({ kind: spec.kind, author_id: 0 }).coordination),
+        planFor({ kind: spec.kind, author_id: 0 }).agent,
+        planFor({ kind: spec.kind, author_id: 0 }).requires,
       ],
     );
     created.push(...rows);
@@ -152,7 +157,8 @@ const RESOURCE_TAKEN = (error) =>
 
 async function claim({ now, jobId = null }, client) {
   const { rows } = await client.query(
-    `UPDATE jobs SET status = 'running', claimed_at = now(), attempts = attempts + 1
+    `WITH claimed AS (
+     UPDATE jobs SET status = 'running', claimed_at = now(), attempts = attempts + 1
       WHERE id = (
         SELECT j.id FROM jobs j
          WHERE j.status = 'queued' AND j.run_at <= $1
@@ -165,13 +171,38 @@ async function claim({ now, jobId = null }, client) {
                   WHERE holder.status = 'running'
                     AND holder.resource = j.resource
            ))
+           -- Availability (STORY-040): an integration this task needs is down
+           -- and not yet due its trial call. Skipped without spending an
+           -- attempt — running it would only have the gateway refuse, and the
+           -- notifiers record a refused send as announced.
+           AND NOT EXISTS (
+                 SELECT 1 FROM integration_circuits c
+                  WHERE c.service = ANY(j.requires) AND c.state = 'open'
+                    AND c.retry_at IS NOT NULL AND c.retry_at > $1::timestamptz
+           )
          -- Priority first. FIFO alone sent the one piece of outbound work a
          -- human had authorised to the back of every internal sweep.
          ORDER BY j.priority DESC, j.run_at, j.id
          FOR UPDATE SKIP LOCKED
          LIMIT 1
       )
-      RETURNING *`,
+      RETURNING *)
+     -- What this choice went ahead of, read in the same statement as the
+     -- choice (STORY-040) — so from the same snapshot of the queue. The first
+     -- version looked it up afterwards, and with two workers a resource held
+     -- at the moment of choosing had been released by the moment of looking:
+     -- a correct decision recorded as a wrong one, twice, in the demo.
+     SELECT c.*, COALESCE((
+       SELECT json_agg(json_build_object(
+                'id', b.id, 'kind', b.kind, 'priority', b.priority, 'resource', b.resource,
+                'held_by', b.held_by, 'held_by_kind', b.held_by_kind,
+                'down_service', b.down_service, 'down_until', b.down_until))
+         FROM (${BLOCKERS_SQL}
+                WHERE j.status = 'queued' AND j.run_at <= $1::timestamptz
+                  AND j.priority > c.priority AND j.id <> c.id AND j.created_at <= now()
+                ORDER BY (j.author_id IS NOT DISTINCT FROM c.author_id) DESC, j.priority DESC, j.id
+                LIMIT 10) b), '[]'::json) AS passed_over
+       FROM claimed c`,
     [now.toISOString(), jobId],
   );
   return rows[0] ?? null;
@@ -266,8 +297,35 @@ export async function runOnce({ now = new Date(), jobId = null } = {}) {
   if (!job) return null;
 
   // The story's trust clause: task distributions are logged, by the agent that
-  // made the decision, before the work is done rather than after.
-  await recordDispatch({ job });
+  // made the decision, before the work is done rather than after. With what
+  // it was chosen over (STORY-040): any higher-priority task still waiting, and
+  // what was blocking it. An entry with no blocker is a wrong assignment, and
+  // the governance check `tasks.priority_respected` counts them.
+  //
+  //
+  // Read by the claim itself, from the same snapshot (see `claim`): only tasks
+  // that already existed, the same tenant's first, capped at ten. One that
+  // shows no blocker may still have been mid-claim by another worker — SKIP
+  // LOCKED passes over a row being claimed — and that is checked here, after
+  // the fact, when the other claim has committed.
+  const passedOver = job.passed_over ?? [];
+  delete job.passed_over;
+  const higherPriorityWaiting = [];
+  for (const h of passedOver) {
+    let blockedBy = blockerOf(h);
+    if (!blockedBy) {
+      const { rows: [now2] } = await pool.query('SELECT status FROM jobs WHERE id = $1', [h.id]);
+      if (now2 && now2.status !== 'queued') blockedBy = 'claimed by another worker at the same moment';
+    }
+    higherPriorityWaiting.push({ id: Number(h.id), kind: h.kind, priority: h.priority, blockedBy });
+  }
+  await recordDispatch({
+    job,
+    // A job run by id — the Retry button, a test — was requested, not chosen.
+    // Priority is not what decided it, so it is not judged against priority.
+    chosenBy: jobId ? 'request' : 'priority',
+    higherPriorityWaiting,
+  });
 
   const handler = HANDLERS[job.kind];
   if (!handler) {
@@ -285,6 +343,68 @@ export async function runOnce({ now = new Date(), jobId = null } = {}) {
   } catch (error) {
     return settleFailure({ job, error, now });
   }
+}
+
+/**
+ * Every queued job with whatever is stopping it running: a resource another
+ * job holds, or an integration whose circuit is open and not yet due a trial.
+ */
+const BLOCKERS_SQL = `
+  SELECT j.*, holder.id AS held_by, holder.kind AS held_by_kind,
+         down.service AS down_service, down.retry_at AS down_until
+    FROM jobs j
+    LEFT JOIN LATERAL (
+      SELECT h.id, h.kind FROM jobs h
+       WHERE j.resource IS NOT NULL AND h.status = 'running' AND h.resource = j.resource
+       LIMIT 1) holder ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT c.service, c.retry_at FROM integration_circuits c
+       WHERE c.service = ANY(j.requires) AND c.state = 'open'
+         AND c.retry_at IS NOT NULL AND c.retry_at > $1::timestamptz
+       LIMIT 1) down ON TRUE`;
+
+/** The reason a queued job cannot run, in words, or null when nothing blocks it. */
+export function blockerOf(row) {
+  if (row.down_service) {
+    return `waiting for ${row.down_service}: its circuit is open until ${new Date(row.down_until).toISOString()}`;
+  }
+  if (row.held_by) return `waiting for ${row.resource}, held by job ${row.held_by} (${row.held_by_kind})`;
+  return null;
+}
+
+/**
+ * Records each task that is due and held back, with why — once per reason,
+ * not once per poll (STORY-040).
+ *
+ * STORY-011 wrote the logging for this and nothing ever called it: a deferred
+ * job left no trace, so a stalled queue looked exactly like an empty one. A
+ * worker polls every five seconds; recording every poll would bury the one
+ * line a person needs under seven hundred copies of it, so the reason is
+ * stored on the job and a new row is written only when it changes.
+ */
+export async function recordDeferrals({ now = new Date() } = {}) {
+  const { rows } = await pool.query(
+    `${BLOCKERS_SQL}
+      WHERE j.status = 'queued' AND j.run_at <= $1::timestamptz
+        AND (holder.id IS NOT NULL OR down.service IS NOT NULL)`,
+    [now.toISOString()],
+  );
+  const recorded = [];
+  for (const row of rows) {
+    const reason = blockerOf(row);
+    // The reason carries the retry time, so "down until 10:05" and "down until
+    // 10:07" are different reasons — a circuit that re-opened is news.
+    const { rows: changed } = await pool.query(
+      `UPDATE jobs SET deferred_reason = $2::text, deferred_at = $3::timestamptz
+        WHERE id = $1 AND deferred_reason IS DISTINCT FROM $2::text RETURNING *`,
+      [row.id, reason, now],
+    );
+    if (changed[0]) {
+      await recordDispatch({ job: changed[0], deferredBehind: reason });
+      recorded.push({ id: Number(row.id), kind: row.kind, reason });
+    }
+  }
+  return recorded;
 }
 
 /**
@@ -329,9 +449,11 @@ export async function reapStaleJobs({ now = new Date() } = {}) {
  * Capped rather than looping until empty, so one tick cannot run forever and a
  * worker always comes back to reap and re-enqueue.
  */
-export async function tick({ now = new Date(), max = 25 } = {}) {
+export async function tick({ now: given = null, max = 25, channel = null } = {}) {
+  const now = given ?? new Date();
   const reclaimed = await reapStaleJobs({ now });
   const scheduled = await ensureRecurringJobs({ now });
+  const deferred = await recordDeferrals({ now });
 
   const ran = [];
   for (let i = 0; i < max; i += 1) {
@@ -339,7 +461,12 @@ export async function tick({ now = new Date(), max = 25 } = {}) {
     if (!job) break;
     ran.push(job);
   }
-  return { reclaimed, scheduled, ran };
+  // Messages between agents, delivered on every poll (STORY-039) — which is
+  // what makes a hand-off take seconds instead of a sweep interval.
+  // Only a caller-supplied time; otherwise the database's clock decides what
+  // is due, the same clock that stamped the messages (see messageBus.receive).
+  const messages = await dispatch({ now: given, channel });
+  return { reclaimed, scheduled, deferred, ran, messages };
 }
 
 /** Puts a dead letter back in the queue. The one thing a human does to a job. */

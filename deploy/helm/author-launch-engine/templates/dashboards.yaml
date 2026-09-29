@@ -1,0 +1,78 @@
+{{/*
+  Grafana (STORY-056), with the trust dashboard provisioned from files/grafana.
+  Sign-in required (no anonymous access). The dashboard is editable and saved
+  to the volume, so a customised panel outlives a restart.
+*/}}
+{{- if .Values.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-datasources
+  labels: {{- include "ale.labels" . | nindent 4 }}
+data:
+{{ (.Files.Glob "files/grafana/datasources/*").AsConfig | indent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboards
+  labels: {{- include "ale.labels" . | nindent 4 }}
+data:
+{{ (.Files.Glob "files/grafana/dashboards/*").AsConfig | indent 2 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-grafana
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: {{ .Values.dashboards.storage }} } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-grafana
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  selector: { app: {{ .Release.Name }}-grafana }
+  ports: [{ port: 3000, targetPort: 3000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-grafana
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One writer on the volume: the old pod goes before the new one starts.
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: {{ .Release.Name }}-grafana } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-grafana, ale-role: dashboards }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 472, fsGroup: 472, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: grafana
+          image: {{ .Values.dashboards.image }}
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "ale.secretName" . }}, key: grafana-admin-password } }
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "false" }
+            - { name: ELASTICSEARCH_URL, value: "http://{{ .Release.Name }}-search:9200" }
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+          resources: {{- toYaml .Values.dashboards.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/grafana }
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources, readOnly: true }
+            - { name: dashboards, mountPath: /etc/grafana/provisioning/dashboards, readOnly: true }
+      volumes:
+        - { name: data, persistentVolumeClaim: { claimName: {{ .Release.Name }}-grafana } }
+        - { name: datasources, configMap: { name: {{ .Release.Name }}-grafana-datasources } }
+        - { name: dashboards, configMap: { name: {{ .Release.Name }}-grafana-dashboards } }
+{{- end }}

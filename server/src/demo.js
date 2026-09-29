@@ -53,6 +53,11 @@ import {
 } from './services/healthMonitoring.js';
 import { contentPerformance, trackEngagement } from './services/performanceMetrics.js';
 import { registerIntegration } from './services/integrationRoutes.js';
+import { dispatch, send } from './services/messageBus.js';
+import { planFor } from './services/coordination.js';
+import { provisionTenant } from './services/tenantSchemas.js';
+import { SYSTEM_READS } from './middleware/tenantScope.js';
+import { TENANT_SCOPED_ROUTES, router } from './routes/index.js';
 import { CSP_EXEMPTIONS, cspHeader } from './services/securityHeaders.js';
 import { notifyFailedPublishes } from './services/publishFailureNotifier.js';
 import { detectAnomalies } from './services/anomalies.js';
@@ -62,10 +67,13 @@ import { grantMatrix } from './services/permissions.js';
 import { classifyRoutes, surfaceCoverage } from './services/tenantSurface.js';
 import { draftOutreachMessages, scoreMessage } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
+import { attentionFor } from './services/attention.js';
+import { governanceScore } from './services/governanceScore.js';
+import { SOURCES as SEARCH_SOURCES, aggregate as searchAggregate, digestOf, reconcile as searchReconcile, searchTenant } from './services/searchIndex.js';
 import { createApp } from './app.js';
-import { closePool, ownerQuery, query } from './db/pool.js';
+import { asTenant, closePool, ownerQuery, query, withTransaction } from './db/pool.js';
 import { HANDLERS, RECURRING } from './jobs/handlers.js';
-import { ensureRecurringJobs, enqueue, reapStaleJobs, retryJob, runOnce, tick } from './jobs/queue.js';
+import { ensureRecurringJobs, enqueue, reapStaleJobs, recordDeferrals, retryJob, runOnce, tick } from './jobs/queue.js';
 import {
   approveDraft,
   approveMixRecommendation,
@@ -106,6 +114,13 @@ import { searchAllDirectories } from './services/directories.js';
 import { scoreOpportunity } from './services/keywordAnalysis.js';
 import { checkVoice, deriveVoice } from './services/voiceProfile.js';
 import { assess } from './services/escalationPolicy.js';
+import { flushAccessLog } from './services/dataAccess.js';
+import { LONG_FIELD } from './db/sampleManuscript.js';
+import { bookStyle, reviewDraft } from './services/contentReview.js';
+import { quotedPassages } from './services/bookModel.js';
+import { auditKeyId } from './services/auditKey.js';
+import { auditAccessPolicy } from './services/auditAccess.js';
+import { generateAuditReport, reportAsCsv } from './services/auditReports.js';
 
 const rule = (title) => console.log(`\n${'─'.repeat(72)}\n${title}\n${'─'.repeat(72)}`);
 
@@ -2077,9 +2092,11 @@ console.log(`row 3 as written : ${beforeTamper.rows[0].actor} / ${beforeTamper.r
 // this — it does not own the table and has no UPDATE on it — so rewriting
 // history now takes the database owner's credentials, which is the threat
 // STORY-013's seals exist to catch.
-await ownerQuery('ALTER TABLE audit_log DISABLE TRIGGER ALL');
-await ownerQuery("UPDATE audit_log SET actor='SomebodyElse', action='draft.approved' WHERE id=3");
-await ownerQuery('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+// Since STORY-049 the log is a view over its encrypted storage, so the
+// tampering is done where the rows actually live.
+await ownerQuery('ALTER TABLE audit_log_sealed DISABLE TRIGGER ALL');
+await ownerQuery("UPDATE audit_log_sealed SET actor='SomebodyElse', action='draft.approved' WHERE id=3");
+await ownerQuery('ALTER TABLE audit_log_sealed ENABLE TRIGGER ALL');
 const afterTamper = await query('SELECT actor, action FROM audit_log WHERE id = 3');
 console.log(`row 3 now        : ${afterTamper.rows[0].actor} / ${afterTamper.rows[0].action}`);
 try {
@@ -2102,13 +2119,13 @@ console.log('\nThe digest covers metadata too — the thresholds a decision was 
 console.log('whose session stood behind it. A seal that ignored those would be believed.');
 
 rule('105. Rows removed are caught the same way');
-await ownerQuery('ALTER TABLE audit_log DISABLE TRIGGER ALL');
-await ownerQuery("UPDATE audit_log SET actor=$1, action=$2 WHERE id=3", [
+await ownerQuery('ALTER TABLE audit_log_sealed DISABLE TRIGGER ALL');
+await ownerQuery("UPDATE audit_log_sealed SET actor=$1, action=$2 WHERE id=3", [
   beforeTamper.rows[0].actor,
   beforeTamper.rows[0].action,
 ]);
-await ownerQuery('DELETE FROM audit_log WHERE id IN (4, 5)');
-await ownerQuery('ALTER TABLE audit_log ENABLE TRIGGER ALL');
+await ownerQuery('DELETE FROM audit_log_sealed WHERE id IN (4, 5)');
+await ownerQuery('ALTER TABLE audit_log_sealed ENABLE TRIGGER ALL');
 const removed = await verifyAuditLog({});
 console.log(`status: ${removed.status}`);
 console.log(
@@ -3448,6 +3465,16 @@ const seedPerfPost = async ({ platform, hour, tag, i }) => {
      VALUES ($1,$2,$3,$4,0.9,CURRENT_DATE,'approved','text',$5,$6) RETURNING id`,
     [author.id, book.id, platform, `${tag} ${i}: on craft, and what it costs`, 0.5 + ((i * 7) % 10) / 20, 0.5 + ((i * 3) % 10) / 20],
   );
+  // The approval an "approved" draft claims, an hour before it went out. Until
+  // STORY-058 these posts had none, and `gate.posts` has failed on them at the
+  // end of every demo since — correctly: a published post with no approval.
+  await query(
+    `INSERT INTO approvals (draft_id, decision, reviewer, notes, created_at, user_id)
+     VALUES ($1, 'approved', 'Mira Kovač', 'approved before it was scheduled', $2,
+             (SELECT id FROM users WHERE email = 'mira@example.test'))`,
+    [d[0].id, new Date(at.getTime() - 3600000).toISOString()],
+  );
+  await recordAction({ actor: 'Mira Kovač', action: 'draft.approved', entityType: 'draft', entityId: String(d[0].id), authorId: author.id, before: { status: 'pending_approval' }, after: { status: 'approved' } });
   await query(
     `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status, external_id, published_at, format)
      VALUES ($1,$2,$3,$4,'published',$5,$4,'text')`,
@@ -3683,11 +3710,11 @@ console.log(`\nNow: connected as ${dbWho.role} · superuser ${dbWho.rolsuper} ·
 
 rule('193. Asked to do what an attacker holding this connection would try');
 for (const [what, sql] of [
-  ['switch off the audit triggers', 'ALTER TABLE audit_log DISABLE TRIGGER ALL'],
+  ['switch off the audit triggers', 'ALTER TABLE audit_log_sealed DISABLE TRIGGER ALL'],
   ['rewrite an audit row        ', "UPDATE audit_log SET action = 'x' WHERE id = 1"],
   ['drop a table                ', 'DROP TABLE drafts'],
   ['forge a migration record    ', "INSERT INTO schema_migrations (filename) VALUES ('999_fake.sql')"],
-  ['grant itself the owner      ', 'GRANT anvi TO ale_app_login'],
+  ['grant itself the owner      ', `GRANT ${(await ownerQuery('SELECT pg_get_userbyid(datdba) AS o FROM pg_database WHERE datname = current_database()')).rows[0].o} TO ale_app_login`],
 ]) {
   const dbTry = await query(sql).then(() => 'ALLOWED', (e) => `refused — ${e.message}`);
   console.log(`  ${what}  ${dbTry}`);
@@ -3830,5 +3857,1078 @@ await query("DELETE FROM integration_circuits WHERE service = 'eventFinder'");
 
 console.log('\nSTORY-038 complete — every integration goes through the gateway with its own policy,');
 console.log('and a failing one is stopped, logged and reported to the operators once\n');
-await closePool();
 
+// ── STORY-039: Message Queue System for Agent Communication ────────────────
+// REQ-010. "When an agent sends a message, the intended recipient receives it."
+
+rule('202. Eleven agents, and not one message between them');
+console.log('Measured before this story: agents reached each other by calling functions');
+console.log('directly, or by polling a table on a five-minute sweep. When the Trust and Monitoring');
+console.log('Agent escalated a draft, the reviewer heard at the next trust.monitor_escalations');
+console.log('sweep — up to 300 seconds later — and nothing recorded that one agent had told');
+console.log('another anything. The audit log showed an escalation and, separately, an email.');
+
+rule('203. The monitor escalates, and says so to the agent that must act');
+const { rows: [busBook] } = await query('SELECT id FROM books WHERE author_id = $1 LIMIT 1', [author.id]);
+await query(
+  `INSERT INTO drafts (author_id, book_id, platform, content, status, confidence, theme_alignment, voice_score, week_of)
+   VALUES ($1,$2,'linkedin','A draft in a voice the author has never used!!!','pending_approval',0.9,0.9,0.1,CURRENT_DATE)`,
+  [author.id, busBook.id],
+);
+await monitorContent({ authorId: author.id });
+const { rows: busQueued } = await query(
+  `SELECT id, topic, sender, recipient, status, created_at FROM agent_messages
+    WHERE author_id = $1 AND topic = 'escalation.raised' AND status = 'queued' ORDER BY id`,
+  [author.id],
+);
+console.log(`  queued: ${busQueued.length} × escalation.raised   TrustMonitoringAgent → ApprovalNotificationAgent`);
+console.log('\nWritten in the same transaction as the escalation itself: if the escalation had');
+console.log('rolled back, so would the message. A broker on its own cannot promise that — the');
+console.log('process can die between committing and publishing. This is the outbox pattern.');
+const busDelivered = (await dispatch({})).filter((x) => x.topic === 'escalation.raised');
+const busNotified = busDelivered.map((d) => d.result?.notified ?? 0);
+console.log(`\n  delivered on the next worker poll: ${busDelivered.filter((d) => d.status === 'acked').length} of ${busDelivered.length} acknowledged`);
+console.log(`  reviewer notices sent: ${busNotified.reduce((a, b) => a + b, 0)} — all by the first message's handler; the other ${busDelivered.length - 1} found nothing left to announce`);
+console.log('\nThat is idempotence doing its job. The handler is the existing notifier, which announces');
+console.log('each escalation once however often it runs — so a burst of messages, or a message');
+console.log('delivered twice, is one email per escalation, never a pile of them.');
+const { rows: [busFirst] } = await query('SELECT message_id FROM agent_messages WHERE id = $1', [busQueued[0].id]);
+const busTrail = (await listAuditLog({ authorId: author.id, entityType: 'agent_message', limit: 200 }))
+  .filter((e) => e.entity_id === busFirst.message_id)
+  .reverse();
+console.log('\nOne message, both ends of it on the audit log:');
+for (const e of busTrail) {
+  console.log(`  ${e.action.padEnd(17)} by ${e.actor.padEnd(26)}${e.metadata.latencyMs !== undefined ? ` ${e.metadata.latencyMs}ms after it was sent` : `to ${e.metadata.to}`}`);
+}
+console.log('\nWithin one poll (5s by default) instead of one sweep (300s). The sweep still runs:');
+console.log('the message makes the hand-off fast, the sweep makes it certain.');
+
+rule('204. What the bus refuses, and what it never drops');
+for (const [what, fn] of [
+  ['a recipient nobody declared  ', () => send({ from: 'TrustMonitoringAgent', to: 'MarketingAgent', topic: 'x' })],
+  ['a topic the recipient does not take', () => send({ from: 'TrustMonitoringAgent', to: 'ApprovalNotificationAgent', topic: 'post.publish_failed' })],
+  ['a payload JSON would corrupt ', () => send({ from: 'TrustMonitoringAgent', to: 'ApprovalNotificationAgent', topic: 'escalation.raised', payload: { reviewer: undefined } })],
+]) {
+  const busRefused = await fn().then(() => 'ACCEPTED', (e) => e.message);
+  console.log(`  ${what}  → ${busRefused.slice(0, 96)}`);
+}
+console.log('\n`undefined` is refused by name: JSON.stringify would drop the field silently, and a');
+console.log('field that vanishes between two agents is the bug a message contract exists to stop.');
+await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId: author.id, payload: { authorId: author.id }, maxAttempts: 2 });
+const busBoom = { APIIntegrationAgent: { 'post.publish_failed': async () => { throw new Error('mail relay refused the connection'); } } };
+let busClock = new Date(Date.now() + 1000);
+for (let i = 1; i <= 2; i += 1) {
+  const r = (await dispatch({ handlers: busBoom, now: busClock })).find((x) => x.topic === 'post.publish_failed');
+  console.log(`  attempt ${i}: ${r?.status} — ${r?.error}`);
+  busClock = new Date(busClock.getTime() + 600_000);
+}
+console.log('\nRetried with backoff, then dead-lettered — on the Worker tab with a Redeliver button');
+console.log('for an operator. Never dropped. A message received and not acknowledged within 60s');
+console.log('is delivered again, so a worker that dies mid-handler loses nothing either.');
+
+rule('205. RabbitMQ, which the story names');
+console.log('RabbitMQ is not installed on this machine. amqpTransport.js carries messages through it');
+console.log('— the outbox table stays the record of truth, the broker carries them — and CI runs a');
+console.log('RabbitMQ service beside Postgres so tests/messageBus.test.js exercises it there. Here');
+console.log('that scenario reports itself skipped, never passed.');
+console.log('\nOne bug found on the way, by a test that failed once in about sixty runs: the queue');
+console.log('compared the worker\'s clock against timestamps written by the database\'s clock. On');
+console.log('one machine that is milliseconds; across two it is however far the clocks drift, and');
+console.log('a slow worker would delay every message by that much. The database decides now.');
+
+console.log('\nSTORY-039 complete — agents send each other messages that commit with the change they');
+console.log('describe, reach only the intended recipient, and are acknowledged or kept, never dropped\n');
+
+// ── STORY-040: Central Task Manager for Agent Coordination ─────────────────
+// REQ-010. "Tasks assigned to agents by priority and resource availability;
+// assignments logged and reviewable for correctness."
+
+rule('206. The coordinator STORY-011 built, measured against this story');
+console.log('Priority per job kind and an exclusive resource, recorded on each dispatch. And:');
+console.log('\n  deferrals recorded:       0 ever — recordDispatch has a branch for it, and nothing calls it');
+console.log('  kinds on the default:     trust.assess, posts.notify_failures — described as "produces');
+console.log('                            work other agents react to", which neither does');
+console.log('  availability:             "is the resource held". Nothing knew a task needs an integration.');
+console.log('\nThat last one, measured with email\'s circuit open (STORY-038): approvals.notify_waiting');
+console.log('ran anyway. Both sends were refused by the gateway. The notifier recorded the items as');
+console.log('announced — it deliberately never re-announces a failed send — and the job reported');
+console.log('"notified: 2". Nobody had been told, and those items would never be announced.');
+const tmPlan = planFor({ kind: 'approvals.notify_waiting', author_id: author.id });
+console.log(`\nNow every kind is assigned on declared grounds, e.g. approvals.notify_waiting →`);
+console.log(`  agent ${tmPlan.agent} · priority ${tmPlan.priority} · needs ${tmPlan.requires.join(', ')}`);
+console.log(`  "${tmPlan.coordination.reason}"`);
+
+rule('207. A task whose integration is down waits, and says why — once');
+await query(
+  `INSERT INTO integration_circuits (service, state, consecutive_failures, opened_at, retry_at, last_error)
+   VALUES ('email','open',5,now(),now() + interval '2 minutes','SMTP relay refused the connection')
+   ON CONFLICT (service) DO UPDATE SET state = 'open', opened_at = now(), retry_at = now() + interval '2 minutes'`,
+);
+const { job: tmJob } = await enqueue({ kind: 'approvals.notify_waiting', idempotencyKey: `demo-040-${Date.now()}`, authorId: author.id });
+const tmNow = new Date(Date.now() + 1000);
+const tmHeld = await runOnce({ now: tmNow, jobId: tmJob.id });
+await recordDeferrals({ now: tmNow });
+await recordDeferrals({ now: new Date(tmNow.getTime() + 5000) });
+await recordDeferrals({ now: new Date(tmNow.getTime() + 10000) });
+const { rows: [tmRow] } = await query('SELECT status, attempts, deferred_reason FROM jobs WHERE id = $1', [tmJob.id]);
+const tmDeferred = (await listAuditLog({ authorId: author.id, entityType: 'job', limit: 50 }))
+  .filter((e) => e.action === 'task.deferred' && e.entity_id === String(tmJob.id));
+console.log(`  ran: ${tmHeld ? 'yes' : 'no'} · status ${tmRow.status} · attempts spent ${tmRow.attempts}`);
+console.log(`  why: ${tmRow.deferred_reason}`);
+console.log(`  task.deferred rows after three polls: ${tmDeferred.length}`);
+console.log('\nNo attempt spent: running it would only have had the gateway refuse, and three');
+console.log('refusals would have dead-lettered work that was never actually tried. One audit row,');
+console.log('not one per poll — a worker polls every five seconds, and seven hundred copies of the');
+console.log('same line is how the one that matters gets missed. Released when the circuit will take');
+console.log('a trial call; held any longer, nothing would ever test whether email is back.');
+await query("DELETE FROM integration_circuits WHERE service = 'email'");
+
+rule('208. Every assignment says what it was chosen over');
+await query(
+  `INSERT INTO integration_circuits (service, state, consecutive_failures, opened_at, retry_at, last_error)
+   VALUES ('email','open',5,now(),now() + interval '2 minutes','SMTP relay refused the connection')
+   ON CONFLICT (service) DO UPDATE SET state = 'open', opened_at = now(), retry_at = now() + interval '2 minutes'`,
+);
+const { job: tmLow } = await enqueue({ kind: 'engagement.collect', idempotencyKey: `demo-040-low-${Date.now()}`, authorId: author.id });
+await runOnce({ now: new Date(Date.now() + 1000), jobId: tmLow.id });
+const tmEntry = (await listAuditLog({ authorId: author.id, entityType: 'job', limit: 50 }))
+  .find((e) => e.action === 'task.dispatched' && e.entity_id === String(tmLow.id));
+console.log(`  dispatched: ${tmEntry.metadata.kind} → ${tmEntry.metadata.agent} (priority ${tmEntry.metadata.priority}, ${tmEntry.metadata.chosenBy})`);
+for (const h of tmEntry.metadata.higherPriorityWaiting.slice(0, 3)) {
+  console.log(`    went ahead of ${h.kind} (priority ${h.priority}) — ${h.blockedBy ?? 'NOTHING BLOCKED IT'}`);
+}
+await query("DELETE FROM integration_circuits WHERE service = 'email'");
+const tmCheck = (await runChecks({})).find((c) => c.id === 'tasks.priority_respected');
+console.log(`\n  governance check tasks.priority_respected: ${tmCheck.passed ? 'pass' : `FAIL (${tmCheck.violations})`}`);
+console.log('\nA lower-priority task running while a higher one waits is either correct — the higher');
+console.log('one was blocked — or the task manager choosing wrongly. The record names the blocker,');
+console.log('read in the same statement as the choice, from the same snapshot of the queue.');
+console.log('\nThe check was wrong twice before it was right, both times on this demo\'s own data:');
+console.log('  1. The blockers were looked up after the choice. With two workers, a resource held at');
+console.log('     the moment of choosing had been released by the moment of looking — a correct');
+console.log('     choice recorded as a wrong one.');
+console.log('  2. Then two workers took priority-25 tasks in the same millisecond a priority-30 task');
+console.log('     was mid-claim by a third; it started 8ms later. In motion, not wrong.');
+console.log('So it now judges by consequence: a higher-priority task passed over with nothing');
+console.log('blocking it counts only if it was then kept waiting — more than 5 seconds, or never run.');
+console.log('A job run by id (the Retry button) is a request, and not judged against priority.');
+
+rule('209. And a notice that was not sent is no longer counted as sent');
+console.log('Both notifiers used to add a failed send to the list they report as notified. They');
+console.log('now report sends and failures apart, and the audit row for a failure says failed.');
+console.log('\nNot changed, and flagged: a failed announcement is still never retried — STORY-012\'s');
+console.log('choice, to guarantee no reviewer is told the same thing twice. Holding the job while');
+console.log('email is down removes the common case; the trade-off itself (a possible duplicate');
+console.log('against a certain miss) is a product decision, not an implementation one.');
+
+console.log('\nSTORY-040 complete — every task is assigned to a named agent on declared grounds, waits');
+console.log('without cost while what it needs is down, and every assignment can be checked\n');
+
+// ── STORY-041: Tenant Database Schema Isolation ────────────────────────────
+// REQ-011. "When an author is onboarded, a schema is created for them, and
+// their data is isolated in it."
+
+rule('210. What the database enforced between tenants: nothing');
+const { rows: [tsCount] } = await query('SELECT COUNT(DISTINCT id)::int AS n FROM authors');
+console.log(`The application connects as ale_app_login, and that login reads every author's rows —`);
+console.log(`all ${tsCount.n} tenants in this database, from any query. Isolation lived entirely in each`);
+console.log('query\'s WHERE author_id = …, which STORY-017 found missing from two routes and STORY-024');
+console.log('found checked for 10 routes of 35.');
+
+rule('211. Onboarding now creates the tenant\'s own schema');
+const tsNew = await onboardTenant({ name: 'Demo Tenant', email: `demo-tenant-${Date.now()}@example.test`, password: 'demo-tenant-pw' });
+const { rows: tsSchema } = await query(
+  "SELECT table_name FROM information_schema.views WHERE table_schema = $1 ORDER BY table_name", [tsNew.schema.name],
+);
+console.log(`  onboarded author ${tsNew.author.id} → schema ${tsNew.schema.name}, role ale_tenant_${tsNew.author.id}`);
+console.log(`  ${tsSchema.length} views, each showing only this tenant's rows: ${tsSchema.slice(0, 8).map((r) => r.table_name).join(', ')}, …`);
+const tsCreated = (await listAuditLog({ authorId: tsNew.author.id, limit: 10 })).find((e) => e.action === 'tenant.schema_created');
+console.log(`  audit: ${tsCreated.action} · tenant ${tsCreated.metadata.tenant} · at ${tsCreated.metadata.provisionedAt}`);
+console.log('\nNot a copy of every table per tenant. That would mean every query routed to the right');
+console.log('copy, every migration applied once per author, and every compliance or operator view');
+console.log('rewritten as a union across all of them. A schema of views over the shared tables, and');
+console.log('a role that can read only that schema, gives the isolation without the rewrite.');
+
+rule('212. A query that forgets its WHERE clause, run as a tenant');
+const tsCareless = await asTenant(author.id, () => query('SELECT DISTINCT author_id FROM drafts'), { provision: provisionTenant });
+console.log(`  SELECT DISTINCT author_id FROM drafts   -- no WHERE, as author ${author.id}`);
+console.log(`  → ${tsCareless.rows.map((r) => r.author_id).join(', ')}   (only their own)`);
+for (const [what, sql] of [
+  ['the shared table directly   ', 'SELECT 1 FROM public.drafts LIMIT 1'],
+  ["another tenant's schema     ", `SELECT 1 FROM tenant_${tsNew.author.id}.drafts LIMIT 1`],
+  ['a write, even to their own  ', `UPDATE drafts SET content = content WHERE author_id = ${author.id}`],
+]) {
+  const tsRefused = await asTenant(author.id, () => withTransaction((c) => c.query(sql)), { provision: provisionTenant })
+    .then(() => 'ALLOWED', (e) => `refused — ${e.message}`);
+  console.log(`  ${what} ${tsRefused}`);
+}
+const tsGets = router.stack.filter((l) => l.route?.methods?.get).length;
+console.log(`\n${TENANT_SCOPED_ROUTES.length} of ${tsGets} GET routes run an author's request this way, on by default.`);
+console.log(`The ${Object.keys(SYSTEM_READS).length} that do not are declared with their reason — /health and /ready have no`);
+console.log('session; the trust dashboard verifies seals over every tenant\'s rows and writes an');
+console.log('assessment. Found by switching isolation on everywhere and reading what broke.');
+
+rule('213. What broke, and what this does not stop');
+console.log('Switched on, it broke twelve tests, and each was a real difference:');
+console.log('  · GROUP BY k.id with k.* — legal on a table, where the key implies every column; a');
+console.log('    view has no key. Two queries rewritten.');
+console.log('  · escalation_targets is a view, not a table; the first version only walked tables.');
+console.log("  · another author's book now answers 404 instead of 403 — inside your schema it does");
+console.log('    not exist, and 404 does not even confirm the id is somebody\'s.');
+console.log('  · two tenants provisioned at once collided editing the same permission list — so the');
+console.log('    shared-table grants now go to one group role, and provisioning takes a lock.');
+const tsReset = await asTenant(author.id, () => withTransaction((c) => c.query('RESET ROLE')), { provision: provisionTenant })
+  .then(() => 'allowed', (e) => e.message);
+console.log(`\nAnd the limit, stated: RESET ROLE inside a tenant scope → ${tsReset}. Postgres always lets a`);
+console.log('session return to the login it connected as. So this stops the leak this project actually');
+console.log('had — a query that forgot its filter — and not an attacker who can already run arbitrary');
+console.log('SQL; that is what parameterised queries and STORY-033\'s login are for. A database login per');
+console.log('tenant would close it, at the cost of a connection pool per author. A test pins the limit,');
+console.log('so the day that is built it fails and gets inverted.');
+
+console.log('\nSTORY-041 complete — each tenant has a schema created at onboarding, and an author\'s reads');
+console.log('run inside it, so the database — not each query — keeps tenants apart\n');
+
+// ── STORY-042: Tenant-Specific Access Control ──────────────────────────────
+// REQ-011. "Users only access their own tenant's data; any new role or
+// permission change is reviewed and approved by an admin."
+
+rule('214. The clause that already held, and the trust line that did not');
+console.log('An author reaching only their own tenant has held since STORY-017 (the application)');
+console.log('and STORY-041 (the database). The trust line — every role or permission change');
+console.log('reviewed and approved — measured before this story:');
+console.log('\n  a reviewed way to change access:       none — role_permissions was edited in SQL');
+console.log('  POST /tenants { role: "admin" }:       201, and the account signed in with all eight');
+console.log('                                         permissions. Logged as "tenant.onboarded" by an');
+console.log('                                         agent. No second person involved.');
+console.log('  a revoked permission:                  kept working — an author approved a draft with');
+console.log('                                         the token they held, for up to twelve hours');
+const acServer = createApp().listen(0);
+await new Promise((resolve) => acServer.once('listening', resolve));
+const acBase = `http://127.0.0.1:${acServer.address().port}/api`;
+const acLogin = async (email, password) => (await (await fetch(`${acBase}/auth/login`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }),
+})).json()).token;
+const acCall = async (token, method, path, body) => {
+  const r = await fetch(`${acBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const acOps = await acLogin('ops@example.test', 'ops-password');
+const acSec = await acLogin('security@example.test', 'second-pair-of-eyes');
+const acMira = await acLogin('mira@example.test', 'quiet-craft');
+const acMinted = await acCall(acOps, 'POST', '/tenants', { name: 'Minted', email: `minted-${Date.now()}@example.test`, role: 'admin' });
+console.log(`\nNow: POST /tenants { role: "admin" } → ${acMinted.status}\n     ${acMinted.body.error}`);
+
+rule('215. A change is a request, and the person who asked cannot approve it');
+const acReq = await acCall(acOps, 'POST', '/access/changes', {
+  kind: 'revoke_permission', role: 'author', permission: 'content.approve',
+  reason: 'Launch week: approvals move to the publicist, not the author',
+});
+console.log(`  ops requests: revoke content.approve from author → ${acReq.status}, ${acReq.body.status}`);
+const acOwn = await acCall(acOps, 'POST', `/access/changes/${acReq.body.id}/approve`, {});
+console.log(`  ops approves their own request → ${acOwn.status}: ${acOwn.body.error}`);
+const acDirect = await query(
+  "UPDATE access_changes SET status = 'approved', decided_by = requested_by, decided_at = now() WHERE id = $1",
+  [acReq.body.id],
+).then(() => 'ALLOWED', (e) => `refused — ${e.message}`);
+console.log(`  the same, straight at the database → ${acDirect}`);
+console.log('\nThe rule lives in the database as a constraint — decided_by <> requested_by — so no');
+console.log('code path can skip it. And the application login can no longer write role_permissions');
+console.log('or users.role at all: an approved change is applied by one owner function, which');
+console.log('re-checks the approval rather than trusting the caller.');
+
+rule('216. A second admin approves — and it bites on the next request');
+const { rows: [acDraft] } = await query(
+  `INSERT INTO drafts (author_id, book_id, platform, content, status, confidence, week_of)
+   VALUES ($1,$2,'twitter','A draft awaiting approval','pending_approval',0.9,CURRENT_DATE) RETURNING id`,
+  [author.id, book.id],
+);
+const acApproved = await acCall(acSec, 'POST', `/access/changes/${acReq.body.id}/approve`, { note: 'Agreed for launch week' });
+console.log(`  security approves → ${acApproved.status}, ${acApproved.body.status}, applied ${Boolean(acApproved.body.applied_at)}`);
+const acAfter = await acCall(acMira, 'POST', `/drafts/${acDraft.id}/approve`, {});
+console.log(`  Mira approves a draft with the token she already had → ${acAfter.status}: ${acAfter.body.error}`);
+console.log('\nSessions carry the access version they were issued under; one issued before the latest');
+console.log('change has its role and permissions re-read before it is trusted. Most requests pay');
+console.log('nothing; the few that must look again, do. Twelve hours became one request.');
+const acBack = await acCall(acSec, 'POST', '/access/changes', {
+  kind: 'grant_permission', role: 'author', permission: 'content.approve', reason: 'Launch week is over; approvals return to authors',
+});
+await acCall(acOps, 'POST', `/access/changes/${acBack.body.id}/approve`, {});
+const acTrail = (await listAuditLog({ entityType: 'access_change', limit: 20 })).filter((e) => e.entity_id === String(acReq.body.id)).reverse();
+console.log('\n  the trail for that one change:');
+for (const e of acTrail) console.log(`    ${e.action.padEnd(24)} by ${e.actor}`);
+console.log('  (and restored the same way: requested by security, approved by ops)');
+
+rule('217. Checked from outside');
+const acCheck = (await runChecks({})).find((c) => c.id === 'access.elevated_reviewed');
+console.log(`  governance invariant access.elevated_reviewed: ${acCheck.passed ? 'pass' : `BREACH (${acCheck.violations})`}`);
+console.log('\nEvery account with more than author access either got it through an approved change,');
+console.log("or was seeded before review existed — recorded as 'bootstrap', which only the schema");
+console.log('owner can write. An invariant, not a quality check: the review is the whole promise.');
+console.log('\nOne more found on the way, in STORY-041: tenant views showed every row with no author');
+console.log('to every tenant, and in `users` a row with no author is a staff account. An author could');
+console.log("read every admin's account. Rows with no author are now private unless a table declares");
+console.log('them system-wide, with the reason — and the Access page is not offered to authors, who');
+console.log("hold audit.read for their own trail and were, briefly, shown everyone's.");
+await new Promise((resolve) => acServer.close(resolve));
+console.log('\nNot done: Passport.js, which the build note names. Sessions have been JWTs since');
+console.log('STORY-064; swapping the library would change nothing the clause asks about.');
+
+console.log('\nSTORY-042 complete — nobody changes access alone, the database enforces it, and an');
+console.log('approved change reaches every session on its next request\n');
+
+// ── STORY-043: Tenant Onboarding Process ───────────────────────────────────
+// REQ-011. "When an admin onboards a new tenant, the account and a private
+// schema are set up and they get a welcome email. Every onboarding is logged
+// with the time and the admin's id."
+
+rule('218. What onboarding was, measured');
+console.log('  a screen for the admin:                none — an API call only');
+console.log('  a welcome email:                       none');
+console.log('  the audit row:                         actor "TenantManagementAgent" — not the admin');
+console.log('  author + account:                      two commits; a clash on the account left an');
+console.log('                                         author nobody could ever sign in to');
+console.log('  the password:                          chosen by the admin, who then knew it and had');
+console.log('                                         to hand it over somehow');
+const obServer = createApp().listen(0);
+await new Promise((resolve) => obServer.once('listening', resolve));
+const obBase = `http://127.0.0.1:${obServer.address().port}/api`;
+const obCall = async (token, method, path, body) => {
+  const r = await fetch(`${obBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const obOps = (await obCall(null, 'POST', '/auth/login', { email: 'ops@example.test', password: 'ops-password' })).body.token;
+const obEmail = `nadia-${Date.now()}@example.test`;
+
+rule('219. An admin onboards Nadia — name and address, nothing else');
+const obWithPw = await obCall(obOps, 'POST', '/tenants', { name: 'X', email: `x-${Date.now()}@example.test`, password: 'admin-knows-it' });
+console.log(`  with a password → ${obWithPw.status}: ${obWithPw.body.details?.[0]?.message ?? obWithPw.body.error}`);
+const obNew = await obCall(obOps, 'POST', '/tenants', { name: 'Nadia Okafor', email: obEmail });
+console.log(`  without         → ${obNew.status}`);
+console.log(`    account:        ${obNew.body.user.email}, role ${obNew.body.user.role}, password set: ${obNew.body.user.activated}`);
+console.log(`    private schema: ${obNew.body.schema.name} (${obNew.body.schema.objects} views)`);
+console.log(`    welcome email:  to ${obNew.body.invite.sentTo}, link expires ${new Date(obNew.body.invite.expiresAt).toISOString()}`);
+const obEntry = (await listAuditLog({ entityType: 'author', limit: 50 })).find((e) => e.action === 'tenant.onboarded' && e.entity_id === String(obNew.body.author.id));
+console.log(`    audit:          ${obEntry.action} by ${obEntry.actor} (admin id ${obEntry.metadata.adminId}) at ${new Date(obEntry.created_at).toISOString()}`);
+const obEarly = await obCall(null, 'POST', '/auth/login', { email: obEmail, password: 'guessing-now' });
+console.log(`  Nadia tries to sign in before accepting → ${obEarly.status}`);
+
+rule('220. Nadia chooses her own password from the link — once');
+const obToken = new URL(obNew.body.invite.devInviteLink).searchParams.get('token');
+const { rows: [obStored] } = await query('SELECT token_hash FROM tenant_invites WHERE author_id = $1', [obNew.body.author.id]);
+console.log(`  stored:   sha256 ${obStored.token_hash.slice(0, 16)}…  (the link itself is only in the email)`);
+const obAccept = await obCall(null, 'POST', '/auth/accept-invite', { token: obToken, password: 'nadia-chose-this' });
+console.log(`  accept → ${obAccept.status}, signed in as ${obAccept.body.user?.name}`);
+const obAgain = await obCall(null, 'POST', '/auth/accept-invite', { token: obToken, password: 'someone-else' });
+console.log(`  the same link again → ${obAgain.status}: ${obAgain.body.error}`);
+
+rule('221. All or nothing');
+const obClash = await obCall(obOps, 'POST', '/tenants', { name: 'Clash', email: 'security@example.test' });
+const { rows: obLeft } = await query("SELECT 1 FROM authors WHERE email = 'security@example.test'");
+console.log(`  onboarding an address a staff login already uses → ${obClash.status}; authors left behind: ${obLeft.length}`);
+console.log('\nAuthor, account and invitation are one transaction; the schema and the email follow');
+console.log('the commit, so a welcome never goes out for an account that rolled back.');
+await new Promise((resolve) => obServer.close(resolve));
+
+console.log('\nSTORY-043 complete — an admin onboards from a screen, the author gets a welcome email');
+console.log('and sets a password nobody else knows, and the log names the admin who did it\n');
+
+// ── STORY-044: Tenant Data Access Audit ────────────────────────────────────
+// REQ-011. "All access events are traceable to a specific tenant and user."
+
+rule('222. What was recorded about reading, measured');
+console.log('  a change (approve, onboard, grant):     on the audit log, since STORY-004');
+console.log('  a read of a tenant\'s data:              nothing');
+console.log('  a request for another tenant\'s data:    refused (403) — and forgotten');
+console.log('  "who has looked at Mira\'s drafts?":     no answer');
+const daServer = createApp().listen(0);
+await new Promise((resolve) => daServer.once('listening', resolve));
+const daBase = `http://127.0.0.1:${daServer.address().port}/api`;
+const daCall = async (token, method, path, body) => {
+  const r = await fetch(`${daBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const daLogin = async (email, password) => (await daCall(null, 'POST', '/auth/login', { email, password })).body.token;
+const daMira = await daLogin('mira@example.test', 'quiet-craft');
+const daTomas = await daLogin('tomas@example.test', 'second-shelf');
+const daOps = await daLogin('ops@example.test', 'ops-password');
+const { rows: [daMiraRow] } = await query("SELECT author_id FROM users WHERE email = 'mira@example.test'");
+const { rows: [daTomasRow] } = await query("SELECT id, author_id FROM users WHERE email = 'tomas@example.test'");
+
+rule('223. Every request, traceable to a tenant and a person');
+await daCall(daMira, 'GET', `/authors/${daMiraRow.author_id}/books`);
+await daCall(daOps, 'GET', `/authors/${daMiraRow.author_id}/books`);
+await daCall(daTomas, 'GET', `/authors/${daMiraRow.author_id}/books`);
+await daCall(null, 'GET', `/authors/${daMiraRow.author_id}/books`);
+await flushAccessLog();
+const { rows: daRows } = await query(
+  `SELECT COALESCE(user_email, 'no session') AS who, author_id, outcome, COALESCE(db_role, '—') AS db_role
+     FROM data_access_events WHERE path = $1 ORDER BY id DESC LIMIT 4`,
+  [`/api/authors/${daMiraRow.author_id}/books`],
+);
+for (const r of daRows.reverse()) {
+  console.log(`  ${r.who.padEnd(22)} → tenant ${r.author_id}  ${r.outcome.padEnd(16)} read as ${r.db_role}`);
+}
+console.log('\nThe database refuses an event with no user (unless it had no session) and a tenant');
+console.log('event with no tenant — the acceptance clause as two CHECK constraints. Append-only,');
+console.log('like the audit log: no privilege to change it, and a trigger behind that.');
+
+rule('224. Someone trying doors is flagged, and the admins are told');
+for (let i = 0; i < config.accessAlertThreshold; i += 1) {
+  await daCall(daTomas, 'GET', `/authors/${daMiraRow.author_id}/books`);
+}
+await flushAccessLog();
+const { rows: [daFlag] } = await query(
+  "SELECT metadata FROM audit_log WHERE action = 'access.suspicious' AND entity_id = $1 ORDER BY id DESC LIMIT 1",
+  [`user:${daTomasRow.id}`],
+);
+const { rows: [daTold] } = await query(
+  "SELECT metadata FROM audit_log WHERE action = 'access.alerted' AND entity_id = $1 ORDER BY id DESC LIMIT 1",
+  [`user:${daTomasRow.id}`],
+);
+console.log(`  access.suspicious: ${daFlag.metadata.subject}, ${daFlag.metadata.refusals} refusals in ${daFlag.metadata.windowMinutes} min, tenants tried ${JSON.stringify(daFlag.metadata.tenantsTried)}`);
+console.log(`  emailed:           ${daTold.metadata.alerted.join(', ')}`);
+
+rule('225. Mitigated: blocked, and stopped on the next request');
+const daBlock = await daCall(daOps, 'POST', `/security/accounts/${daTomasRow.id}/block`, { reason: 'Repeated attempts on another author\'s books' });
+console.log(`  ops blocks tomas → ${daBlock.status}`);
+const daAfter = await daCall(daTomas, 'GET', `/authors/${daTomasRow.author_id}/books`);
+console.log(`  tomas, with the token he already had, reads his own books → ${daAfter.status}: ${daAfter.body.error}`);
+await daCall(daOps, 'POST', `/security/accounts/${daTomasRow.id}/unblock`, {});
+console.log('  (unblocked again, so the rest of the demo data stays usable)');
+const daMiraSees = await daCall(daMira, 'GET', `/authors/${daMiraRow.author_id}/access-events`);
+const daOthers = daMiraSees.body.filter((e) => Number(e.actor_author_id) !== Number(daMiraRow.author_id));
+console.log(`\nAnd Mira can see it: her Trust tab lists ${daOthers.length} requests on her data from other accounts,`);
+console.log('read through her own database view — not a filtered copy the app chose to show her.');
+await new Promise((resolve) => daServer.close(resolve));
+
+console.log('\nSTORY-044 complete — every request that touches tenant data names the person and the');
+console.log('tenant, refusals are recorded and counted, and an admin can stop an account at once\n');
+
+// ── STORY-045: Tenant-Specific API Key Management ──────────────────────────
+// REQ-011. "The key is unique to the tenant and securely stored."
+
+rule('226. How an integration got in, measured');
+console.log('  per-tenant API keys:                    none');
+console.log('  the only key in the system:             ANTHROPIC_API_KEY — the application\'s own, in .env');
+console.log('  an integration pulling Mira\'s drafts:   had to sign in as Mira — her password, and her');
+console.log('                                          right to approve content, in a script');
+const akServer = createApp().listen(0);
+await new Promise((resolve) => akServer.once('listening', resolve));
+const akBase = `http://127.0.0.1:${akServer.address().port}/api`;
+const akCall = async ({ token, key }, method, path, body) => {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (key) headers['x-api-key'] = key;
+  const r = await fetch(`${akBase}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const akMira = (await akCall({}, 'POST', '/auth/login', { email: 'mira@example.test', password: 'quiet-craft' })).body.token;
+const akTenant = daMiraRow.author_id;
+
+rule('227. Mira creates a key — shown once, stored as a fingerprint');
+const akCreated = await akCall({ token: akMira }, 'POST', `/authors/${akTenant}/api-keys`, { name: 'Newsletter sync', access: 'read' });
+console.log(`  POST /authors/${akTenant}/api-keys → ${akCreated.status}`);
+console.log(`    key:     ${akCreated.body.key.slice(0, 20)}…  (in this response and nowhere else)`);
+console.log(`    tenant:  ${akCreated.body.authorId}, access ${akCreated.body.access}, expires ${new Date(akCreated.body.expiresAt).toISOString().slice(0, 10)}`);
+const { rows: [akStored] } = await query('SELECT prefix, secret_hash FROM tenant_api_keys WHERE prefix = $1', [akCreated.body.prefix]);
+console.log(`    stored:  prefix ${akStored.prefix}, sha256 ${akStored.secret_hash.slice(0, 16)}…`);
+const akList = await akCall({ token: akMira }, 'GET', `/authors/${akTenant}/api-keys`);
+console.log(`  listing the keys afterwards: ${akList.body.length} key(s), the key itself in none of them`);
+
+rule('228. Validated against the right tenant, and never a person\'s whole power');
+const akOwn = await akCall({ key: akCreated.body.key }, 'GET', `/authors/${akTenant}/books`);
+console.log(`  the key reads Mira's books                → ${akOwn.status}`);
+const akOther = await akCall({ key: akCreated.body.key }, 'GET', `/authors/${daTomasRow.author_id}/books`);
+console.log(`  the key reads Tomas's books               → ${akOther.status}`);
+const akWrite = await akCall({ key: akCreated.body.key }, 'POST', `/authors/${akTenant}/books`, { title: 'x', content: 'x' });
+console.log(`  the read-only key uploads a book          → ${akWrite.status}: ${akWrite.body.error}`);
+const { rows: [akDraft] } = await query("SELECT id FROM drafts WHERE author_id = $1 AND status = 'pending_approval' LIMIT 1", [akTenant]);
+if (akDraft) {
+  const akApprove = await akCall({ key: akCreated.body.key }, 'POST', `/drafts/${akDraft.id}/approve`, {});
+  console.log(`  the key approves a draft                  → ${akApprove.status}`);
+}
+const akMint = await akCall({ key: akCreated.body.key }, 'POST', `/authors/${akTenant}/api-keys`, { name: 'x' });
+console.log(`  the key creates another key               → ${akMint.status}`);
+await flushAccessLog();
+const { rows: akUses } = await query(
+  'SELECT outcome, author_id, user_role, COALESCE(db_role, \'—\') AS db_role FROM data_access_events WHERE api_key_id = (SELECT id FROM tenant_api_keys WHERE prefix = $1) ORDER BY id',
+  [akCreated.body.prefix],
+);
+console.log(`\nEvery use is in the access log (STORY-044) against tenant and key — ${akUses.length} so far:`);
+for (const u of akUses) console.log(`    tenant ${u.author_id}  ${u.outcome.padEnd(8)} as ${u.user_role}, read as ${u.db_role}`);
+
+rule('229. Revoked: refused on the next request');
+await akCall({ token: akMira }, 'POST', `/authors/${akTenant}/api-keys/${akCreated.body.id}/revoke`, {});
+const akAfter = await akCall({ key: akCreated.body.key }, 'GET', `/authors/${akTenant}/books`);
+console.log(`  after revoking, the same key → ${akAfter.status}: ${akAfter.body.error}`);
+await flushAccessLog();
+const { rows: [akWhy] } = await query(
+  "SELECT reason FROM data_access_events WHERE outcome = 'unauthenticated' AND path = $1 ORDER BY id DESC LIMIT 1",
+  [`/api/authors/${akTenant}/books`],
+);
+console.log(`  what the security officer sees: "${akWhy.reason}"`);
+console.log('\nThe caller is told only "not accepted"; which of unknown, revoked, expired or blocked it');
+console.log('was goes to the access log. A key also stops when the person it acts for is blocked or the');
+console.log('tenant is suspended — it never outlives the access it was issued under.');
+console.log('\nNot done: the build note\'s "environment variables or a secrets manager". Right for the');
+console.log('application\'s own secrets; impossible for keys tenants create while it runs. Storing only a');
+console.log('hash leaves no secret to keep.');
+await new Promise((resolve) => akServer.close(resolve));
+
+console.log('\nSTORY-045 complete — each tenant\'s integrations get their own keys, confined to that tenant,');
+console.log('stored as fingerprints, never able to approve, and logged on every use\n');
+
+// ── STORY-046: Fine-Tune AI Models on Book-Specific Data ────────────────────
+// REQ-012. "The AI models are fine-tuned using the book's text and
+// supplementary materials."
+
+rule('230. What generation knew about a book, measured');
+console.log('  when a book was uploaded:        nothing ran');
+console.log('  what was learned about it:       recomputed per batch, then thrown away');
+console.log('  supplementary material:          nowhere to put it');
+console.log('  a passage arguing a theme without its word: invisible — retrieval matched the word');
+console.log('\nAnd Claude cannot be fine-tuned through the public API. What is fitted instead is a model');
+console.log('of the book: for each theme, the words this book uses to argue it, learned from the passages');
+console.log('that name it — stored, versioned, judged on held-out passages, and used by generation.');
+const bmServer = createApp().listen(0);
+await new Promise((resolve) => bmServer.once('listening', resolve));
+const bmBase = `http://127.0.0.1:${bmServer.address().port}/api`;
+const bmCall = async (method, path, body) => {
+  const r = await fetch(`${bmBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', authorization: `Bearer ${akMira}` },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const bmShow = (m) => {
+  for (const t of m.parameters.themes) {
+    const words = t.lexicon.slice(0, 5).map((l) => l.word ?? l.term).join(', ') || '(too few examples)';
+    console.log(`    ${t.theme.padEnd(12)} learned from ${t.examples.passages} passage(s)${t.examples.materialSentences ? ` + ${t.examples.materialSentences} note(s)` : ''}: ${words}`);
+  }
+  const recall = m.metrics.maskedRecall == null ? 'n/a' : `${Math.round(m.metrics.maskedRecall * 100)}% (${m.metrics.recalled}/${m.metrics.heldOut})`;
+  console.log(`    held-out recall, theme word masked: ${recall} — literal search: 0% by construction`);
+  console.log(`    evidence for the drafter: ${m.metrics.literalEvidence} → ${m.metrics.modelEvidence} of ${m.metrics.evidenceSlots} slots`);
+};
+
+rule('231. Mira uploads a book — and a model is fitted to it at once');
+const bmBook = await bmCall('POST', `/authors/${akTenant}/books`, { title: LONG_FIELD.title, content: LONG_FIELD.content, themes: LONG_FIELD.themes });
+console.log(`  POST /authors/${akTenant}/books → ${bmBook.status}; model v${bmBook.body.model.version}, ${bmBook.body.model.parameters.sources.passages} passages, trigger ${bmBook.body.model.trigger}`);
+bmShow(bmBook.body.model);
+console.log('\n"loss" is named in one passage. One example is nothing to learn from, and the model says so');
+console.log('rather than guessing.');
+
+rule('232. Her notes are supplementary material: learned from, never quoted');
+let bmLatest;
+for (const m of LONG_FIELD.materials) bmLatest = (await bmCall('POST', `/authors/${akTenant}/books/${bmBook.body.id}/materials`, m)).body;
+console.log(`  added a synopsis and an author note → refitted, now v${bmLatest.model.version}`);
+bmShow(bmLatest.model);
+const bmLoss = bmLatest.model.parameters.themes.find((t) => t.theme === 'loss');
+const { rows: [bmFound] } = await query('SELECT content FROM book_passages WHERE id = $1', [bmLoss.foundPassages[0].id]);
+console.log(`\n  found for "loss", a passage that never says it:\n    "${bmFound.content.slice(0, 150)}…"`);
+const bmAgain = await bmCall('POST', `/authors/${akTenant}/books/${bmBook.body.id}/model/refit`, {});
+console.log(`\n  refit with nothing changed → refitted: ${bmAgain.body.refitted} (still v${bmAgain.body.model.version}); a version is never rewritten`);
+
+rule('233. The next drafts are written with it');
+await draftWeeklyPosts({ authorId: akTenant, bookId: bmBook.body.id, count: 4, providerName: 'stub', memeCount: 0 });
+const { rows: [bmApplied] } = await query(
+  "SELECT metadata FROM audit_log WHERE action = 'book_model.applied' AND entity_id = $1 ORDER BY id DESC LIMIT 1", [String(bmBook.body.id)],
+);
+console.log(`  book_model.applied: v${bmApplied.metadata.version}, ${bmApplied.metadata.passagesAdded} passage(s) added, by theme ${JSON.stringify(bmApplied.metadata.byTheme)}`);
+const { rows: bmFits } = await query(
+  "SELECT metadata->>'version' AS v, metadata->>'trigger' AS trig, metadata->>'maskedRecall' AS recall FROM audit_log WHERE action = 'book_model.fitted' AND entity_id = $1 ORDER BY id",
+  [String(bmBook.body.id)],
+);
+console.log('  the fitting history, on the audit log:');
+for (const f of bmFits) console.log(`    v${f.v}  ${f.trig.padEnd(15)} held-out recall ${f.recall ?? 'n/a'}`);
+console.log('\nThe Anthropic provider is given the lexicons and the lines in its prompt; the offline one');
+console.log('writes from the passages. Social drafts only for now — outreach and press still ground by');
+console.log('the literal search.');
+await new Promise((resolve) => bmServer.close(resolve));
+
+console.log('\nSTORY-046 complete — each book gets a fitted, versioned, evaluated model, learned from its');
+console.log('own text and the author\'s materials, and the drafter writes with it\n');
+
+// ── STORY-047: Review Generated Content for Thematic Alignment ─────────────
+// REQ-012. "The content is compared with key themes and stylistic elements
+// extracted from the book."
+
+rule('234. What a reviewer had, measured');
+console.log('  themes:     scored against the book (STORY-006/009)');
+console.log('  style:      scored against the author\'s *social posts* (STORY-007) — never the book');
+console.log('  decisions:  approve, or reject. A draft that was nearly right could only be thrown away.');
+const crServer = createApp().listen(0);
+await new Promise((resolve) => crServer.once('listening', resolve));
+const crBase = `http://127.0.0.1:${crServer.address().port}/api`;
+const crCall = async (method, path, body) => {
+  const r = await fetch(`${crBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', authorization: `Bearer ${akMira}` },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const crStyle = bookStyle({ content: LONG_FIELD.content });
+console.log(`\n  the book's style, measured: sentences ${crStyle.meanSentenceWords} words, exclamation marks ${crStyle.exclamationsPer100}/100 words,`);
+console.log(`  marketing words ${crStyle.hypePer100}/100, capitals ${crStyle.shoutedPer100}/100`);
+
+rule('235. Each draft is compared with the book when it is ready for review');
+const crDrafts = await draftWeeklyPosts({ authorId: akTenant, bookId: bmBook.body.id, count: 3, providerName: 'stub', memeCount: 0, weekOf: '2026-10-12' });
+for (const d of crDrafts) {
+  const { rows: [r] } = await query('SELECT verdict, comparison FROM content_reviews WHERE draft_id = $1', [d.id]);
+  const themes = r.comparison.themes.map((t) => `${t.theme}${t.bookWords.length ? ` (book's words: ${t.bookWords.join(', ')})` : ''}`).join('; ');
+  console.log(`  #${d.id} ${d.platform.padEnd(9)} ${r.verdict.padEnd(10)} ${themes}`);
+}
+const { rows: [crOff] } = await query(
+  `INSERT INTO drafts (author_id, book_id, platform, content, themes_used, status, confidence, week_of, theme_alignment, voice_score)
+   VALUES ($1,$2,'twitter','AMAZING news!!! The Long Field is a GAME-CHANGER about patience, a must-read bestseller! Buy it NOW!','{patience}','pending_approval',0.9,'2026-10-12',0.9,0.9) RETURNING id`,
+  [akTenant, bmBook.body.id],
+);
+await query(
+  `INSERT INTO draft_themes (draft_id, theme, key_message, named, message_score, score, known, passage_ids, carried_terms)
+   VALUES ($1,'patience','',true,0,0.8,true,'{}','{}')`, [crOff.id],
+);
+const crOffReview = await reviewDraft(crOff.id);
+console.log(`\n  a draft in a register the book never uses → ${crOffReview.verdict}`);
+for (const n of crOffReview.comparison.notes) console.log(`    ${n}`);
+
+rule('236. The reviewer\'s third answer: request changes');
+const crTarget = crDrafts.find((d) => d.status === 'pending_approval') ?? crDrafts[0];
+const crAsk = await crCall('POST', `/drafts/${crTarget.id}/request-changes`, { note: 'Lead with the empty chair, not the wall by the road.' });
+console.log(`  POST /drafts/${crTarget.id}/request-changes → ${crAsk.status}; #${crTarget.id} is now ${crAsk.body.draft.status}`);
+console.log(`    asked by ${crAsk.body.draft.changes_requested_by}: "${crAsk.body.draft.change_request}"`);
+const crRev = crAsk.body.revision;
+const { rows: [crRevReview] } = await query('SELECT verdict FROM content_reviews WHERE draft_id = $1', [crRev.id]);
+console.log(`  revision #${crRev.id} (revision of #${crRev.revision_of}): ${crRev.status}, compared with the book → ${crRevReview.verdict}`);
+console.log(`    "${crRev.content.slice(0, 110).replace(/\n/g, ' ')}…"`);
+const crApprove = await crCall('POST', `/drafts/${crTarget.id}/approve`, {});
+console.log(`  approving the draft that was set aside → ${crApprove.status}: ${crApprove.body.error}`);
+
+rule('237. The gate is the same gate');
+console.log('  A revision is a new draft: scored, compared with the book, and waiting for a person, like');
+console.log('  every other. Nothing publishes without content.approve. The offline provider cannot read');
+console.log('  the reviewer\'s note — it writes a different draft from another passage; the Anthropic');
+console.log('  provider is given the note and the draft the reviewer saw.');
+await new Promise((resolve) => crServer.close(resolve));
+
+console.log('\nSTORY-047 complete — every draft is compared with the book\'s themes and style when it is');
+console.log('ready for review, and a reviewer can ask for changes instead of only approving or rejecting\n');
+
+// ── STORY-048: Establish a Feedback Loop for Content Improvement ───────────
+// REQ-012. "Given feedback is provided on generated content, when the
+// feedback is processed, then the AI models adjust to improve future content."
+
+rule('238. What reviewers\' decisions changed, measured');
+console.log('  recorded:   every approval and rejection (STORY-005), every request for changes (STORY-047)');
+console.log('  learned:    nothing. A passage turned down on Monday was quoted again on Tuesday.');
+console.log('  the one adaptation that existed — the meme/text mix (STORY-069) — learns from engagement,');
+console.log('  not from what reviewers said.');
+const fbServer = createApp().listen(0);
+await new Promise((resolve) => fbServer.once('listening', resolve));
+const fbBase = `http://127.0.0.1:${fbServer.address().port}/api`;
+const fbCall = async (method, path, body) => {
+  const r = await fetch(`${fbBase}${path}`, {
+    method, headers: { 'content-type': 'application/json', authorization: `Bearer ${akMira}` },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const { rows: fbPassages } = await query('SELECT id, content FROM book_passages WHERE book_id = $1', [bmBook.body.id]);
+const fbWall = fbPassages.find((p) => p.content.includes('They stood by the wall along the road'));
+const fbWeek = '2026-10-12';
+const fbQuotesWall = (drafts) => drafts.filter((d) => quotedPassages(d.content, [fbWall]).length > 0).length;
+const { rows: fbBefore } = await query('SELECT id, content, status FROM drafts WHERE book_id = $1 AND week_of = $2 AND revision_of IS NULL', [bmBook.body.id, fbWeek]);
+
+rule('239. Mira gives feedback — decisions, ratings and why');
+// A second draft quoting the funeral passage, from the following weeks' drafts.
+let fbOtherWall = null;
+for (const week of ['2026-10-19', '2026-10-26', '2026-11-02', '2026-11-09', '2026-11-16']) {
+  const batch = await draftWeeklyPosts({ authorId: akTenant, bookId: bmBook.body.id, count: 3, providerName: 'stub', memeCount: 0, weekOf: week });
+  fbOtherWall = batch.find((d) => d.status === 'pending_approval' && quotedPassages(d.content, [fbWall]).length);
+  if (fbOtherWall) break;
+}
+if (fbOtherWall) {
+  await fbCall('POST', `/drafts/${fbOtherWall.id}/reject`, { notes: 'The wall by the road again; it reads as a eulogy.' });
+  await fbCall('POST', `/drafts/${fbOtherWall.id}/feedback`, { rating: 1, comment: 'Too bleak for launch week.' });
+  console.log(`  #${fbOtherWall.id} (the wall by the road): rejected, rated 1 — "Too bleak for launch week."`);
+}
+await fbCall('POST', `/drafts/${crTarget.id}/feedback`, { rating: 2, comment: 'Reads as a eulogy.' });
+console.log(`  #${crTarget.id} (the wall by the road): changes requested earlier, now rated 2 — "Reads as a eulogy."`);
+await fbCall('POST', `/drafts/${crRev.id}/approve`, { notes: 'Yes — the coat.' });
+await fbCall('POST', `/drafts/${crRev.id}/feedback`, { rating: 5, comment: 'The coat on the hook is exactly right.' });
+console.log(`  #${crRev.id} (the coat on the hook): approved, rated 5 — "The coat on the hook is exactly right."`);
+
+rule('240. The feedback is processed: the book\'s model adjusts');
+const fbApplied = await fbCall('POST', `/authors/${akTenant}/books/${bmBook.body.id}/feedback/apply`, {});
+const fbPrefs = fbApplied.body.model.parameters.preferences;
+console.log(`  POST .../feedback/apply → v${fbApplied.body.model.version}, trigger ${fbApplied.body.model.trigger}, from ${fbPrefs.judgments} judgments`);
+for (const p of fbPrefs.passages) {
+  const text = fbPassages.find((x) => Number(x.id) === p.id).content.slice(0, 48);
+  console.log(`    "${text}…"  liked ${p.good}, turned down ${p.bad} → weight ${p.weight}${p.weight < 0.6 ? '  (not quoted while there is another)' : ''}`);
+}
+console.log('\nBounded on purpose: two judgments before anything moves; a theme is tilted (0.5–1.5), never');
+console.log('silenced; a passage is left out only while its theme has another to quote.');
+
+rule('241. Future content: the same week, drafted again');
+const fbAfter = await draftWeeklyPosts({ authorId: akTenant, bookId: bmBook.body.id, count: 3, providerName: 'stub', memeCount: 0, weekOf: fbWeek });
+console.log(`  week of ${fbWeek}, same seeds — drafts quoting the wall by the road: before ${fbQuotesWall(fbBefore)}, after ${fbQuotesWall(fbAfter)}`);
+for (const d of fbAfter) console.log(`    #${d.id} ${d.platform.padEnd(9)} "${d.content.slice(0, 80).replace(/\n/g, ' ')}…"`);
+const { rows: [fbLog] } = await query(
+  "SELECT metadata FROM audit_log WHERE action = 'book_model.fitted' AND entity_id = $1 ORDER BY id DESC LIMIT 1", [String(bmBook.body.id)],
+);
+console.log(`\n  on the audit log: book_model.fitted, trigger ${fbLog.metadata.trigger}, moved ${JSON.stringify(fbLog.metadata.preferencesMoved.passages.map((p) => ({ id: p.id, from: p.from, to: p.to })))}`);
+console.log('\nThe Anthropic provider is also given what reviewers said. The offline one cannot read it;');
+console.log('it follows the weights.');
+await new Promise((resolve) => fbServer.close(resolve));
+
+console.log('\nSTORY-048 complete — reviewers\' decisions, ratings and notes are processed into the book\'s');
+console.log('model, and the next drafts change because of them — bounded, versioned and on the record\n');
+
+// ── STORY-049: Encrypt Audit Logs with AES-256 ─────────────────────────────
+// REQ-013. "Given an audit log entry is created, when it is stored, then the
+// entry is encrypted using AES-256."
+
+rule('242. What was stored, measured — and why STORY-019 said no');
+console.log('  before: every entry in the clear — anyone with a dump, a backup or a database login read it');
+console.log('  STORY-019 declined AES-256 for three reasons, all true of encrypting in application code:');
+console.log('    1. the tamper seals (STORY-013) hash row contents');
+console.log('    2. governance checks and 40 files read the log in SQL, inside the entry');
+console.log('    3. the key would sit in the env file beside DATABASE_URL');
+console.log('  So the encryption is in the storage, and every reader keeps its view.');
+
+rule('243. An entry is created — and stored as AES-256 ciphertext');
+const enEntry = await recordAction({ actor: 'Mira Kovač', action: 'demo.encrypted', entityType: 'demo', metadata: { note: 'the launch date moves to 14 March' } });
+const { rows: [enStored] } = await ownerQuery(
+  "SELECT key_id, encode(substring(payload from 1 for 20), 'hex') AS head, get_byte(payload, 3) AS cipher, octet_length(payload) AS bytes FROM audit_log_sealed WHERE id = $1",
+  [enEntry.id],
+);
+console.log(`  stored:  ${enStored.bytes} bytes, starting ${enStored.head}…`);
+console.log(`           cipher byte ${enStored.cipher} = AES-256 (RFC 4880 §9.2), key ${enStored.key_id} (= this app's key ${auditKeyId})`);
+const { rows: [enRead] } = await query('SELECT metadata FROM audit_log WHERE id = $1', [enEntry.id]);
+console.log(`  the app reads audit_log as always:  ${JSON.stringify(enRead.metadata)}`);
+
+rule('244. Without the key, there is nothing to read — and nothing can be written');
+const enPg = (await import('pg')).default;
+const enNoKey = new enPg.Client({ connectionString: config.migrationDatabaseUrl });
+await enNoKey.connect();
+const { rows: [enBlind] } = await enNoKey.query('SELECT action, metadata FROM audit_log WHERE id = $1', [enEntry.id]);
+console.log(`  the database owner, no key:  action "${enBlind.action}" (routing stays clear), entry ${JSON.stringify(enBlind.metadata)}`);
+const enWrite = await enNoKey.query("INSERT INTO audit_log (actor, action, entity_type) VALUES ('x','y','z')").then(() => 'ALLOWED', (e) => e.message);
+console.log(`  and writing one:             refused — ${enWrite}`);
+await enNoKey.end();
+const enDirect = await query('SELECT * FROM audit_log_sealed LIMIT 1').then(() => 'ALLOWED', (e) => e.message);
+console.log(`  the app login, at the storage directly: refused — ${enDirect}`);
+console.log('\nThe key is 32 random bytes in its own file (server/.keys/audit.key, mode 600; a mounted secret in');
+console.log('production), handed to each connection the app opens as it starts — never stored in the database,');
+console.log('never in query text, never in the image (.dockerignore), not in the env file with DATABASE_URL.');
+
+rule('245. STORY-019\'s objections, answered');
+const enCheck = (await runChecks({})).find((c) => c.id === 'audit.encrypted');
+const enSeal = await verifyAuditLog({});
+console.log(`  seals:       status "${enSeal.status}"${enSeal.status === 'altered' ? ' — the rows stage 103 tampered with, still caught with the log encrypted' : ''};`);
+console.log('               they hash the decrypted view, so an edited ciphertext breaks them too');
+console.log('  SQL readers: unchanged — audit_log is a view that decrypts on read and encrypts on insert');
+console.log(`  governance:  audit.encrypted (invariant) ${enCheck.passed ? 'pass' : `BREACH (${enCheck.violations})`} — every entry under the current key, and opens`);
+console.log('\nWhat it does not protect against, said plainly: the running application holds the key, so');
+console.log('anyone who controls the application reads the log. It protects dumps, backups, replicas and');
+console.log('every database login the application did not open. Rotation re-encrypts under a new key and is');
+console.log('not built yet; each row records its key id so one can be.');
+
+console.log('\nSTORY-049 complete — every audit entry is stored encrypted with AES-256, the key is kept apart');
+console.log('from the database, and nothing that read or sealed the log had to change\n');
+
+// ── STORY-050: Role-Based Access Control for Audit Logs ────────────────────
+// REQ-013. "Access is granted or denied based on the user's role permissions."
+
+const rbServer = createApp().listen(0);
+await new Promise((resolve) => rbServer.once('listening', resolve));
+const rbBase = `http://127.0.0.1:${rbServer.address().port}/api`;
+const rbStatus = async (headers, path) => (await fetch(`${rbBase}${path}`, { headers })).status;
+const rbBearer = async (email, password) => ({
+  authorization: `Bearer ${(await (await fetch(`${rbBase}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) })).json()).token}`,
+});
+const rbMira = await rbBearer('mira@example.test', 'quiet-craft');
+const rbKeyMade = await (await fetch(`${rbBase}/authors/${akTenant}/api-keys`, {
+  method: 'POST', headers: { 'content-type': 'application/json', ...rbMira }, body: JSON.stringify({ name: 'Newsletter sync (read)' }),
+})).json();
+
+rule('246. Who could read the audit logs, measured');
+console.log('  The permissions existed since STORY-019 — audit.read (authors hold it for their own trail),');
+console.log('  audit.verify — but nothing tied the routes that serve audit data to the permission that guards');
+console.log('  them. Walking every route that reads audit data found three guarded by the tenant rule alone.');
+console.log('  An API key holds no permissions at all (STORY-045), and before this story it read:');
+for (const path of ['access-events', 'trust-history', 'trust-dashboard']) {
+  console.log(`    /authors/${akTenant}/${path.padEnd(16)} — who opened her data, her trust history, her audit trail`);
+}
+
+rule('247. Now every audit route is declared, with its permission — and the router is held to it');
+const rbPolicy = await auditAccessPolicy();
+const rbRoles = Object.keys(rbPolicy[0].roles);
+console.log(`  ${'route'.padEnd(40)} ${rbRoles.map((r) => r.padEnd(12)).join('')}`);
+for (const p of rbPolicy) console.log(`  ${p.route.padEnd(40)} ${rbRoles.map((r) => p.roles[r].padEnd(12)).join('')}`);
+console.log('\nDerived from the live grants. A route that serves audit data and is not on the list — or is');
+console.log('guarded by anything other than what the list says — fails the build.');
+
+rule('248. Granted or denied by role — the same key, and Mira, on the same routes');
+for (const path of [`/authors/${akTenant}/access-events`, '/audit-log', '/audit-integrity']) {
+  const key = await rbStatus({ 'x-api-key': rbKeyMade.key }, path);
+  const mira = await rbStatus(rbMira, path);
+  console.log(`  ${path.padEnd(28)} api key → ${key}   Mira (author) → ${mira}`);
+}
+await flushAccessLog();
+const { rows: [rbRefused] } = await query(
+  "SELECT reason FROM data_access_events WHERE route = '/audit-integrity' AND outcome = 'denied' ORDER BY id DESC LIMIT 1",
+);
+console.log(`\n  Mira on /audit-integrity is refused, and it is on the access log: "${rbRefused.reason}"`);
+
+rule('249. The screen asks the same question');
+console.log('  The Audit log tab is shown only to those holding audit.read; the Access tab shows the table');
+console.log('  above, to those who review access. Nobody is offered a page that can only refuse them.');
+await new Promise((resolve) => rbServer.close(resolve));
+
+console.log('\nSTORY-050 complete — every route that serves audit data is declared with the role permissions');
+console.log('that guard it, the router is held to the declaration, and the screen shows what it enforces\n');
+
+// ── STORY-051: Audit Log Access Monitoring ─────────────────────────────────
+// REQ-013. "The attempt is recorded in a separate security log with user
+// details and outcome."
+
+rule('250. Where attempts on the audit logs went, measured');
+console.log('  into the data access log (STORY-044): in the clear, beside every other request, readable by');
+console.log('  anyone who reads that log. Nothing separate; nothing protected like the trail itself.');
+const slServer = createApp().listen(0);
+await new Promise((resolve) => slServer.once('listening', resolve));
+const slBase = `http://127.0.0.1:${slServer.address().port}/api`;
+const slGet = async (headers, path) => (await fetch(`${slBase}${path}`, { headers })).status;
+const slLogin = async (email, password) => ({
+  authorization: `Bearer ${(await (await fetch(`${slBase}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) })).json()).token}`,
+});
+const slAuditor = await slLogin('auditor@example.test', 'compliance-only');
+const slTomas = await slLogin('tomas@example.test', 'second-shelf');
+
+rule('251. Four attempts on the audit logs');
+const slTries = [
+  ['the compliance auditor reads the audit log', slAuditor, '/audit-log'],
+  ['Tomas asks for the integrity report', slTomas, '/audit-integrity'],
+  ['no session asks for Mira\'s trust history', {}, `/authors/${akTenant}/trust-history`],
+  ['Mira\'s read-only API key asks who opened her data', { 'x-api-key': rbKeyMade.key }, `/authors/${akTenant}/access-events`],
+];
+for (const [what, headers, path] of slTries) console.log(`  ${what.padEnd(52)} → ${await slGet(headers, path)}`);
+await flushAccessLog();
+const { rows: slEntries } = await query(
+  "SELECT route, outcome, COALESCE(user_email, CASE WHEN api_key_id IS NOT NULL THEN 'API key #' || api_key_id ELSE 'no session' END) AS who, user_role, ip, reason FROM security_log ORDER BY id DESC LIMIT 4",
+);
+console.log('\n  the security log:');
+for (const e of slEntries.reverse()) {
+  console.log(`    ${e.who.padEnd(22)} ${(e.user_role ?? '—').padEnd(10)} ${e.route.padEnd(38)} ${e.outcome}${e.reason ? ` — ${e.reason}` : ''}`);
+}
+
+rule('252. Separate, encrypted, access-controlled');
+const { rows: [slStored] } = await ownerQuery(
+  "SELECT get_byte(payload, 3) AS cipher, position(convert_to('auditor@example.test', 'UTF8') IN payload) AS found FROM security_log_sealed ORDER BY id DESC LIMIT 1",
+);
+console.log(`  stored with cipher byte ${slStored.cipher} (AES-256), the auditor's email found in the bytes: ${slStored.found ? 'YES' : 'no'}`);
+const slDirect = await query('SELECT * FROM security_log_sealed LIMIT 1').then(() => 'ALLOWED', (e) => e.message);
+console.log(`  the app login at the storage: ${slDirect}`);
+console.log(`  Tomas asks for the security log itself → ${await slGet(slTomas, '/security/audit-access')}`);
+console.log('  (and that attempt is in the security log too — reading it is an attempt on an audit log)');
+
+rule('253. Checked from outside');
+await flushAccessLog();
+const slCheck = (await runChecks({})).find((c) => c.id === 'security_log.complete');
+console.log(`  invariant security_log.complete: ${slCheck.passed ? 'pass' : `BREACH (${slCheck.violations})`}`);
+console.log('  Each attempt is written to the access log and the security log in one transaction, sharing a');
+console.log('  request id; an access record on an audit route with no security entry would mean the watching');
+console.log('  stopped.');
+await new Promise((resolve) => slServer.close(resolve));
+
+console.log('\nSTORY-051 complete — every attempt on the audit logs, allowed or refused, is in a separate,');
+console.log('encrypted, reviewer-only security log with who, from where and how it ended\n');
+
+// ── STORY-052: Audit Log Access Notification ───────────────────────────────
+// REQ-013. "A notification is sent to the security officer with details of the attempt."
+
+rule('254. Who was told about an attempt on the audit logs, measured');
+console.log('  nobody. Refused attempts were recorded (STORY-044, STORY-051) and sat there. The one alert —');
+console.log('  STORY-044\'s — waited for five refusals of any kind and told admins about data access in general.');
+const { rows: snStage251 } = await query("SELECT subject_label, attempts, routes_tried, delivered FROM security_notifications ORDER BY id");
+console.log(`\n  Since this story, the refusals in stages 248–251 have already told the security officers (${snStage251.length} alert${snStage251.length === 1 ? '' : 's'}):`);
+for (const n of snStage251) console.log(`    ${n.subject_label.padEnd(44)} ${n.attempts} attempt(s) ${n.routes_tried.join(', ')} → told ${n.delivered.join(', ')}`);
+
+rule('255. Tomas tries again, twice more — one alert, with the count');
+const snServer = createApp().listen(0);
+await new Promise((resolve) => snServer.once('listening', resolve));
+const snBase = `http://127.0.0.1:${snServer.address().port}/api`;
+const snTomas = { authorization: `Bearer ${(await (await fetch(`${snBase}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'tomas@example.test', password: 'second-shelf' }) })).json()).token}` };
+await fetch(`${snBase}/audit-log?authorId=${akTenant}`, { headers: snTomas });
+await fetch(`${snBase}/security/audit-access`, { headers: snTomas });
+await flushAccessLog();
+const { rows: [snTomasAlert] } = await query(
+  "SELECT * FROM security_notifications WHERE subject_label LIKE 'tomas@%' ORDER BY id DESC LIMIT 1",
+);
+console.log(`  ${snTomasAlert.subject_label}: ${snTomasAlert.attempts} attempts, ${snTomasAlert.routes_tried.join(', ')}`);
+console.log(`  emails sent: ${snTomasAlert.delivered.length} (to ${snTomasAlert.delivered.join(', ')}), not ${snTomasAlert.attempts * snTomasAlert.delivered.length}`);
+
+rule('256. What the security officer receives');
+const { rows: [snLog] } = await query('SELECT * FROM security_log WHERE id = $1', [snTomasAlert.first_log_id]);
+console.log(`  Subject: Security: refused attempt on the audit logs — ${snTomasAlert.subject_label}`);
+console.log(`    Who:     ${snTomasAlert.subject_label} — ${snLog.user_name}`);
+console.log(`    Tried:   ${snLog.route}  (${snLog.path})`);
+console.log(`    When:    ${new Date(snLog.occurred_at).toISOString().replace('T', ' ').slice(0, 19)} UTC`);
+console.log(`    From:    ${snLog.ip}${snLog.user_agent ? ` · ${snLog.user_agent}` : ''}`);
+console.log(`    Outcome: ${snLog.outcome} — ${snLog.reason}`);
+console.log(`    and a link to the Security tab to see every attempt, acknowledge, or block the account.`);
+
+rule('257. The officer acts');
+const snAck = await fetch(`${snBase}/security/notifications/${snTomasAlert.id}/acknowledge`, {
+  method: 'POST', headers: { 'content-type': 'application/json', ...slAuditor }, body: JSON.stringify({ note: 'Asked Tomas; he was looking for his own history.' }),
+});
+console.log(`  the compliance auditor acknowledges → ${snAck.status}`);
+console.log('  an admin could block the account from the same row (STORY-044), stopping it on its next request.');
+console.log('\nSent through the email adapter (STORY-002), shaped like SendGrid\'s send call — swapping in the');
+console.log('real provider is a change to one file — and through the integration gateway (STORY-038). Who');
+console.log('actually received it is recorded, not who it was meant for.');
+await new Promise((resolve) => snServer.close(resolve));
+
+console.log('\nSTORY-052 complete — a refused attempt on the audit logs tells every security officer at once,');
+console.log('with who, what, when, from where and why, and later attempts join the alert instead of flooding it\n');
+
+// ── STORY-028: Provide Detailed Audit Log Reports (built after STORY-053) ──
+// REQ-005. "The report includes detailed records of all actions with timestamps
+// and user details" — and only for those with the permissions.
+
+rule('258. What a stakeholder could get, measured — and a report now');
+console.log('  before: the Audit tab\'s last 200 entries, by tenant and type. No period, no filter by person or');
+console.log('  action, no summary, no export, nothing proving a copy was not edited; "who" was a name string.');
+const { rows: [rpAuditor] } = await query("SELECT id, name, role FROM users WHERE email = 'auditor@example.test'");
+const rpReport = await generateAuditReport({ authorId: akTenant, action: 'draft.', user: rpAuditor });
+console.log(`\n  Mira's draft actions, last 30 days, for the compliance auditor: ${rpReport.summary.records} records`);
+console.log(`    by: ${Object.entries(rpReport.summary.actorKinds).map(([k, n]) => `${n} ${k}`).join(', ')}`);
+console.log(`    most frequent: ${rpReport.summary.byAction.slice(0, 4).map(([a, n]) => `${a} ${n}`).join(' · ')}`);
+console.log(`    seals: ${rpReport.integrity}   sha256 ${rpReport.digest.slice(0, 24)}…`);
+const rpPerson = rpReport.records.find((r) => r.actor_kind === 'person');
+if (rpPerson) console.log(`    e.g. ${new Date(rpPerson.created_at).toISOString().slice(0, 19)}  ${rpPerson.action.padEnd(18)} by ${rpPerson.actor} (${rpPerson.actor_email}, ${rpPerson.actor_role})`);
+console.log(`  as CSV: ${reportAsCsv(rpReport).split('\n').length} lines, the digest in its header`);
+
+rule('259. Only for those with the permissions');
+const rpServer = createApp().listen(0);
+await new Promise((resolve) => rpServer.once('listening', resolve));
+const rpBase = `http://127.0.0.1:${rpServer.address().port}/api`;
+const rpStatus = async (headers, path) => (await fetch(`${rpBase}${path}`, { headers })).status;
+console.log(`  Mira, her own tenant            → ${await rpStatus(rbMira, '/audit-reports')}`);
+console.log(`  Mira, Tomas's tenant            → ${await rpStatus(rbMira, `/audit-reports?authorId=${daTomasRow.author_id}`)}`);
+console.log(`  the compliance auditor, all     → ${await rpStatus(slAuditor, '/audit-reports')}`);
+console.log(`  Mira's API key                  → ${await rpStatus({ 'x-api-key': rbKeyMade.key }, '/audit-reports')}`);
+console.log(`  no session                      → ${await rpStatus({}, '/audit-reports')}`);
+console.log('\nEvery report generated is on the audit log with its filters and digest; every attempt on');
+console.log('the report route is in the security log (STORY-051) like any other audit route.');
+await new Promise((resolve) => rpServer.close(resolve));
+
+console.log('\nSTORY-028 complete — a stakeholder can generate a report of every action in a period, with');
+console.log('times and user details, provable by its digest, and only with the permissions to read it\n');
+// ── STORY-057: Show Pending Approvals and Recent Actions (Trust Dashboard) ──
+// REQ-015, REQ-004. Timestamps and priority on everything waiting; the person
+// who decides is told, on every tab.
+
+rule('260. What the dashboard showed, measured');
+console.log('  before: pending approvals as a count per kind; recent actions as a time of day; no priority;');
+console.log('  nothing told the person who decides that anything was waiting for them.');
+const { rows: [atMiraUser] } = await query("SELECT id, name, role, author_id FROM users WHERE email = 'mira@example.test'");
+const atMiraPerms = (await query('SELECT permission FROM role_permissions WHERE role = $1', [atMiraUser.role])).rows.map((r) => r.permission);
+const at = await attentionFor({ authorId: akTenant, user: { ...atMiraUser, permissions: atMiraPerms } });
+
+rule('261. Everything waiting, most urgent first — with when, and why it is urgent');
+console.log(`  ${at.awaiting.total} waiting: ${at.awaiting.byPriority.high} high, ${at.awaiting.byPriority.medium} medium, ${at.awaiting.byPriority.normal} normal`);
+for (const i of at.awaiting.items.slice(0, 5)) {
+  console.log(`    ${i.priority.padEnd(6)} ${new Date(i.createdAt).toISOString().slice(0, 16).replace('T', ' ')}  ${i.label.slice(0, 44).padEnd(44)} ${i.priorityReason}`);
+}
+console.log('\n  recent actions, full timestamp and priority:');
+for (const r of at.recentActions.slice(0, 4)) console.log(`    ${r.created_at.slice(0, 19).replace('T', ' ')}  ${r.priority.padEnd(6)} ${r.action}`);
+
+rule('262. The notice, for whoever decides');
+console.log(`  Mira sees on every tab: "${at.forYou?.message ?? '(nothing waiting)'}"`);
+const atAuditor = await attentionFor({ authorId: akTenant, user: { ...rpAuditor, permissions: ['audit.read', 'audit.verify', 'tenant.read.all'] } });
+console.log(`  the compliance auditor (cannot approve): ${atAuditor.forYou === null ? 'no notice — nothing is theirs to decide' : 'NOTICE SHOWN'}`);
+console.log('\nSTORY-057 complete — pending approvals and recent actions carry timestamps and priority, and the');
+console.log('person who decides is told how much is waiting and how urgently\n');
+
+// ── STORY-058: Calculate Governance Score (Trust Dashboard) ──
+// REQ-015, REQ-005. A formula over what the system did, with its breakdown.
+
+rule('263. The old score, and what it could not say');
+console.log('  before: "governance score" = governance checks passing (e.g. 22 of 24). It said whether the rules');
+console.log('  held, not what the system did — and a broken invariant cost it one check out of twenty-four.');
+const gs = await governanceScore({ authorId: akTenant });
+
+rule('264. The score, and every factor behind it');
+for (const f of gs.factors) {
+  console.log(`  ${f.label.padEnd(46)} ${f.noData ? 'nothing yet'.padEnd(10) : `${f.measured.n}/${f.measured.d}`.padEnd(10)} weight ${String(Math.round(f.effectiveWeight * 100)).padStart(3)}%  adds ${f.noData ? '  —' : f.contribution.toFixed(1).padStart(4)}`);
+}
+console.log(`\n  score: ${gs.score} / 100${gs.capped ? `  (capped; ${gs.uncapped} without the cap)` : ''}`);
+if (gs.capReason) console.log(`  ${gs.capReason}`);
+
+rule('265. From the latest data');
+console.log(`  computed ${gs.computedAt} over the last ${gs.window.days} days; the Trust tab re-reads it every 15 s.`);
+console.log('\nSTORY-058 complete — a governance score from what the system did, with each factor, its weight and');
+console.log('its measurement shown, capped whenever an invariant is broken\n');
+
+// ── STORY-054: Kubernetes, Helm (verified on a local cluster; not run here) ──
+// REQ-008. The chart is deploy/helm/author-launch-engine; the cluster run and
+// its output are in the README. What the demo can show is what made the load
+// balancing visible from outside.
+
+rule('266. Which copy answered');
+const k8sReady = await readiness({});
+console.log(`  /api/ready now names the instance that answered: "${k8sReady.instance}"`);
+console.log('  on the cluster, twelve requests to one address were answered by two pods (7 and 5); with the');
+console.log('  autoscaler at three, eight requests reached all three. Deleting a pod: replaced in 2 seconds.');
+console.log('\nSTORY-054 complete — the chart scales the API on load, spreads requests, replaces what dies,');
+console.log('and gives each role only what it needs — proven on k3s; not yet on a cloud cluster\n');
+
+// ── STORY-055: Aggregate data with Elasticsearch ──
+// REQ-015, REQ-001, REQ-002.
+
+rule('267. What goes into the index, and what does not');
+const { rows: [esRow] } = await query('SELECT * FROM audit_index_rows(0, 1)');
+const esDoc = SEARCH_SOURCES.audit.toDoc(esRow);
+console.log(`  an audit row, as indexed: ${JSON.stringify(esDoc)}`);
+console.log('  not indexed: before, after, metadata — encrypted in Postgres (STORY-049), and they stay there.');
+console.log(`  its digest: ${digestOf(esDoc).slice(0, 32)}… — each document is read back and checked against it.`);
+
+rule('268. Aggregate, search, reconcile');
+if (!config.elasticsearchUrl) {
+  console.log('  ELASTICSEARCH_URL is not set on this machine, so nothing is copied and the Trust tab says search');
+  console.log('  is not set up. The CI job `search` is written to run a real Elasticsearch — 20,000 rows, 40 queries');
+  console.log('  each under a second, deleted and altered documents repaired (tests/searchLive.test.js) — and has');
+  console.log('  not run yet: the next push says whether it passes.');
+} else {
+  const esRun = await searchAggregate({});
+  for (const src of esRun.sources) console.log(`  ${src.source.padEnd(9)} indexed ${src.indexed} through id ${src.mark}`);
+  const esHits = await searchTenant({ authorId: akTenant, q: 'approved' });
+  console.log(`  Mira's "approved": ${esHits.total} found, answered in ${esHits.elapsedMs} ms (index ${esHits.took} ms)`);
+  for (const c of await searchReconcile({})) console.log(`  ${c.source.padEnd(9)} ${c.inSync ? 'in sync' : 'NOT IN SYNC'}: ${c.sourceCount} rows = ${c.indexCount} documents`);
+}
+console.log('\nSTORY-055 built — logs and metrics aggregated into a searchable index, each batch verified, gaps and');
+console.log('damage found and repaired, the encrypted part never copied; live checks await the first CI run\n');
+
+// ── STORY-056: Grafana dashboards ──
+// REQ-015, REQ-003.
+
+rule('269. The trust dashboard in Grafana, as provisioned');
+const gfDash = JSON.parse(await readFile(new URL('../../deploy/helm/author-launch-engine/files/grafana/dashboards/trust.json', import.meta.url), 'utf8'));
+for (const p of gfDash.panels) console.log(`  · ${p.title.padEnd(40)} ${p.targets[0].datasource.uid}`);
+console.log(`  time range: ${gfDash.time.from} → ${gfDash.time.to}, changeable; filter: tenant; editable, and a saved change is kept.`);
+console.log('\n  Grafana is not run on this machine. The CI job `search` is written to start it with these files,');
+console.log('  run every panel\'s query over a chosen range, save an editor\'s change, read it back as another user,');
+console.log('  restart Grafana to check it was kept (tests/grafanaLive.test.js), and take the screenshots. NOT RUN YET.');
+console.log('\nSTORY-056 built — interactive, customisable Grafana panels over the index, with user-chosen time');
+console.log('ranges and saved changes kept; to be verified by the first CI run, not on this machine\n');
+await closePool();

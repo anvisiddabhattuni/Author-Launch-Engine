@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { BookModelPanel } from './BookModelPanel.jsx';
 
 /** Build step 1: the author supplies book content and prior social posts. */
 export function UploadPage({ author }) {
@@ -182,6 +183,9 @@ export function UploadPage({ author }) {
           </table>
         )}
       </div>
+
+      {/* STORY-046 */}
+      <BookModelPanel author={author} books={books} />
     </>
   );
 }

@@ -1,0 +1,64 @@
+{{/*
+  Migrations run once per install or upgrade, as their own job (STORY-015's
+  rule: never in the API's entrypoint, where N replicas race the same DDL).
+  Retries until the database answers. The API's readiness probe refuses traffic
+  until they have applied.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate-{{ .Release.Revision }}
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 12
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-migrate, ale-role: app }
+    spec:
+      serviceAccountName: {{ .Release.Name }}-migrate
+      restartPolicy: OnFailure
+      {{- include "ale.appPodSecurity" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "ale.image" (dict "root" . "name" "ale-api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [node, server/src/db/migrate.js]
+          env: {{- include "ale.appEnv" . | nindent 12 }}
+          {{- include "ale.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: audit-key, mountPath: /run/secrets/audit, readOnly: true }]
+      volumes: {{- include "ale.auditKeyVolume" . | nindent 8 }}
+{{- if .Values.seed.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-seed-{{ .Release.Revision }}
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 12
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-seed, ale-role: app }
+    spec:
+      serviceAccountName: {{ .Release.Name }}-migrate
+      restartPolicy: OnFailure
+      {{- include "ale.appPodSecurity" . | nindent 6 }}
+      initContainers:
+        - name: wait-for-migrations
+          image: {{ include "ale.image" (dict "root" . "name" "ale-api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [node, -e, "const pg=require('pg');const go=async()=>{for(;;){try{const c=new pg.Client({connectionString:process.env.MIGRATION_DATABASE_URL});await c.connect();const r=await c.query(\"SELECT to_regclass('public.security_notifications') AS t\");await c.end();if(r.rows[0].t)return;}catch{}await new Promise(r=>setTimeout(r,2000))}};go()"]
+          env: {{- include "ale.appEnv" . | nindent 12 }}
+          {{- include "ale.containerSecurity" . | nindent 10 }}
+      containers:
+        - name: seed
+          image: {{ include "ale.image" (dict "root" . "name" "ale-api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [node, server/src/db/seed.js]
+          env: {{- include "ale.appEnv" . | nindent 12 }}
+          {{- include "ale.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: audit-key, mountPath: /run/secrets/audit, readOnly: true }]
+      volumes: {{- include "ale.auditKeyVolume" . | nindent 8 }}
+{{- end }}

@@ -62,6 +62,9 @@ export const PRIORITIES = {
   // sealing a few rows later costs nothing — where delaying an approved email
   // or a publish costs something to somebody (STORY-013).
   'audit.seal_and_verify': 10,
+  // Below even the sealer: it copies the logs into the search index, and a copy
+  // made one sweep later is the same copy (STORY-055).
+  'search.aggregate': 5,
 };
 
 /** Anything unclassified sits between outbound work and housekeeping. */
@@ -94,6 +97,8 @@ export const RESOURCES = {
   // One log, one sealer. Two of these at once would seal overlapping ranges and
   // produce two chains claiming to describe the same rows.
   'audit.seal_and_verify': () => 'global:audit_log',
+  // One indexer: two would race to move the same marks (STORY-055).
+  'search.aggregate': () => 'global:search_index',
   // Per author: two collections for one author would append two readings a
   // second apart, which is not a series, it is a stutter.
   'engagement.collect': (job) => `author:${job.author_id}:engagement`,
@@ -104,6 +109,54 @@ export const RESOURCES = {
   // to wait for each other.
   'outreach.send': (job) => `outreach:${job.payload?.messageId}`,
 };
+
+/**
+ * Who each kind of task is assigned to, what it needs, and why it sits where
+ * it does (STORY-040).
+ *
+ * "Assigned to agents" was implicit before: a job had a kind and a handler,
+ * and which agent was doing the work had to be read out of the code. And
+ * "resource availability" meant only the exclusive resource above — nothing
+ * knew that an agent's work needs an integration. With email down (STORY-038),
+ * the approval notifier ran anyway, every send was refused, and the notifier
+ * recorded the items as announced. They are never announced again.
+ *
+ * `requires` lists the integrations a task cannot do its job without. While
+ * one of them has an open circuit, the task waits — without spending an
+ * attempt — until the circuit will accept a trial call.
+ */
+export const TASKS = {
+  'outreach.send':             { agent: 'PROutreachAgent',              requires: ['email'],
+    reason: 'outbound work a human authorised' },
+  'posts.publish_due':         { agent: 'SchedulingAgent',              requires: [],
+    // Per platform, inside the publisher: one platform down must not hold
+    // back posts to the other three.
+    reason: 'outbound work a human authorised — late the moment it is due' },
+  'system.health_check':       { agent: 'InfrastructureDeploymentAgent', requires: [],
+    reason: 'notices outages; cheap, and must not wait behind the work it watches' },
+  'press.draft_approaching':   { agent: 'PRMaterialsAgent',             requires: [],
+    reason: 'produces work other agents react to' },
+  'trust.monitor_escalations': { agent: 'TrustMonitoringAgent',         requires: [],
+    reason: 'reacts to what the producers wrote' },
+  'trust.assess':              { agent: 'TrustMonitoringAgent',         requires: [],
+    reason: 'reads the whole system and writes one assessment; reacts, produces nothing others wait on' },
+  'reviews.notify_pending':    { agent: 'ApprovalNotificationAgent',    requires: ['email'],
+    reason: 'reacts to what the producers made: tells a human what is waiting, after them so it covers it' },
+  'approvals.notify_waiting':  { agent: 'ApprovalNotificationAgent',    requires: ['email'],
+    reason: 'reacts to what the producers made: tells a human what is waiting, after them so it covers it' },
+  'posts.notify_failures':     { agent: 'APIIntegrationAgent',          requires: ['email'],
+    reason: 'reacts to the publisher: tells a human a post failed, after it so it covers this window' },
+  'engagement.collect':        { agent: 'TrustMonitoringAgent',         requires: [],
+    reason: 'reads what was published and moves nothing' },
+  'audit.seal_and_verify':     { agent: 'AuditSecurityAgent',           requires: [],
+    reason: 'reads history; sealing a few rows later costs nothing' },
+  'search.aggregate':          { agent: 'TrustMonitoringAgent',         requires: [],
+    reason: 'copies the logs into the search index; Postgres stays the record' },
+};
+
+// The two kinds that used to fall to the default, and be described by it.
+PRIORITIES['trust.assess'] = 25;
+PRIORITIES['posts.notify_failures'] = 21;
 
 /** The priority a job of this kind should carry. */
 export const priorityFor = (kind) => PRIORITIES[kind] ?? DEFAULT_PRIORITY;
@@ -134,19 +187,21 @@ export function resourceFor(job) {
 export function planFor(job) {
   const priority = priorityFor(job.kind);
   const resource = resourceFor(job);
+  const task = TASKS[job.kind];
   return {
     priority,
     resource,
+    agent: task?.agent ?? '',
+    requires: task?.requires ?? [],
     coordination: {
       priority,
       resource,
-      // The plain-English reason, for the person looking at a stalled queue.
-      reason:
-        priority >= 80
-          ? 'outbound work a human authorised'
-          : priority >= 50
-            ? 'produces work other agents react to'
-            : 'reacts to what the producers wrote',
+      agent: task?.agent ?? null,
+      requires: task?.requires ?? [],
+      // The plain-English reason, for the person reviewing the assignment.
+      // Declared per kind rather than guessed from the number: the guess
+      // described two kinds as producers when neither produces anything.
+      reason: task?.reason ?? 'undeclared kind — no agent, priority or reason was chosen for it',
       decidedBy: ACTOR,
     },
   };
@@ -159,7 +214,7 @@ export function planFor(job) {
  * holds its resource is not an error and not a failure, and without a line
  * saying so it is indistinguishable from a queue with nothing to do.
  */
-export async function recordDispatch({ job, deferredBehind = null }, client) {
+export async function recordDispatch({ job, deferredBehind = null, higherPriorityWaiting = null, chosenBy = null }, client) {
   return recordAction(
     {
       actor: ACTOR,
@@ -169,9 +224,17 @@ export async function recordDispatch({ job, deferredBehind = null }, client) {
       authorId: job.author_id,
       metadata: {
         kind: job.kind,
+        // Who the work was given to, and on what grounds (STORY-040) — the
+        // record a reviewer checks an assignment against.
+        agent: job.agent || null,
         priority: job.priority,
+        reason: job.coordination?.reason ?? null,
         resource: job.resource,
+        requires: job.requires ?? [],
         ...(deferredBehind ? { deferredBehind } : {}),
+        ...(job.deferred_reason && !deferredBehind ? { waitedFor: job.deferred_reason } : {}),
+        ...(chosenBy ? { chosenBy } : {}),
+        ...(higherPriorityWaiting ? { higherPriorityWaiting } : {}),
       },
     },
     client,

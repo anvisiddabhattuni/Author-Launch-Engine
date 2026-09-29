@@ -2,6 +2,8 @@ import { config, PLATFORMS } from '../config.js';
 import { getProvider } from '../ai/index.js';
 import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
+import { ensureBookModel, groundWithModel } from '../services/bookModel.js';
+import { reviewDraft } from '../services/contentReview.js';
 import { assess } from '../services/escalationPolicy.js';
 import { checkVoice, deriveVoice } from '../services/voiceProfile.js';
 import { RIGHTS, reviewMemeCandidate } from '../services/brandSafety.js';
@@ -263,6 +265,13 @@ export async function draftWeeklyPosts({
   providerName = config.aiProvider,
   weekOf = weekStart(),
   memeCount = null,
+  // A revision after a reviewer asked for changes (STORY-047): linked to the
+  // draft it replaces, written with the reviewer's note.
+  revisionOf = null,
+  revisionNote = null,
+  previousContent = null,
+  revisionThemes = null,
+  avoidPassages = [],
 }) {
   const provider = getProvider(providerName);
 
@@ -301,7 +310,7 @@ export async function draftWeeklyPosts({
     // Retrieval, before generation. Logged against the book rather than a draft
     // because a week of posts has no row of its own, and the retrieval is a
     // fact about the book either way.
-    const grounding = await groundInBookThemes(
+    let grounding = await groundInBookThemes(
       {
         bookId: book.id,
         authorId,
@@ -311,6 +320,38 @@ export async function draftWeeklyPosts({
       },
       client,
     );
+
+    // The model fitted to this book (STORY-046): fitted now if there is none
+    // or its inputs have changed. Passages it found for a theme short of
+    // literal evidence join the grounding, marked, and the whole draft is
+    // scored against that grounding as before.
+    const bookModel = await ensureBookModel({ bookId: book.id }, client);
+    const literalGrounding = grounding;
+    grounding = await groundWithModel(grounding, bookModel, client);
+    if (grounding.model?.added || grounding.model?.avoided?.length) {
+      await recordAction(
+        {
+          actor: ACTOR,
+          action: 'book_model.applied',
+          entityType: 'book',
+          entityId: book.id,
+          authorId,
+          metadata: {
+            version: bookModel.version,
+            passagesAdded: grounding.model.added,
+            byTheme: Object.fromEntries(grounding.themes.map((t) => [
+              t.theme,
+              t.passages.filter((p) => p.source === 'book model').map((p) => p.id),
+            ]).filter(([, ids]) => ids.length)),
+            literalPassages: literalGrounding.passageCount,
+            // Passages reviewers kept turning down, left out this time (STORY-048).
+            avoided: grounding.model.avoided ?? [],
+            feedbackJudgments: bookModel.parameters.preferences?.judgments ?? 0,
+          },
+        },
+        client,
+      );
+    }
 
     // The voice, counted off the author's own posts. `voice_profile` is passed
     // through for the cross-check it now gets, not as the source of truth —
@@ -387,6 +428,10 @@ export async function draftWeeklyPosts({
       memeCount: memes,
       visualFirstPlatforms: visualFirst,
       memeTemplates: chosenTemplates,
+      bookModel: bookModel.parameters,
+      revision: revisionOf
+        ? { of: revisionOf, note: revisionNote, previous: previousContent, themes: revisionThemes, avoidPassages }
+        : null,
     });
 
     const saved = [];
@@ -479,8 +524,8 @@ export async function draftWeeklyPosts({
            (author_id, book_id, platform, content, themes_used, confidence, rationale, status,
             week_of, provider, theme_alignment, voice_score, voice_violations, grounded_passages,
             format, media, safety_findings, image_rights, meme_template_id,
-            identity_version, identity_score, identity_findings)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+            identity_version, identity_score, identity_findings, revision_of)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          RETURNING *`,
         [
           authorId,
@@ -507,6 +552,7 @@ export async function draftWeeklyPosts({
           identityCheck ? identity.version : null,
           identityCheck ? identityCheck.score : null,
           identityCheck ? identityCheck.findings : [],
+          revisionOf,
         ],
       );
       const draft = rows[0];
@@ -583,6 +629,10 @@ export async function draftWeeklyPosts({
 
       saved.push(draft);
     }
+
+    // Ready for review: each draft compared with the book, and the comparison
+    // kept for the reviewer (STORY-047).
+    for (const draft of saved) await reviewDraft(draft.id, client);
 
     // The refusals travel with the batch so a caller — the demo, the API — can
     // show what the generator was not allowed to use, rather than only what it

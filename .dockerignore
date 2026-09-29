@@ -13,3 +13,5 @@
 **/*.log
 **/.DS_Store
 client/scripts
+# STORY-049: the audit log key. Mounted as a secret in production, never baked in.
+**/.keys

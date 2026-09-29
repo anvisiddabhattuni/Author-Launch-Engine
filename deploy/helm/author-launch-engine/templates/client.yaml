@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-client
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  selector: { app: {{ .Release.Name }}-client }
+  ports: [{ port: 8080, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-client
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.client.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector: { matchLabels: { app: {{ .Release.Name }}-client } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-client, ale-role: web }
+    spec:
+      serviceAccountName: {{ .Release.Name }}-client
+      {{- include "ale.podSecurity" . | nindent 6 }}
+      containers:
+        - name: client
+          image: {{ include "ale.image" (dict "root" . "name" "ale-client") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ containerPort: 8080 }]
+          livenessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 5 }
+          resources: {{- toYaml .Values.client.resources | nindent 12 }}
+          {{- include "ale.containerSecurity" . | nindent 10 }}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ .Release.Name }}-client, port: { number: 8080 } } }
+{{- end }}

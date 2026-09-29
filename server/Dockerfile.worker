@@ -1,6 +1,6 @@
 # Worker image (STORY-015). Same code, different entrypoint.
 #
-# NOT BUILT OR RUN — see server/Dockerfile.
+# BUILT AND RUN (STORY-054) — see server/Dockerfile.
 #
 # A separate container rather than a second process in the API's: they scale on
 # different signals (requests versus queue depth), and a worker that dies should
@@ -14,16 +14,21 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY server/package.json ./server/
 COPY client/package.json ./client/
-RUN npm ci --omit=dev --workspace server --include-workspace-root
+# npm workspaces hoist every dependency to the root node_modules, so
+# server/node_modules usually does not exist — and the COPY below failed on
+# the first real build (STORY-054). Created empty when there is nothing in it.
+RUN npm ci --omit=dev --workspace server --include-workspace-root && mkdir -p server/node_modules
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
-RUN addgroup -S app && adduser -S app -G app
+# A numeric id (STORY-054): Kubernetes' runAsNonRoot can only verify a
+# number, and refused to start pods whose image named its user.
+RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/server/node_modules ./server/node_modules
 COPY package.json ./
 COPY server ./server
-USER app
+USER 10001
 ENV NODE_ENV=production
 
 # No port and no HTTP health check: the worker serves nothing. Whether it is

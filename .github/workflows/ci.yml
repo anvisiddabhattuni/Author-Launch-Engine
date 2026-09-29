@@ -1,7 +1,13 @@
-# CI (STORY-015).
+# CI (STORY-015; tiers, end-to-end and dynamic scan added in STORY-053).
 #
-# NOT RUN. This repository has a GitHub remote but no Actions history, so this
-# workflow has never executed — reviewed, not verified, and the README says so.
+# THIS VERSION NOT RUN. The workflow HAS run once on GitHub — run 36269174542,
+# 2026-09-26, on commit b24202f — and FAILED at `npm test`. Nobody knew: the
+# README said it had never run. The likeliest cause, found by reproducing CI's
+# conditions locally (STORY-053): databaseRoles.test.js granted the role
+# `anvi` — the developer's own Postgres login — which does not exist on a CI
+# runner, where the owner is `postgres`. Fixed; everything below is checked
+# locally step for step by `npm run ci:local`, and the next push will say
+# whether GitHub agrees.
 #
 # It stops at "the tests pass and the images build". There is no deploy job,
 # because there is nothing to deploy to: no cloud account, no credentials, no
@@ -15,8 +21,25 @@ on:
   pull_request:
 
 jobs:
+  # STORY-053. The unit tier: pure logic, no database, seconds. Everything
+  # else waits on it, so a broken function fails the build before a database
+  # is ever started.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # The chart test (STORY-054) renders the Helm chart; without helm it skips.
+      - uses: azure/setup-helm@v4
+      - run: npm run test:unit
+
   test:
     runs-on: ubuntu-latest
+    needs: unit
 
     services:
       postgres:
@@ -32,6 +55,16 @@ jobs:
           --health-cmd "pg_isready -U postgres -d author_launch_engine"
           --health-interval 5s --health-timeout 5s --health-retries 10
 
+      # STORY-039. The broker the story names, so tests/messageBus.test.js runs
+      # its RabbitMQ scenario here — it reports itself skipped anywhere
+      # AMQP_URL is unset, which includes the machine it was written on.
+      rabbitmq:
+        image: rabbitmq:3.13-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc
+        ports: ['5672:5672']
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s --health-timeout 10s --health-retries 10
+
     env:
       # Two connections (STORY-033). Migrations as the owner; the app and the
       # tests as the restricted login, so CI proves the product works without
@@ -39,13 +72,14 @@ jobs:
       MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
       DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
       APP_DB_PASSWORD: ci-app-password
+      AMQP_URL: amqp://guest:guest@localhost:5672
       # The API refuses to start in production without this, which is the point
       # of that check — so CI has to set one rather than the check being untested.
       JWT_SECRET: ci-only-not-a-secret
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -58,6 +92,8 @@ jobs:
       - name: Scan production dependencies
         run: npm audit --omit=dev --audit-level=moderate
       - run: npm run db:reset
+      # The integration tier: the API against a real Postgres, as the app's
+      # restricted login. `npm test` is both tiers.
       - run: npm test
 
       # The suites share one database and several assert on cross-suite
@@ -74,11 +110,203 @@ jobs:
       - name: The demo must run end to end
         run: npm run db:reset && npm run demo
 
+  # STORY-053. The end-to-end tier: a person's journey through the production
+  # build in Chrome — sign in, upload, drafts compared with the book, request
+  # changes, approve, an API key shown once, compliance refused — then every
+  # tab under the enforced CSP at phone and desktop widths (STORY-031).
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: author_launch_engine
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d author_launch_engine"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
+      APP_DB_PASSWORD: ci-app-password
+      JWT_SECRET: ci-only-not-a-secret
+      # Chrome ships on GitHub's Ubuntu runners.
+      CHROME_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:reset && npm run test:e2e
+      - run: npm run db:reset && npm run demo && npm run check:browser
+
+  # STORY-053. A dynamic security scan: OWASP ZAP's baseline against the
+  # running production build and API — headers, cookies, information leaks,
+  # the things a static scan of dependencies cannot see. Rule levels are in
+  # .zap/rules.tsv, reviewed; anything at FAIL fails the build.
+  security:
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: author_launch_engine
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d author_launch_engine"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
+      APP_DB_PASSWORD: ci-app-password
+      JWT_SECRET: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:reset && npm run build --workspace client
+      - name: Start the API and the production build
+        run: |
+          (npm start --workspace server > api.log 2>&1 &)
+          (npx --workspace client vite preview --port 4173 --strictPort > ui.log 2>&1 &)
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:4000/api/health && curl -sf http://localhost:4173/ > /dev/null && exit 0
+            sleep 1
+          done
+          cat api.log ui.log; exit 1
+      - name: OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:4173
+          rules_file_name: .zap/rules.tsv
+          cmd_options: '-a'
+          fail_action: true
+          allow_issue_writing: false
+      - name: Keep the ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_*.*
+
+  # STORY-055 / STORY-056. Elasticsearch and Grafana, for real. They are not
+  # run on the developer's machine (8 GB, and a JVM beside Postgres, the API
+  # and a browser does not fit), so this job is where the acceptance criteria
+  # are checked: indexing at volume, answers under a second, loss and damage
+  # found and repaired, the dashboard's panels answering over a chosen range,
+  # and a customised panel saved, seen at once, and kept across a restart.
+  # NOT RUN YET — the first push will say whether it passes.
+  search:
+    runs-on: ubuntu-latest
+    needs: unit
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: author_launch_engine
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d author_launch_engine"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      elasticsearch:
+        # Pinned by tag. The digest is filled in from the registry on the first
+        # run, not written from memory (see deploy/Caddyfile's note, STORY-030).
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          # Reached only from this runner. In a cluster the NetworkPolicy does
+          # this job (deploy/helm, STORY-054); see the README for turning
+          # Elasticsearch's own security on.
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports: ['9200:9200']
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
+      APP_DB_PASSWORD: ci-app-password
+      JWT_SECRET: ci-only-not-a-secret
+      ELASTICSEARCH_URL: http://localhost:9200
+      SEARCH_VOLUME: '20000'
+      GRAFANA_URL: http://localhost:3000
+      GRAFANA_ADMIN_PASSWORD: ci-only-grafana-password
+      CHROME_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:reset
+
+      - name: STORY-055 — aggregated, searchable in under a second, nothing lost
+        working-directory: server
+        run: node --test tests/searchLive.test.js
+
+      - name: Start Grafana with the provisioned trust dashboard
+        run: |
+          G=deploy/helm/author-launch-engine/files/grafana
+          docker run -d --name grafana --network host \
+            -e GF_SECURITY_ADMIN_PASSWORD="$GRAFANA_ADMIN_PASSWORD" \
+            -e GF_AUTH_ANONYMOUS_ENABLED=false \
+            -e ELASTICSEARCH_URL="$ELASTICSEARCH_URL" \
+            -v "$PWD/$G/datasources:/etc/grafana/provisioning/datasources:ro" \
+            -v "$PWD/$G/dashboards:/etc/grafana/provisioning/dashboards:ro" \
+            -v grafana-data:/var/lib/grafana \
+            grafana/grafana:11.2.2
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health && exit 0; sleep 2; done
+          docker logs grafana; exit 1
+
+      - name: STORY-056 — panels over a chosen range; a customised panel is saved
+        working-directory: server
+        run: node --test tests/grafanaLive.test.js
+
+      - name: STORY-056 — and the customisation outlives a restart
+        working-directory: server
+        run: |
+          docker restart grafana
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health > /dev/null && break; sleep 2; done
+          GRAFANA_AFTER_RESTART=1 node --test tests/grafanaLive.test.js
+
+      - name: Screenshots from the browser
+        run: |
+          npm run db:reset && npm run demo > /dev/null && npm run search:aggregate
+          npm run build --workspace client
+          (npm start --workspace server > api.log 2>&1 &)
+          (npx --workspace client vite preview --port 4173 --strictPort > ui.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf http://localhost:4000/api/health > /dev/null && curl -sf http://localhost:4173/ > /dev/null && break; sleep 1; done
+          SHOTS_DIR=shots node client/scripts/searchShots.mjs
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: story-055-056-screenshots
+          path: |
+            shots/
+            api.log
+          if-no-files-found: ignore
+
   images:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Build only. Pushing needs a registry and credentials that do not exist,
       # and building is what catches a broken Dockerfile — which is the failure
       # these files are most likely to have, never having been built.

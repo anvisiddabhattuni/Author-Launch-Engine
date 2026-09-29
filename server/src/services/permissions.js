@@ -38,6 +38,11 @@ export const PERMISSIONS = {
    * goes to a tenant's reviewers, and an outage belongs to no tenant.
    */
   SYSTEM_OPERATE: 'system.operate',
+  /**
+   * Propose and decide changes to roles and permissions (STORY-042) — never
+   * both for the same change; the database refuses an approver who asked.
+   */
+  ACCESS_MANAGE: 'access.manage',
 };
 
 const KNOWN = new Set(Object.values(PERMISSIONS));

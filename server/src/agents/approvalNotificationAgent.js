@@ -75,6 +75,25 @@ export const QUEUES = [
   },
 ];
 
+/**
+ * Priority of a waiting item (STORY-057), with the reason — declared here so
+ * the dashboard can say why something is high, not only that it is.
+ * First match wins.
+ */
+export const PRIORITY_RULES = [
+  { level: 'high', when: (i) => i.escalated, why: 'escalated — a check asked for a person' },
+  { level: 'high', when: (i) => i.ageHours >= 48, why: 'waiting more than two days' },
+  { level: 'medium', when: (i) => i.ageHours >= 24, why: 'waiting more than a day' },
+  { level: 'normal', when: () => true, why: 'waiting' },
+];
+const RANK = { high: 0, medium: 1, normal: 2 };
+
+export function prioritise(item, now = new Date()) {
+  const ageHours = Math.max(0, (now - new Date(item.createdAt)) / 3_600_000);
+  const rule = PRIORITY_RULES.find((r) => r.when({ ...item, ageHours }));
+  return { ...item, ageHours: Number(ageHours.toFixed(1)), priority: rule.level, priorityReason: rule.why };
+}
+
 /** Statuses a human can still act on, matching the approval gate's own rule. */
 const WAITING = ['pending_approval', 'escalated'];
 
@@ -113,10 +132,16 @@ export async function findAwaitingApproval({ authorId }, client = pool) {
     }
   }
 
+  // Most urgent first, oldest first within a level (STORY-057).
+  const ranked = items.map((i) => prioritise(i)).sort((a, b) => RANK[a.priority] - RANK[b.priority] || b.ageHours - a.ageHours);
+  items.splice(0, items.length, ...ranked);
+
   return {
     items,
     total: items.length,
     escalated: items.filter((i) => i.escalated).length,
+    byPriority: { high: 0, medium: 0, normal: 0, ...items.reduce((acc, i) => ({ ...acc, [i.priority]: (acc[i.priority] ?? 0) + 1 }), {}) },
+    oldestHours: items.length ? Math.max(...items.map((i) => i.ageHours)) : null,
     byKind: items.reduce((acc, i) => {
       acc[i.kind] = (acc[i.kind] ?? 0) + 1;
       return acc;
@@ -200,10 +225,11 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
         reason: 'no active reviewer is configured for this author',
       },
     });
-    return { notified: [], skipped: [], unreachable: true, queue };
+    return { notified: [], failed: [], skipped: [], unreachable: true, queue };
   }
 
   const notified = [];
+  const failed = [];
   const skipped = [];
   const batchId = randomUUID();
 
@@ -248,6 +274,7 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
 
     if (written.length === 0) continue;
 
+    let delivered = false;
     try {
       const sent = await notifier.send({
         to: reviewer.email,
@@ -261,6 +288,7 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
         [batchId, sent.externalId, reviewer.id],
       );
       notified.push({ reviewer: reviewer.email, items: written.length, externalId: sent.externalId });
+      delivered = true;
     } catch (error) {
       await pool.query(
         `UPDATE notifications SET status = 'failed', error = $2
@@ -269,12 +297,14 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
       );
       // Left as 'failed' rather than deleted: the item stays announced-to so a
       // retry does not re-announce, and the failure is visible to a person.
-      notified.push({ reviewer: reviewer.email, items: written.length, failed: error.message });
+      // Not counted as notified (STORY-040): it was, and during an email
+      // outage the sweep reported "notified: 2" when nobody had been told.
+      failed.push({ reviewer: reviewer.email, items: written.length, error: error.message });
     }
 
     await recordAction({
       actor: ACTOR,
-      action: 'approval.notified',
+      action: delivered ? 'approval.notified' : 'approval.notify_failed',
       entityType: 'reviewer',
       entityId: reviewer.id,
       authorId,
@@ -311,5 +341,5 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
     },
   });
 
-  return { notified, skipped, unreachable: false, queue, batchId };
+  return { notified, failed, skipped, unreachable: false, queue, batchId };
 }

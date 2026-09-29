@@ -180,20 +180,14 @@ describe('STORY-015: a release you can identify is a release you can roll back',
 });
 
 describe('What could not be built here, stated rather than implied', () => {
-  it('ships container and CI configuration that has never been executed', () => {
-    for (const file of [
-      'server/Dockerfile',
-      'server/Dockerfile.worker',
-      'client/Dockerfile',
-      '.github/workflows/ci.yml',
-    ]) {
-      const text = readRepoFile(file);
-      assert.match(
-        text,
-        /NOT (BUILT|RUN)/,
-        `${file} must say plainly that it has not been executed`,
-      );
+  it('says of each container and CI file whether it has been executed, and where', () => {
+    // Until STORY-054 none of these had run. The images have now been built and
+    // run on a local cluster; the header must say that and name the story, so a
+    // reader can tell a verified file from a reviewed one.
+    for (const file of ['server/Dockerfile', 'server/Dockerfile.worker', 'client/Dockerfile']) {
+      assert.match(readRepoFile(file), /BUILT AND RUN \(STORY-054/, `${file} must say where it was verified`);
     }
+    assert.match(readRepoFile('.github/workflows/ci.yml'), /NOT (BUILT|RUN)/);
   });
 
   it('runs the API as PID 1 so SIGTERM reaches the graceful shutdown', () => {
@@ -201,7 +195,8 @@ describe('What could not be built here, stated rather than implied', () => {
     // Under a shell wrapper the signal goes to the shell, and the drain this
     // story added never runs — a graceful shutdown defeated by its own CMD.
     assert.match(dockerfile, /CMD \["node", "server\/src\/index\.js"\]/);
-    assert.match(dockerfile, /USER app/, 'and not as root');
+    // Numeric, because Kubernetes' runAsNonRoot cannot verify a user name (STORY-054).
+    assert.match(dockerfile, /USER 10001/, 'and not as root');
   });
 
   it('health-checks the container on liveness, not readiness', () => {

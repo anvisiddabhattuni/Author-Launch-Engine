@@ -138,6 +138,27 @@ export const config = {
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean),
+  // How messages between agents travel (STORY-039). 'postgres' — the outbox
+  // table is also the queue — or 'amqp', where RabbitMQ at AMQP_URL carries
+  // them and the table stays the record of truth.
+  messageTransport: process.env.MESSAGE_TRANSPORT ?? 'postgres',
+  // Where the UI lives, for links in emails (STORY-043), and how long an
+  // onboarding invitation stays usable.
+  appUrl: process.env.APP_URL ?? 'http://localhost:5173',
+  inviteTtlHours: number(process.env.INVITE_TTL_HOURS, 72),
+  // STORY-049: where the audit log's AES-256 key is kept — not beside DATABASE_URL.
+  auditKeyFile: process.env.AUDIT_KEY_FILE ?? new URL('../.keys/audit.key', import.meta.url).pathname,
+  // STORY-044: this many refused requests from one account (or, with no
+  // session, one address) inside the window flags it and tells the admins.
+  accessAlertThreshold: number(process.env.ACCESS_ALERT_THRESHOLD, 5),
+  accessAlertMinutes: number(process.env.ACCESS_ALERT_MINUTES, 10),
+  // STORY-055: the search index. Empty means none — the Trust tab says so, and
+  // nothing is copied anywhere.
+  elasticsearchUrl: (process.env.ELASTICSEARCH_URL ?? '').replace(/\/+$/, ''),
+  searchBatchSize: number(process.env.SEARCH_BATCH_SIZE, 500),
+  // Each run re-reads this many ids behind the mark: a row whose transaction
+  // committed after a higher id was indexed is picked up rather than skipped.
+  searchLookbackIds: number(process.env.SEARCH_LOOKBACK_IDS, 1000),
   jwtSecret: process.env.JWT_SECRET ?? 'dev-only-insecure-secret-change-me',
   jwtTtl: process.env.JWT_TTL ?? '12h',
   nodeEnv: process.env.NODE_ENV ?? 'development',

@@ -1,10 +1,10 @@
 # API image (STORY-015).
 #
-# NOT BUILT OR RUN. Docker is not installed on the machine this was written on,
-# so this file has never been executed — it is a reviewed starting point, not a
-# tested artefact, and the README says so beside it. Treating an unbuilt
-# Dockerfile as a finished deployment is the failure this story is most likely
-# to produce.
+# BUILT AND RUN (STORY-054, 2026-09-28): built with Docker under Colima and run
+# on a local Kubernetes cluster (k3s) through the Helm chart in deploy/helm/.
+# Written in STORY-015 without Docker and never executed until then; the first
+# real build found three faults a review had not (noted where they were fixed).
+# Not yet run: on a cloud cluster, or behind a real load balancer.
 # Base images are pinned by digest (STORY-034). A tag like `22-alpine` is a
 # name for whatever was pushed last; the same Dockerfile built on two days can
 # produce two different images, and a vulnerability scan of one says nothing
@@ -15,18 +15,23 @@ COPY package.json package-lock.json ./
 COPY server/package.json ./server/
 COPY client/package.json ./client/
 # The workspace root install, without the client's build toolchain.
-RUN npm ci --omit=dev --workspace server --include-workspace-root
+# npm workspaces hoist every dependency to the root node_modules, so
+# server/node_modules usually does not exist — and the COPY below failed on
+# the first real build (STORY-054). Created empty when there is nothing in it.
+RUN npm ci --omit=dev --workspace server --include-workspace-root && mkdir -p server/node_modules
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 # Never root. A container that runs as root turns a code-execution bug into a
 # host problem.
-RUN addgroup -S app && adduser -S app -G app
+# A numeric id (STORY-054): Kubernetes' runAsNonRoot can only verify a
+# number, and refused to start pods whose image named its user.
+RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/server/node_modules ./server/node_modules
 COPY package.json ./
 COPY server ./server
-USER app
+USER 10001
 
 ENV NODE_ENV=production
 EXPOSE 4000

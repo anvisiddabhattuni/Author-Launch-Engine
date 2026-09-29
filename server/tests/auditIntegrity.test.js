@@ -120,7 +120,9 @@ describe('STORY-013: actions are logged in an append-only log', () => {
       () => query('DELETE FROM audit_log WHERE id = $1', [rows[0].id]),
       /append-only|permission denied/,
     );
-    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only|permission denied/);
+    // The log is a view over its encrypted storage since STORY-049; TRUNCATE
+    // is aimed at the storage, where the application holds no privilege at all.
+    await assert.rejects(() => query('TRUNCATE audit_log_sealed'), /append-only|permission denied/);
   });
 
   it('protects the seals the same way it protects the log', async () => {

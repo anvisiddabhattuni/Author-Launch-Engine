@@ -8,6 +8,7 @@ import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { runChecks, scoreOf } from '../services/governance.js';
 import { systemStatus } from '../services/healthMonitoring.js';
+import { send } from '../services/messageBus.js';
 import { outboundInventory } from '../services/outboundPaths.js';
 import { classifyRoutes, surfaceCoverage } from '../services/tenantSurface.js';
 import {
@@ -359,7 +360,27 @@ async function record({ material, spec, verdict, limits, detectedBy, agreed, cli
     ],
   );
 
-  if (rows[0]) return { ...rows[0], inserted: true };
+  if (rows[0]) {
+    // Tell the notifier now, in this transaction (STORY-039). Before, the
+    // reviewer heard at the next `trust.monitor_escalations` sweep — up to
+    // five minutes later — and nothing recorded that one agent told another.
+    await send(
+      {
+        from: ACTOR,
+        to: 'ApprovalNotificationAgent',
+        topic: 'escalation.raised',
+        authorId: material.author_id,
+        payload: {
+          authorId: Number(material.author_id),
+          escalationId: Number(rows[0].id),
+          kind: spec.kind ?? spec.column,
+          reasons: verdict.reasons,
+        },
+      },
+      client,
+    );
+    return { ...rows[0], inserted: true };
+  }
 
   const { rows: existing } = await client.query(
     `SELECT * FROM escalations WHERE ${spec.column} = $1`,

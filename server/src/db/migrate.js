@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
+import { keyedOptions } from '../services/auditKey.js';
+
 import { config } from '../config.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,7 +50,9 @@ async function ensureDatabase({ reset }) {
 }
 
 async function applyMigrations() {
-  const client = new pg.Client({ connectionString: config.migrationDatabaseUrl });
+  // A migration that writes an audit entry, or moves existing ones into
+  // encrypted storage (044), needs the key like any other connection (STORY-049).
+  const client = new pg.Client({ connectionString: config.migrationDatabaseUrl, options: keyedOptions });
   await client.connect();
   try {
     await client.query(`
@@ -72,6 +76,17 @@ async function applyMigrations() {
       await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
       console.log(`applied  ${file}`);
     }
+
+    // Tenant schemas follow the tables (STORY-041). Every tenant that already
+    // has one is rebuilt, so a table a migration just added is covered — or,
+    // if it has no tenant and nobody classified it, is refused to tenants.
+    const { rows: tenants } = await client.query(
+      `SELECT substring(nspname FROM 8)::bigint AS id FROM pg_namespace n
+        WHERE nspname ~ '^tenant_[0-9]+$'
+          AND EXISTS (SELECT 1 FROM authors a WHERE a.id = substring(n.nspname FROM 8)::bigint)`,
+    ).catch(() => ({ rows: [] }));
+    for (const t of tenants) await client.query('SELECT ale_provision_tenant($1)', [t.id]);
+    if (tenants.length) console.log(`rebuilt  ${tenants.length} tenant schema(s)`);
 
     // The application login has no password in the repository (STORY-033).
     // Where the server wants one, it is supplied here from the environment,

@@ -306,6 +306,8 @@ describe('Append-only audit log (REQ-005)', () => {
   });
 
   it('rejects TRUNCATE at the database level', async () => {
-    await assert.rejects(() => query('TRUNCATE audit_log'), /append-only|permission denied/);
+    // The log is a view over its encrypted storage since STORY-049; TRUNCATE
+    // is aimed at the storage, where the application holds no privilege at all.
+    await assert.rejects(() => query('TRUNCATE audit_log_sealed'), /append-only|permission denied/);
   });
 });

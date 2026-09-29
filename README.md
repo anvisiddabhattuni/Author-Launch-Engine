@@ -46,6 +46,28 @@ Implemented so far:
 - **STORY-033 — Database Architecture Setup** (Database Administration Agent), fulfilling `REQ-005`, `REQ-006` and `REQ-008` — **roles in the database, not Sequelize; see below**
 - **STORY-034 — Deployment Architecture Setup** (DevOps Agent), fulfilling `REQ-007` and `REQ-008` — **partially: images still unbuilt and unscanned; see below**
 - **STORY-038 — API Gateway for Managing and Monitoring Integrations** (API Integration Agent), fulfilling `REQ-009` and `REQ-014` — **in-process, not Kong; see below**
+- **STORY-039 — Message Queue System for Agent Communication** (Coordination and Governance Agent), fulfilling `REQ-010` — **Postgres outbox; RabbitMQ in CI only; see below**
+- **STORY-040 — Central Task Manager for Agent Coordination** (Coordination and Governance Agent), fulfilling `REQ-010`
+- **STORY-041 — Tenant Database Schema Isolation** (Infrastructure and Deployment Agent), fulfilling `REQ-011` — **schemas of views, not copied tables; see below**
+- **STORY-042 — Tenant-Specific Access Control** (Coordination and Governance Agent), fulfilling `REQ-011`
+- **STORY-043 — Tenant Onboarding Process** (Tenant Management Agent), fulfilling `REQ-011` — **by invitation: the admin never sets the author's password**
+- **STORY-044 — Tenant Data Access Audit** (Audit and Security Agent), fulfilling `REQ-011` — **every request that touches tenant data, not only changes**
+- **STORY-045 — Tenant-Specific API Key Management** (API Integration Agent), fulfilling `REQ-011` — **keys stored as hashes, confined to one tenant, never able to approve**
+- **STORY-046 — Fine-Tune AI Models on Book-Specific Data** (AI Content Generation Agent), fulfilling `REQ-012` — **a fitted, evaluated model of each book, since Claude cannot be fine-tuned via the API**
+- **STORY-047 — Review Generated Content for Thematic Alignment** (Approval and Notification Agent), fulfilling `REQ-012` — **compared with the book's themes and style; reviewers can request changes**
+- **STORY-048 — Establish a Feedback Loop for Content Improvement** (Trust and Monitoring Agent), fulfilling `REQ-012` — **reviewer decisions and ratings refit the book's model; bounded and versioned**
+- **STORY-049 — Encrypt Audit Logs with AES-256** (Audit and Security Agent), fulfilling `REQ-013` — **in the storage, so STORY-019's three objections no longer hold; see below**
+- **STORY-050 — Implement Role-Based Access Control for Audit Logs** (Audit and Security Agent), fulfilling `REQ-013` — **every audit route declared with its permission, and the router held to it**
+- **STORY-051 — Audit Log Access Monitoring** (Trust and Monitoring Agent), fulfilling `REQ-013` — **a separate, encrypted, reviewer-only security log of every attempt**
+- **STORY-052 — Audit Log Access Notification** (Approval and Notification Agent), fulfilling `REQ-013` — **security officers told at once, a burst folded into one alert**
+- **STORY-028 — Provide Detailed Audit Log Reports** (Audit and Security Agent), fulfilling `REQ-005` — **built after STORY-053; it had been skipped**
+- **STORY-030 — Deploy System to Public Demo URL** (Infrastructure and Deployment Agent), fulfilling `REQ-007` — **ready to deploy and checked; not deployed — it needs a server and domain only the project owner can provide**
+- **STORY-053 — CI/CD Pipeline with Automated Testing and Security Checks** (Infrastructure and Deployment Agent), fulfilling `REQ-014` — **CI had run once and failed unnoticed; now three test tiers, a ZAP scan, and `npm run ci:local`**
+- **STORY-054 — Deploy Application Using Kubernetes with Role-Based Access Control** (Infrastructure and Deployment Agent), fulfilling `REQ-014` — **a Helm chart, run on a local k3s cluster: scaling, load balancing, self-healing and RBAC shown working; not on a cloud cluster**
+- **STORY-055 — Implement Data Aggregation for Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-015`, `REQ-001` and `REQ-002` — **Elasticsearch, filled by the worker rather than Logstash; the encrypted part of the log is never copied; live checks written for CI, not yet run**
+- **STORY-056 — Develop Visualization for Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-003` — **a provisioned Grafana dashboard; verified in CI, not on this machine — not yet run**
+- **STORY-057 — Integrate Approval and Notification System** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-004`
+- **STORY-058 — Implement Governance Score Calculation** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-005` — **a formula over what the system did, capped when an invariant is broken**
 
 ## What works today
 
@@ -960,7 +982,7 @@ to tell apart from no gate at all.
 | Story build step | Where it lives |
 |---|---|
 | 1. Docker configuration for the stack | `server/Dockerfile`, `server/Dockerfile.worker`, `client/Dockerfile`, `docker-compose.yml` — **never built** |
-| 2. CI/CD pipeline | `.github/workflows/ci.yml` — **never run** |
+| 2. CI/CD pipeline | `.github/workflows/ci.yml` — **ran once on GitHub and failed (see STORY-053)** |
 | 3. Deploy to a public demo URL | **not done — see below** |
 | 4. Deployment logs for rollback and audit | `020_deployments.sql`, `services/deployment.js` |
 | 5. Reliable availability | `/api/ready`, graceful shutdown in `server/src/index.js` |
@@ -1233,7 +1255,8 @@ NULL)` meant "an account with no tenant must be able to read across tenants", an
 the only such role the two sentences were indistinguishable. It rejected the first compliance user.
 It is now a trigger that consults the grant table, because a `CHECK` may not contain a subquery.
 
-**Why not AES-256.** The build note asks for it on this table. It would break the STORY-013 seals
+**Why not AES-256** *(superseded by STORY-049, which does it in the storage layer and answers each
+objection below — the redaction stays, for the reason given)*. The build note asks for it on this table. It would break the STORY-013 seals
 (which hash row contents), make every governance check unable to filter on `action` or join on
 `author_id`, and leave the key in the same env file as the database URL. None of that addresses the
 actual hazard, which is this: 28 call sites log a whole database row with `after: row`, and the day
@@ -1994,6 +2017,645 @@ here to configure. What the clause asks for — every interaction through one pl
 integration, failures detected, logged and alerted — lives in the module every adapter already calls,
 and a source scan fails the build if production code calls out around it.
 
+### STORY-039 — eleven agents, and not one message between them
+
+| Story build step | Where it lives |
+|---|---|
+| 1. A message queue | `agent_messages` (`034`) + `services/messageBus.js` — Postgres; RabbitMQ via `amqpTransport.js` |
+| 2. Producers and consumers in the agents | Trust monitor and scheduler send; `jobs/messageHandlers.js` receive |
+| 3. Serialised and deserialised correctly | `serialize()` — Dates as ISO, refuses what JSON would silently lose |
+| 4. Tests | `tests/messageBus.test.js` — the RabbitMQ scenario runs where `AMQP_URL` is set |
+
+Measured: agents reached each other by direct function calls or by polling a table on a five-minute
+sweep. When the monitor escalated a draft, the reviewer heard at the next sweep — **up to 300
+seconds** — and nothing recorded that one agent had told another anything.
+
+Now an agent that needs another to act **sends a message in the same transaction as the change it
+describes** (the outbox pattern — a message exists if and only if its change committed, which a
+broker alone cannot promise), and the worker delivers it on every poll: **within 5 seconds instead of
+300**. Each recipient declares the topics it accepts, and anything else is refused at send time.
+Delivery is at-least-once: SKIP LOCKED so two workers never take the same message, redelivery after a
+60-second visibility window, retries with backoff, then a dead letter shown on the Worker tab with a
+Redeliver button — never dropped. Every message is on the audit log twice, `message.sent` by the
+sender and `message.received` by the recipient, with both agents and the latency. Handlers are the
+existing idempotent notifiers, so a burst of messages is still one email per item; the sweeps still
+run, so a message lost to a bug is a late notice, not a missing one.
+
+**Serialisation refuses what JSON would silently lose:** an `undefined` field (dropped without a
+word by `JSON.stringify`), BigInt, functions, NaN, cycles. Dates become ISO strings on purpose.
+
+**RabbitMQ, which the story names, is not installed here.** `amqpTransport.js` uses it as the carrier
+— relaying from the outbox table with publisher confirms, consuming per-agent queues — with the table
+still the record of truth. CI runs a digest-pinned RabbitMQ service beside Postgres and sets
+`AMQP_URL`, so the broker scenario runs there; locally it reports itself **skipped**, never passed.
+
+**A clock bug, found by a 1-in-60 flake.** The queue compared the worker's clock with timestamps the
+database wrote. On one machine that is milliseconds; across two it is however far the clocks drift,
+and a slow worker would delay every message by that much. When no time is given, the database's
+clock decides what is due.
+
+### STORY-040 — the notifier that said "notified: 2" when nobody had been told
+
+| Story build step | Where it lives |
+|---|---|
+| 1–3. Task manager, priority and availability criteria, assignment | `TASKS` in `services/coordination.js`; the claim in `jobs/queue.js` |
+| 4. Integrated with the message queue | The same tick claims tasks and delivers messages (STORY-039) |
+| 5. Tests | `tests/taskManager.test.js` |
+| Trust: assignments logged and reviewable | `task.dispatched` / `task.deferred`; `tasks.priority_respected`; Worker tab |
+
+STORY-011 built the coordinator — a priority per kind, an exclusive resource, a record per dispatch.
+Measured against this story:
+
+- **Deferrals were never recorded.** `recordDispatch` had a branch for "held back", documented as the
+  interesting half, and nothing called it. A stalled queue looked exactly like an empty one.
+- **Two kinds fell to the default priority** and were described by a reason — "produces work other
+  agents react to" — that was false for both.
+- **Availability meant only "is the resource held".** With email's circuit open (STORY-038),
+  `approvals.notify_waiting` ran anyway: both sends were refused by the gateway, the notifier recorded
+  the items as announced — it deliberately never re-announces a failed send — and the job reported
+  **"notified: 2"**. Nobody had been told, and those items would never be announced.
+
+Now every kind is **assigned to a named agent** on declared grounds — priority, reason, and the
+integrations it `requires` — stored on the job. A task whose integration is down **waits without
+spending an attempt** until the circuit will take a trial call (released then, or nothing would ever
+test whether the provider is back), and the wait is recorded **once per reason**, not once per
+five-second poll. Every dispatch records **what it went ahead of**: each higher-priority task still
+waiting and what blocked it, read in the same statement as the choice. Both notifiers now report
+failures apart from deliveries, and log them as failures.
+
+**The review check was wrong twice before it was right, both times on the demo's own data.** First,
+blockers were looked up after the choice; with two workers, a resource held at the moment of choosing
+had been released by the moment of looking — a correct choice recorded as a wrong one. Then two
+workers took priority-25 tasks in the same millisecond a priority-30 task was mid-claim by a third,
+which started 8ms later. `tasks.priority_respected` now judges by consequence: a passed-over,
+unblocked task counts only if it was then kept waiting more than 5 seconds, or never run.
+
+**Not changed, flagged:** a failed announcement is still never retried — STORY-012's choice, so no
+reviewer is told the same thing twice. Holding the job while email is down removes the common case;
+the trade-off itself is a product decision.
+
+### STORY-041 — isolation the database enforces, not each query
+
+| Story build step | Where it lives |
+|---|---|
+| 1. PostgreSQL with multiple schemas | `036_tenant_schemas.sql` — `ale_provision_tenant`, rebuilt from the catalogue |
+| 2. Schema created on onboarding | `onboardTenant` → `provisionTenant`; `tenant.schema_created` on the audit log |
+| 3. Each tenant's queries against their schema | `middleware/tenantScope.js` — every author GET, on by default |
+
+Measured: **the database enforced no separation between tenants.** The application's login reads
+every author's rows; isolation lived entirely in each query's `WHERE author_id = …` — the clause
+STORY-017 found missing from two routes.
+
+**Not a copy of every table per tenant.** That means every query routed to the right copy, every
+migration applied once per author, every compliance and operator view a union across all of them —
+a rewrite of the data layer. Instead each tenant gets **`tenant_<id>`: a schema of `security_barrier`
+views** over the shared tables showing only its rows (tables that carry `author_id`, views such as
+`escalation_targets`, and tables owned through a parent, like `draft_themes` → `drafts`), and a role
+**`ale_tenant_<id>`** that can read only that schema and the declared shared reference tables (through
+one group role, `ale_tenant`). Rebuilt from the catalogue, so migrations re-provision every tenant and
+a new table is covered — or refused, until someone classifies it in `tenant_shared_tables`.
+
+**An author's GET requests run as that role**, read-only, with their schema first on the search path —
+on by default for every GET route, so a route added later is isolated without anyone remembering.
+All queries during the request — `query`, `pool.query`, `withTransaction` — go to the scoped connection,
+so code written long before this story is isolated without being edited. A route whose query has **no
+WHERE clause at all** returns only the caller's rows; the test for it fails when the scope is removed.
+35 of 39 GET routes are scoped; the other four are declared with reasons (`/health`, `/ready`,
+`/auth/me`, and the trust dashboard, which verifies seals over every tenant's rows and writes).
+Sessions that read across tenants (admin, compliance) are not scoped. The Trust tab's **Your data**
+panel shows the role the page's own reads ran as.
+
+**What switching it on broke, each a real difference:** `GROUP BY k.id` with `k.*` is legal on a table
+(the key implies the columns) and not on a view; the first provisioning walked tables and missed
+`escalation_targets`; another author's book now answers **404** rather than 403 — inside your schema
+it does not exist, and 404 does not confirm the id is somebody's; and two tenants provisioned at once
+collided editing one permission list, which is why shared grants go through the group role and
+provisioning takes a lock. Also: roles outlive `db:reset` and schemas do not, so the scope checks for
+the **schema**, not the role.
+
+**The limit, stated and pinned by a test.** Postgres always lets a session return to the login it
+connected as, so `RESET ROLE` works inside a tenant scope. This stops the leak this project actually
+had — a query that forgot its filter — not an attacker who can already run arbitrary SQL; that is met
+by parameterised queries and STORY-033's login. A database login per tenant would close it at the cost
+of a connection pool per author. The pinned test fails the day that is built.
+
+### STORY-042 — nobody changes access alone
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Authentication | JWT since STORY-064 — **Passport.js not adopted**; it would change nothing the clause asks about |
+| 2. RBAC for tenant-specific permissions | STORY-019's permissions, STORY-017 and STORY-041's isolation |
+| 3. JWT sessions and tenant identification | Tokens now carry an access version, re-read when stale |
+| Trust: role/permission changes reviewed and approved | `037_access_changes.sql`, `services/accessChanges.js`, the Access tab |
+
+The acceptance clause — a user reaches only their own tenant's data — has held since STORY-017 in the
+application and STORY-041 in the database. The trust line had three holes, all measured:
+
+- **No reviewed way to change access existed.** Grants changed by editing `role_permissions` in SQL.
+- **One admin could mint another.** `POST /tenants { role: "admin" }` answered 201; the account signed
+  in with all eight permissions; the log said `tenant.onboarded` by an agent.
+- **A revoked permission kept working.** Permissions ride in the session token; an author approved a
+  draft after `content.approve` was taken from authors — for up to twelve hours.
+
+Now every grant, revocation and role assignment is a **request** with a reason (`access_changes`), and a
+**different admin decides it** — refused by the service in words and by the database as a constraint
+(`decided_by <> requested_by`). Approval applies the change in the same transaction through
+**`ale_apply_access_change`**, which re-checks the approval; the application login **no longer has write
+access** to `role_permissions` or `users.role` at all. Onboarding refuses anything but an author, and a
+repeat sign-up no longer rewrites a role. Tokens carry the **access version** they were issued under;
+a session behind the current version has its role and permissions re-read before it is trusted, so a
+revocation bites on the **next request**. Every request, decision and application is on the audit log
+with who asked and who agreed, and the invariant **`access.elevated_reviewed`** fails for any account
+with more than author access that no approved change — or owner-written `bootstrap` record, for the
+seeded accounts — accounts for. A second seeded admin, `security@example.test` / `second-pair-of-eyes`,
+exists because with one admin nothing can be approved.
+
+**Found in STORY-041, by this story's first test.** Tenant views showed every row with no author to
+every tenant — right for a system-wide job, wrong for `users`, where no author means a staff account.
+An author could read every admin's row. Rows with no author are now **private unless a table declares
+them system-wide** (`tenant_system_rows`, with reasons), and an explicit classification beats foreign-key
+discovery. And the Access view is not for `audit.read` alone — authors hold that for their own trail.
+
+### STORY-043 — onboarding by invitation
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Onboarding UI for admins | The **Tenants** tab (`client/src/pages/TenantsPage.jsx`) |
+| 2. Tenant creation and schema setup | `onboardTenant` in `agents/tenantManagementAgent.js`, STORY-041's `provisionTenant` |
+| 3. Welcome email | `services/invites.js`, declared outbound path `tenant.welcome` |
+| Trust: every onboarding logged with the time and the admin's id | `tenant.onboarded`, actor = the admin, `metadata.adminId` |
+
+Measured before this story: onboarding was an API call with no screen and no email; the audit row named
+`TenantManagementAgent`, not the admin; the author and the account were committed separately, so an
+account that clashed left an author nobody could sign in to; and **the admin chose the author's
+password**, so the admin knew it and had to pass it on somehow.
+
+Now the admin gives a **name and an address**. One transaction creates the author, an account with **no
+password**, and a one-time invitation (`038_tenant_invites.sql`); after the commit the tenant's private
+schema is built and the welcome email is sent. The email carries a link to `/accept-invite` where the
+author **chooses their own password** and is signed in. The token is 32 random bytes, stored only as its
+SHA-256, **single use**, expires after `INVITE_TTL_HOURS` (72), and a resend retires the previous link.
+Refused links — used, replaced, expired, made up — get one answer and a `tenant.invite_refused` audit
+row naming which. A password sent to `POST /tenants` is **refused (400), not ignored**, so an old client
+learns the API changed. The Tenants tab lists every tenant with whether they have signed in, their
+schema, when and by whom they were onboarded, and resend / suspend / restore.
+
+Email is still the STORY-002 mock and delivers nowhere, so outside production the API response and the
+Tenants tab show the link, labelled *development only*. In production it exists only in the email.
+
+### STORY-044 — who read whose data
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Logging middleware capturing all data access | `accessLog()` in `services/dataAccess.js`, mounted on `/api` |
+| 2. A dedicated table with tenant and user identifiers | `039_data_access_log.sql` — `data_access_events`, append-only |
+| 3. A React reporting tool for security audits | The **Security** tab; the author's **Trust** tab, "Who opened your data" |
+| Trust: every data access event with user and tenant | Two CHECK constraints make an unattributed event impossible to store |
+
+Measured before this story: the audit log recorded what *changed*. A read of a tenant's data was
+recorded nowhere, and a request for another tenant's data was refused (403) and forgotten.
+
+Now every request under `/api` except health, readiness and sign-in is written to `data_access_events`
+as it finishes: the user, their role and their own tenant; **whose data** it was about (from the path,
+the `authorId` query, or the row an id points at — or "all tenants" for a cross-tenant read); the
+route, the status and the outcome (`allowed`, `denied`, `not_found`, `invalid`, `unauthenticated`,
+`error`) with the refusal's reason; and the **database role** that served it (STORY-041's
+`ale_tenant_<id>` for an author). The table refuses an event with no user — unless there was no session
+to name — and a tenant event with no tenant. It is append-only by privilege and by trigger, and kept when
+a tenant is deleted.
+
+An account (or, with no session, an address) refused `ACCESS_ALERT_THRESHOLD` (5) times within
+`ACCESS_ALERT_MINUTES` (10) is flagged as `access.suspicious` and every admin is emailed once per window.
+An admin can **block** the account from the Security tab — with a reason, never their own — through the
+owner function `ale_set_account_active`, which moves the access version so the block bites on the next
+request, not at token expiry. Authors see the accesses to their own data on the Trust tab, read through
+their own database view.
+
+Limits, said out loud: a refusal counts whatever its cause, so an author poking at admin-only pages is
+flagged like one probing another tenant — the security officer decides which it was. And the record is
+written after the response, so a process killed mid-flight loses the records of its last requests;
+failures to write are counted and shown on the Security tab rather than dropped.
+
+### STORY-045 — per-tenant API keys
+
+| Story build step | Where it lives |
+|---|---|
+| 1. API key generation | `createApiKey` in `services/apiKeys.js`; the **API keys** tab |
+| 2. Stored securely | `040_tenant_api_keys.sql` — the SHA-256 of the key, never the key; **not** env vars (see below) |
+| 3. Requests validated against the correct tenant's key | `sessionForKey`, called from `authenticate` on `X-API-Key` / `Authorization: ApiKey` |
+| Trust: key generation and usage logged with tenant | `api_key.created` / `api_key.revoked` on the audit log; every use in `data_access_events.api_key_id` |
+
+Measured before this story: no per-tenant keys existed. An integration could reach the API only by
+signing in as a person — with their password and every permission they hold, approval included.
+
+A key is `ale_<prefix>_<secret>`: 32 random bytes, shown once in the response that creates it and stored
+only as its SHA-256 (a fast hash is enough for a random 256-bit secret; there is nothing to guess). It
+belongs to one tenant and acts for the person who created it, **with no permissions of its own**: it reads
+what an author reads, submits what an author submits if created `read_write`, and can never approve —
+`content.approve` stays with people. It cannot create, list or revoke keys. Keys expire (1–365 days,
+default 90), a tenant holds at most 10 live, and a key stops on its next request when revoked, expired,
+when the person it acts for is blocked (STORY-044), or when the tenant is suspended. The caller is told
+only "API key not accepted"; which of those it was goes to the access log for the security officer.
+
+**Not done as written:** the build note's "environment variables or a secrets manager". Right for the
+application's own secrets, which is where `ANTHROPIC_API_KEY` lives; impossible for keys tenants create
+while the system runs. Storing only a hash leaves no secret to keep.
+
+Found on the way: the Vite proxy forwarded every path *beginning* with `/api` to the API — including the
+UI's own `/api-keys` page, which came back as `{"error":"Not found"}`. It now matches `^/api(/|$)`.
+
+### STORY-046 — a model fitted to each book
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Ingest the book's text and supplementary materials | `book_passages` (STORY-006) and `book_materials` (`041_book_models.sql`); the Upload tab |
+| 2. A fine-tuning pipeline | `fitParameters` / `fitBookModel` in `services/bookModel.js` — see below for what "fine-tuning" can honestly mean here |
+| 3. Integrated into the backend | Fitted on upload, on new material, and before a draft whose book has changed; used by `draftWeeklyPosts` |
+| 4. Parameters stored in PostgreSQL | `book_models.parameters`, versioned; a version is never rewritten (trigger) |
+| Trust: the fitting on the audit log, parameters transparent | `book_model.fitted` / `book_model.applied`; the Upload tab's "What the AI learned from this book" |
+
+Measured before this story: nothing ran when a book was uploaded; what generation learned about a book
+was recomputed per batch and thrown away; there was nowhere to put supplementary material; and theme
+retrieval matched the theme's own word, so a passage arguing "loss" through an empty chair and a coat on
+a hook was invisible to it.
+
+**Claude models cannot be fine-tuned through the public API**, and the offline provider is templates. So
+what is fitted is a model *of the book*: for each theme, a lexicon — the words this book uses to argue it
+— learned by contrasting the passages that name the theme with the rest of the book (a smoothed log ratio
+of document frequencies over Postgres `english` lexemes, the stemming retrieval already uses). Material
+sentences that name a theme join the examples; **only the book's own passages are ever evidence or quoted**.
+Plus the book's style and the lines that carry each theme best. Every statistic is computed within the
+book; other tenants' text is never read.
+
+It is judged on held-out data: leave one passage that names a theme out, remove the theme's word from it,
+and see whether the model still recognises it. Literal retrieval scores 0% on that by construction. On the
+demo's sample manuscript (`db/sampleManuscript.js`, 18 passages): **33% from the book alone, 56% once the
+author's synopsis and note are added**, and grounding evidence rises from 7 to 8 of 8 slots — the model
+finds the empty-chair passage for "loss", which the book names only once. A theme named too rarely to learn
+from says so ("too few examples") rather than guessing.
+
+Generation uses it: passages the model found fill a theme's empty grounding slots, marked `via: 'book
+model'` (literal evidence is never displaced), and the Anthropic prompt carries each theme's lexicon and
+lines. **Limits:** small data makes weak lexicons (grief learns "change, shape, learn"); social drafts
+only — outreach and press still ground by the literal search.
+
+### STORY-047 — drafts reviewed against the book
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Extract key themes and stylistic elements from the book | Themes and their words: STORY-046's model; style: `bookStyle` in `services/contentReview.js` |
+| 2. Compare generated content with them | `reviewDraft` — run on every draft as it is saved, kept in `content_reviews` (`042_content_review.sql`) |
+| 3. A dashboard to approve or request modifications | The **Social · review** tab: the comparison beside each draft, and **Request changes** |
+| Trust: an approval gate | Unchanged — a revision is a new draft waiting for a person with `content.approve` |
+
+Measured before this story: drafts were scored against the book's themes and against the author's *social
+posts* for voice — never against the book's own style — and a reviewer could only approve or reject.
+
+Now each draft is compared with its book when it is saved: every theme it claims — argued or not, and in
+the book's own words for it (STORY-046's lexicon; the title's words don't count) — and four style elements
+measured by the same `measure()` that reads the author's posts: exclamation marks, marketing words, words
+in capitals (each allowed 0.5 per 100 words over the book's own rate) and sentence length (at most 1.6× the
+book's). The verdict — *matches the book*, *check*, *does not match* — and every note is shown beside the
+approve button and on the audit log (`draft.compared_with_book`). It informs the human decision; it never
+makes it.
+
+**Request changes** sets a draft aside (`changes_requested`, with the note — the database refuses one without)
+and asks for a revision, linked by `revision_of`, which is scored, compared with the book and waits for a
+person like every other draft. The Anthropic provider is given the note and the draft the reviewer saw. The
+offline provider cannot read the note; a revision keeps the reviewer's theme and quotes a different passage
+from the book where there is one — the passage actually quoted is found in the draft's text, since
+`draft_themes.passage_ids` lists every passage grounding the theme.
+
+### STORY-048 — reviewers' feedback changes the next drafts
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Capture reviewer comments and ratings | `content_feedback` (`043_content_feedback.sql`); rating buttons on the **Social · review** tab |
+| 2. Adjust model parameters from feedback | `learnPreferences` in `services/bookModel.js` — per-passage and per-theme weights |
+| 3. Integrated with the fine-tuning process | Part of STORY-046's book model: new feedback → a new version (`trigger = 'feedback'`) |
+| Trust: feedback and adjustments on the audit log | `feedback.recorded`; `book_model.fitted` with `preferencesMoved` (from → to, and why) |
+
+Measured before this story: every approval, rejection and request for changes was recorded and nothing
+learned from any of them — a passage turned down on Monday was quoted again on Tuesday.
+
+Each judgment on a book's drafts counts: a reviewer's rating where there is one (4–5 good, 1–2 bad), otherwise
+their decision (approved/scheduled good; rejected/changes requested bad). It is attributed to the passages the
+draft quoted — found in its text — and the themes it claimed. A weight is `(good + 1) / (good + bad + 2) × 2`,
+applied only after **two judgments**; passages range 0–2, themes are held to **0.5–1.5** (tilted, never
+silenced). A passage below 0.6 — turned down twice and never liked scores 0.5 — is not quoted while its theme
+has another; themes are chosen in proportion to their weight; and the Anthropic prompt carries the reviewers'
+notes. Feedback is processed before the next drafts (the model's inputs changed) or at once with **Apply
+feedback now**. On the demo's sample book: the funeral passage, turned down twice, was quoted by 2 drafts of a
+week before and 0 when the same week (same seeds) was drafted again.
+
+**Limits:** a judgment counts against both the passage and the theme — the system cannot tell which the
+reviewer meant; their note can, and only the Anthropic provider reads it. And it learns preferences over the
+book's passages and themes, not new wording.
+
+### STORY-049 — the audit log, encrypted with AES-256
+
+| Story build step | Where it lives |
+|---|---|
+| 1. An encryption/decryption module (AES-256) | `audit_seal` / `audit_open` in `044_audit_encryption.sql` — pgcrypto, `cipher-algo=aes256` |
+| 2. Integrated with the logging mechanism | `audit_log` is now a view: it encrypts on insert and decrypts on read; `recordAction` is unchanged |
+| 3. Every entry encrypted before it is stored | The storage, `audit_log_sealed`, holds only ciphertext; a connection without the key cannot write |
+| Key management | `services/auditKey.js`: `AUDIT_KEY` or `AUDIT_KEY_FILE` (default `server/.keys/audit.key`, mode 600, git- and docker-ignored; a mounted secret in `docker-compose.yml`) |
+
+STORY-019 declined this for three reasons, each true of encrypting in application code: the tamper seals
+hash row contents, forty files read the log in SQL, and the key would sit beside `DATABASE_URL`. So the
+encryption is in the storage and every reader keeps its view:
+
+- **`audit_log_sealed`** keeps the routing columns in the clear — id, actor, action, entity, tenant, time —
+  so the log can still be filtered and joined; the entry itself (before, after, metadata) is one AES-256
+  ciphertext (OpenPGP symmetric, with an integrity check). The application login has no privilege on it
+  at all.
+- **`audit_log`** is a view with the same columns, in the same order: decrypted on read, encrypted on
+  insert (a `SECURITY DEFINER` trigger — the only way in), append-only in the same words. Every reader,
+  writer and test is unchanged, and the seals hash the rows they always did — so an edited ciphertext,
+  which no longer opens, breaks them.
+- **The key is not in the database.** Each connection the application opens is handed it at startup
+  (`ale.audit_key`, a connection option — never in query text or `pg_stat_activity`). A dump, a backup, a
+  replica or any login the application did not open sees ciphertext, and cannot write an entry at all.
+  Existing entries were encrypted in place by the migration, the one time the append-only trigger was
+  lifted.
+- **Checked from outside:** the invariant `audit.encrypted` — every entry under the current key, and
+  opens — counted by `audit_encryption_status()`, and shown on the Audit tab's Integrity card.
+
+**Limits:** the running application holds the key, so whoever controls it reads the log; rotation is not
+built (each row records its key id). The redaction STORY-019 built stays — a secret written to an
+append-only log can never be removed, encrypted or not.
+
+### STORY-050 — who may read and manage the audit logs
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Roles and permissions for audit logs | `AUDIT_ROUTES` in `services/auditAccess.js` — each audit route, its permission, and why |
+| 2. RBAC in Express middleware | `requirePermission` (now readable off the router) and `requireAuditReviewer` in `middleware/auth.js` |
+| 3. The front end checks before showing audit logs | The Audit log tab only for `audit.read`; the Access tab's **Who can read the audit logs** table |
+
+Measured before this story: the permissions existed (STORY-019), but nothing tied *which routes serve audit
+data* to *which permission guards them*. Walking every route whose handler reads audit data found three —
+a tenant's access log, trust history and trust dashboard — guarded only by the tenant rule, so an **API key,
+which holds no permissions (STORY-045), read all three**. Two more carried private copies of the reviewer
+check.
+
+Now the three require `audit.read` (authors hold it for their own trail, so nothing changes for them), the
+reviewer check is one middleware, and every audit route is declared. `auditAccess.test.js` holds the live
+router to the declaration both ways — a route whose handler reads audit data and is not declared, or is
+guarded by anything other than its declared permission, fails the build — and walks every declared route as
+no session, an author, another tenant's author, compliance, admin and an API key, against the statuses the
+policy predicts. The policy table on the Access tab is computed from the live grants, so it changes when a
+grant does. Refusals land on the access log (STORY-044) with the permission that was missing.
+
+### STORY-051 — who tried to read the audit logs
+
+| Story build step | Where it lives |
+|---|---|
+| 1. A security log of access attempts | `045_security_log.sql` — `security_log_sealed` behind the `security_log` view |
+| 2. Integrated with RBAC | Every attempt on a route in STORY-050's `AUDIT_ROUTES`, recognised even when refused before routing |
+| 3. Encrypted and access-controlled | Same AES-256 key as the audit log; the app writes through the view only; `ale_readonly` has nothing; `/security/audit-access` for reviewers |
+
+Measured before this story: attempts on the audit logs went only into the data access log (STORY-044) — in the
+clear, among every other request. Now each one, allowed or refused, is also written to a separate security log
+— who (user, name, role, API key), from where (address, browser), what (route, path), and how it ended (outcome,
+reason) — in the **same transaction** as its access record, sharing a request id. The entry is AES-256 ciphertext
+under the audit log's key; it is append-only; and reading it (the Security tab's **Who tried to read the audit
+logs**) is itself an attempt on an audit log, and is recorded there. The invariant `security_log.complete` counts
+any access record on an audit route with no security entry.
+
+### STORY-052 — the security officer is told
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Alerts for unauthorized attempts | `notifyAuditAttempt` in `services/securityNotifications.js`, on every refused security-log entry |
+| 2. A third-party sending service | The email adapter (STORY-002), shaped like SendGrid's send call, through the integration gateway (STORY-038) — **still the mock**; swapping in SendGrid is a change to `emailApi.js` |
+| 3. Detailed notifications | Who, role, what route and path, when, address and browser, outcome and reason, and a link to act |
+
+Measured before this story: refused attempts were recorded and nobody was told — STORY-044's alert waited for five
+refusals of any kind. Now the **first** refused attempt on an audit log from a person (or, with no session, an
+address) emails every security officer — whoever holds `audit.verify` — at once, as the declared outbound path
+`security.alert_audit_access`. Attempts in the next 10 minutes join that alert (`attempts`, `routes_tried`) rather
+than sending another. Who it was meant for, who received it and who it failed for are kept separately
+(`security_notifications`), and on the audit log. On the Security tab an officer **acknowledges** an alert with a
+note, and an admin can **block** the account behind it (STORY-044).
+
+### STORY-053 — the pipeline, and the run nobody saw
+
+| Story build step | Where it lives |
+|---|---|
+| 1. GitHub Actions on every commit | `.github/workflows/ci.yml` — `unit` → `test` → `e2e`, `security`, `images` |
+| 2. Unit, integration and end-to-end tests | `npm run test:unit` (no database, <1 s), `npm test` (the API on real Postgres), `npm run test:e2e` (a person's journey in Chrome) — **node:test and Puppeteer, not Jest/Mocha/Cypress; see below** |
+| 3. Security checks | `npm audit` (dependencies, STORY-034), Clair (images, STORY-034), and now an **OWASP ZAP baseline** of the running build, rule levels in `.zap/rules.tsv` |
+| 4. On each commit, automatically | `on: push` and `pull_request`, every branch |
+
+**Measured before this story:** the README said the workflow had never run. It had — once, on GitHub, on
+2026-09-26, commit `b24202f` — and **failed at `npm test`**, and nobody knew. The job log needs a signed-in
+account, so the cause was found by reproducing CI's conditions here (UTC, the restricted login with a password,
+an owner role called `postgres`): `databaseRoles.test.js` checked the app could not `GRANT anvi` — the
+developer's own Postgres login, which does not exist on a runner, where Postgres answers "role does not exist"
+instead of refusing. It now asks Postgres who owns the database. Two cross-suite races found on the way were
+fixed the same day.
+
+**Now:**
+- **Unit tier** (`tests/unit/`): the product's pure decisions — style and voice measures, the book model's
+  learning and bounds, escalation floors, the access log's classification of requests — with **no database
+  reachable at all** (checked by pointing it at a closed port). Runs first; everything else waits on it.
+- **Integration tier**: the existing suite, three times, as before.
+- **End-to-end tier** (`client/scripts/e2e.mjs`): sign in, upload a book, see its model, generate drafts compared
+  with the book, request changes, approve the revision, create an API key shown once, compliance refused — and no
+  uncaught error, console error or 5xx on the way. Proved able to fail by renaming one button.
+- **ZAP baseline** against the production build with the API behind it; `FAIL`-level rules fail the build.
+- **`npm run ci:local`** runs the same steps in the same order under CI's conditions, and says what it cannot run
+  here (RabbitMQ, ZAP, image builds) instead of passing them; for ZAP it runs a labelled stand-in that checks the
+  headers the `FAIL` rules check.
+- Actions bumped to `checkout@v5`/`setup-node@v5` (GitHub was forcing the v4s off Node 20).
+
+**Not done as written:** Jest, Mocha and Cypress. The suite is `node:test` and the browser tier Puppeteer, both
+already here; three new frameworks would re-express the same tests, not add any. And there is still **no deploy
+step** — nothing to deploy to (STORY-030).
+
+### STORY-028 — audit log reports (built after STORY-053)
+
+Skipped when the backlog was worked through in order, and ticked complete on Basecamp with nothing built; caught
+by review and built after STORY-053.
+
+| Story build step | Where it lives |
+|---|---|
+| 1. A report generation module | `services/auditReports.js` — `generateAuditReport`, `reportAsCsv` |
+| 2. PostgreSQL queries extracting detailed records | One query over the `audit_log` view (decrypted, STORY-049), joined to accounts and tenants |
+| 3. RBAC on report access, integrated with the front end | `GET /audit-reports` requires `audit.read` (declared in STORY-050's `AUDIT_ROUTES`); the Audit tab's **Audit log report** |
+
+Measured before: the Audit tab listed the last 200 entries by tenant and type — no period, no filter by person or
+action, no summary, no export, nothing proving a copy was not edited, and "who" was a name string.
+
+A report covers a period (default the last 30 days) filtered by tenant, actor and action prefix (escaped — action
+names contain `_`, which `LIKE` reads as a wildcard). Each record has its time, action, entity and tenant, and
+**who**: a *person* (their account's email and role), an *agent*, or a *name no account has* — resolved, never
+guessed. The report carries a summary (by action, actor, day), the seal status when it was made, and a **SHA-256
+of its records**; `format=csv` downloads it with the digest in the header. Generating one is itself on the audit
+log. An author's report is their own tenant's — confined by the tenant rule and by reading through their own
+database role; the seal check and the log entry run outside that scope, as system acts.
+
+### STORY-030 — a public demo URL (ready; not deployed)
+
+Skipped when the backlog was worked through in order; caught by review. **Not deployed:** a public URL needs a
+server, a domain and DNS in the project owner's name, and publishing the product is theirs to decide. Everything
+up to that point is built and rehearsed.
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Docker | The images from STORY-015/034; `docker-compose.prod.yml` overlays the stack for a public host |
+| 2. A cloud platform | Any VM with Docker — the overlay is platform-neutral; steps below |
+| 3. A custom domain | `DOMAIN`, served by Caddy (`deploy/Caddyfile`) |
+| 4. HTTPS | Caddy obtains and renews Let's Encrypt certificates; http only redirects; the API refuses plain http (`ENFORCE_HTTPS`) |
+| Trust: protected against unauthorized access | Only Caddy is public; the seed's published passwords are replaced by random ones in production; the login page hides them; `npm run smoke:deployed` checks all of it |
+
+**Found on the way — a hole a public deploy would have opened:** the seed gives the demo accounts fixed passwords
+(`ops-password` for an admin), printed in this README and on the login page. Deployed as it was, anyone could sign
+in as an admin. Now, with `NODE_ENV=production`, every seeded account gets a random password printed once in the
+seed's log, and the production image is built with `VITE_SHOW_DEMO_LOGINS=false`, which leaves the passwords out
+of the bundle entirely.
+
+**To deploy** (the project owner):
+
+```bash
+# on a VM with Docker, with DNS for demo.example.com pointing at it
+git clone … && cd Author-Launch-Engine
+mkdir -p server/.keys && openssl rand -base64 32 > server/.keys/audit.key && chmod 600 server/.keys/audit.key
+export DOMAIN=demo.example.com APP_DB_PASSWORD=$(openssl rand -base64 24) JWT_SECRET=$(openssl rand -base64 48)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile seed run --rm seed   # prints the logins once
+npm run smoke:deployed -- https://demo.example.com
+```
+
+**`npm run smoke:deployed`** checks the two acceptance clauses against the live URL: valid HTTPS, http→https,
+the app and API up; no data without a session, the published passwords refused, none in the served JavaScript,
+the security headers and HSTS, no other origin let in. Rehearsed here: against the development stack it **fails**
+(the published passwords sign in; the bundle contains them); against a production seed and build it **passes**
+every check that does not need a real certificate, and says the other three were skipped.
+
+**Unverified until it runs:** the overlay and Caddyfile have never been executed (no Docker here), and the Caddy
+image is pinned by tag only — its digest must come from the registry on the first pull.
+
+### STORY-054 — Kubernetes, with access by role (run on a local cluster)
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Kubernetes manifests: deployments, services, ingress | `deploy/helm/author-launch-engine/templates/` — API, worker, client, Postgres, migrate and seed jobs, an optional Ingress |
+| 2. RBAC roles and bindings | `templates/rbac.yaml`: *viewer* (read pods, logs, deployments), *operator* (plus restart, scale, roll out), *secrets-admin* (the one app secret, nothing else), bound to groups from `values.yaml` |
+| 3. Helm | The chart itself; `helm lint` clean; the chart's rendered output is tested in `server/tests/unit/helmChart.test.js` |
+| 4. Auto-scaling and self-healing | An HPA (2–5 API pods at 70 % CPU), a PodDisruptionBudget, `maxUnavailable: 0`, liveness on `/api/health` and readiness on `/api/ready` |
+| Trust: secure access management | Service accounts get no API token; every pod runs as a numeric non-root user; NetworkPolicy lets only the app reach Postgres |
+
+**Run on a real cluster** — k3s under Colima, single node, with the images built for the first time since STORY-015.
+What it showed (`kubectl` output in the STORY-054 update):
+
+- **Load balancing:** twelve requests to the `api` Service answered by two pods, 7 and 5. `/api/ready` now names
+  the pod that answered (`instance`), so this is visible from outside.
+- **Scaling:** under load the HPA took the API from 2 to 3 pods ("cpu resource utilization above target").
+- **Self-healing:** a deleted API pod was replaced and the Deployment ready again in 2 seconds.
+- **RBAC:** `kubectl auth can-i` per group — viewers read but cannot delete or read secrets; operators restart
+  and scale but cannot read secrets; secret admins can read and update `ale-secrets` and no other secret.
+- **Network:** the client pod cannot reach Postgres; the API pod can.
+
+**What the first real run found, that review had not** — each now pinned by a chart test:
+
+1. The API image's build failed: npm workspaces leave no `server/node_modules` to copy.
+2. `runAsNonRoot` refused the pods: Kubernetes cannot verify a user *name* is not root. The images now run as uid 10001.
+3. The audit key (STORY-049) was mounted readable only by root; the app could not start. `fsGroup` and mode 0440 fix it.
+4. After the autoscaler scaled up, the next `helm upgrade` failed: the chart and the HPA both set `replicas`.
+
+**Not done:** a cloud cluster, a real load balancer or TLS at the Ingress, and pulling images from a registry
+(the local run used `pullPolicy: Never`). The Dockerfiles now say they were built and run, and where.
+
+```bash
+kubectl create namespace ale
+helm install ale deploy/helm/author-launch-engine -n ale \
+  --set secrets.appDbPassword=… --set secrets.ownerDbPassword=… --set secrets.jwtSecret=… --set secrets.auditKey=… \
+  --set 'rbac.operators={your-ops-group}' --set seed.enabled=true
+```
+
+### STORY-055 — logs and metrics in a search index
+
+| Story build step | Where it lives |
+|---|---|
+| 1. An Elasticsearch cluster | `templates/search.yaml` (one node, behind its own NetworkPolicy); a service container in CI's `search` job |
+| 2. An index schema for audit logs and system metrics | `services/searchIndex.js` — `SOURCES` (audit, data access, security logs) and `METRICS`; strict mappings |
+| 3. Ingestion pipelines from PostgreSQL | The worker's `search.aggregate` sweep and `npm run search:aggregate` — **not Logstash or Beats; below** |
+| 4. Efficient, fast queries | `GET /authors/:id/search` (tenant-filtered in code), the Trust tab's **Search the logs**; sub-second checked at 20,000 rows in CI |
+| Trust: every action indexed and searchable | `search_sync` records how far each source has got and what the last reconciliation found |
+
+**What the index may hold.** STORY-049 encrypted each audit entry's before, after and metadata. The index gets
+only the columns that were always stored in the clear — who, what, which record, which tenant, when — read by
+migration 047's functions *without* decrypting. The encrypted part never leaves Postgres; a hit links back by id.
+No email or IP address from the security or data access logs is copied either.
+
+**Not Logstash.** Logstash would need the audit key to read the log, and a second holder of the key is what
+STORY-049 exists to prevent; and a JVM beside every deployment is a gigabyte to do what the worker already can.
+
+**No data lost or corrupted — checked, not assumed:**
+
+- a batch moves the mark only after every document has been read back and its SHA-256 digest matched;
+- each run re-reads a window behind the mark, so a row that commits after a higher id was indexed is not skipped;
+- reconciliation compares counts and, on a gap, walks the ids to fill it; it re-reads a sample and rewrites any
+  document changed in the index;
+- an index that disappears is rebuilt from the start, and the rebuild is on the record;
+- an index that is down leaves the mark where it was and records why.
+
+**Verified here:** unit tests (documents, digests, read-back) and, against an in-memory stand-in, the live suite's
+plumbing — which found two bugs before CI could. **Not yet verified:** the live suite against a real Elasticsearch
+(`server/tests/searchLive.test.js`), including the one-second limit. It runs in CI's `search` job on the next push.
+With `ELASTICSEARCH_URL` empty, nothing is copied and the Trust tab says search is not set up.
+
+### STORY-056 — the trust dashboard in Grafana
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Grafana | `templates/dashboards.yaml`; `docker run` in CI's `search` job |
+| 2. Connected to Elasticsearch | `files/grafana/datasources/elasticsearch.yaml` — one data source per index |
+| 3. Panels: approval rates, audit entries, governance scores | `files/grafana/dashboards/trust.json` — eight panels, a tenant filter, a time range |
+| 4. Interactive, customisable, saved and shared | Editable and provisioned with `allowUiUpdates`; saved to a volume; viewers cannot save over it |
+
+The same files serve the chart and CI. A unit test checks every field a panel queries exists in the index it
+reads — a misnamed field in Grafana draws an empty chart and no error.
+
+**Not yet verified:** Grafana has not run on this machine. `server/tests/grafanaLive.test.js`, in CI's `search`
+job, checks the data sources answer, runs every panel's query over a chosen range (and a range with no data),
+saves an editor's change and reads it back as a viewer, refuses a viewer's save, then restarts Grafana and checks
+the change was kept. The job uploads screenshots of Grafana and the Trust tab's search as an artifact.
+
+### STORY-057 — what is waiting, and for whom
+
+| Story build step | Where it lives |
+|---|---|
+| Pending approvals and recent actions, with timestamps and priority | `agents/approvalNotificationAgent.js` (`PRIORITY_RULES`), `services/attention.js`; the Trust tab |
+| A prominent notice for users with pending approvals | `AttentionNotice` under the header on every tab, for whoever holds `content.approve` |
+
+Measured before: pending approvals were counts per kind; recent actions a time of day; no priority; nothing told the
+person who decides. Now each waiting item has its time, age and priority with the reason (*escalated*, *older than
+two days* → high; *older than a day* → medium), most urgent first; recent actions carry their full timestamp and a
+priority by what happened. Both refresh every 15 seconds. The compliance auditor, who cannot approve, is not told to.
+
+### STORY-058 — a governance score from what the system did
+
+| Story build step | Where it lives |
+|---|---|
+| A score with a breakdown of contributing factors | `services/governanceScore.js`; the Trust tab's **Governance score** |
+| Reflects the most recent data | Computed on each request; the card refreshes every 15 seconds |
+
+Measured before: the "score" was governance checks passing (22 of 24) — whether the rules held, not what the system
+did. Now: checks passing (25 %), approvals honoured before anything went out (25 %), decisions on the audit log
+(15 %), sends and jobs that did not fail (15 %), waiting items younger than two days (10 %), audit log sealed and
+encrypted (10 %). A factor with nothing to measure is left out and its weight shared, and shown. **A broken
+invariant caps the score at 50.**
+
+**Found by the score:** the demo's first figure was 50, capped from 72, because `gate.posts` was failing — and had
+been at the end of every demo since STORY-029. That story's engagement fixtures published 24 posts marked
+"approved" with no approval behind them. The gate check was right; the fixture was wrong. It now records the
+approval (an hour before the post, by Mira's account) and its audit entry with the states. The demo now scores
+**92**: the integrity factor loses half its points to the STORY-013 stage that tampers with the log on purpose,
+and three quality checks fail for reasons earlier stages show.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -2039,7 +2701,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 201 stages with evidence at each one.
+Prints 269 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -2160,6 +2822,71 @@ Prints 201 stages with evidence at each one.
   outage opened on the transition and paged to `ops@example.test` once, recovery as a check finding
   it up rather than time passing, and the three things this monitoring cannot see, said out loud.
 
+- **Stages 266–269, STORY-054, STORY-055, STORY-056:** the instance a request reached; an audit row as indexed,
+  without its encrypted fields, and its digest; the aggregation (or, with no index configured, why not); the
+  Grafana panels as provisioned. The cluster and the live index and Grafana checks are not part of the demo.
+
+- **Stages 263–265, STORY-058:** the old score and what it could not say; the new one factor by factor (92 on the
+  demo data); when it was computed.
+
+- **Stages 260–262, STORY-057:** what the dashboard showed before; everything waiting for Mira, most urgent first,
+  with times and reasons; the notice Mira sees and the compliance auditor does not.
+
+- **Stages 258–259, STORY-028** (built after STORY-053): a report of Mira's draft actions with its
+  attribution, seal status and digest, and who may and may not generate one.
+
+- **Stages 254–257, STORY-052:** nobody told before; alerts already raised by earlier refusals; three more
+  attempts folded into one alert; the email an officer receives; and acknowledging it.
+
+- **Stages 250–253, STORY-051:** four attempts on the audit logs in the security log with who and how they
+  ended, stored encrypted and closed to the app's own login, and the completeness invariant.
+
+- **Stages 246–249, STORY-050:** three audit routes an API key could read, the declared policy by role
+  derived from the live grants, and the same key and author granted or refused route by route.
+
+- **Stages 242–245, STORY-049:** why STORY-019 said no, an entry stored as AES-256 ciphertext and read back
+  unchanged, a connection without the key reading nothing and refused a write, and each old objection
+  answered.
+
+- **Stages 238–241, STORY-048:** what reviewers' decisions changed before (nothing), a rejection and
+  ratings with reasons, the model refitted from them with each weight that moved, and the same week drafted
+  again — the passage turned down twice no longer quoted.
+
+- **Stages 234–237, STORY-047:** what a reviewer had (approve or reject), the book's style measured, drafts
+  compared with it as they are made, an off-register draft marked with every reason, and changes requested
+  — the revision quoting the passage the reviewer asked for.
+
+- **Stages 230–233, STORY-046:** what generation kept about a book (nothing), a model fitted on upload,
+  the author's notes teaching it a theme the book barely names, and the next drafts written with it.
+
+- **Stages 226–229, STORY-045:** how an integration got in before (as a person), a key created and
+  shown once, the same key refused another tenant, writing, approving and minting keys, and refused
+  on the request after it is revoked — with the reason kept for the security officer.
+
+- **Stages 222–225, STORY-044:** what reading left behind (nothing), four requests for the same books
+  traced to four different people and outcomes, an account trying doors flagged and the admins told,
+  and a block that stops the account on its next request.
+
+- **Stages 218–221, STORY-043:** what onboarding was, measured; an admin onboarding with a name and an
+  address (and refused a password); the author choosing their own from a one-time link that then stops
+  working; and a clash that leaves nothing half-made behind.
+
+- **Stages 214–217, STORY-042:** one admin no longer mints another, a requester refused their own
+  approval by the service and by the database, a revocation that bites on the next request, and the
+  invariant that checks every privileged account was reviewed.
+
+- **Stages 210–213, STORY-041:** what the database enforced between tenants (nothing), a schema created
+  at onboarding, a query with no WHERE clause returning only the caller's rows, and what switching
+  isolation on broke — plus the limit, stated.
+
+- **Stages 206–209, STORY-040:** the coordinator measured against the story, a task held without cost
+  while email is down, every dispatch naming what it went ahead of and why, and notices that were not
+  sent no longer counted as sent.
+
+- **Stages 202–205, STORY-039:** agents that had never messaged each other, an escalation handed to
+  the notifier in its own transaction and delivered within one poll, what the bus refuses and what it
+  never drops, and RabbitMQ — written, and run only in CI.
+
 - **Stages 198–201, STORY-038:** the gateway that said the directory search went through it, every
   integration and its policy, a directory going down — circuit opened, operators alerted once, calls
   stopped, the scout carrying on — and recovery on a trial call.
@@ -2276,8 +3003,19 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `DATABASE_URL` → app | `postgres://ale_app_login@localhost:5432/author_launch_engine` | What the API, worker, seed and tests connect as (STORY-033): rows only, no schema, audit log insert-only |
 | `MIGRATION_DATABASE_URL` | `DATABASE_URL`, else `postgres://localhost:5432/author_launch_engine` | The schema owner. Used by `db:migrate` / `db:reset` only |
 | `APP_DB_PASSWORD` | — | Applied to `ale_app_login` by `migrate.js` where the server requires passwords. Never in a migration |
+| `MESSAGE_TRANSPORT` | `postgres` | How agent messages travel (STORY-039): `postgres`, or `amqp` for RabbitMQ at `AMQP_URL` |
+| `APP_URL` | `http://localhost:5173` | Where the welcome email's link points (STORY-043) |
+| `INVITE_TTL_HOURS` | `72` | How long an onboarding invitation works (STORY-043) |
+| `ACCESS_ALERT_THRESHOLD` | `5` | Refused requests from one account that flag it (STORY-044) |
+| `ACCESS_ALERT_MINUTES` | `10` | The window those refusals are counted in (STORY-044) |
+| `AUDIT_KEY` | — | The audit log's AES-256 key, base64 (STORY-049). Prefer `AUDIT_KEY_FILE` |
+| `AUDIT_KEY_FILE` | `server/.keys/audit.key` | Where the key is read from; created in development, required in production (STORY-049) |
+| `AMQP_URL` | — | RabbitMQ, when `MESSAGE_TRANSPORT=amqp`. CI sets it; the broker test skips without it |
 | `ENFORCE_HTTPS` | `true` in production | Redirect plain-http GETs to https, refuse other methods; `/api/health` and `/api/ready` exempt (STORY-031) |
 | `CORS_ORIGINS` | `http://localhost:5173` in dev, none in production | Comma-separated browser origins allowed cross-origin. Was `*` before STORY-031 |
+| `ELASTICSEARCH_URL` | — | The search index (STORY-055). Empty: nothing is copied and search says it is not set up |
+| `SEARCH_BATCH_SIZE` | `500` | Rows per indexing batch; each batch is read back before the mark moves (STORY-055) |
+| `SEARCH_LOOKBACK_IDS` | `1000` | Ids re-read behind the mark each run, for rows that committed late (STORY-055) |
 | `JWT_SECRET` | dev-only default | Session signing key. The server refuses to start with the default when `NODE_ENV=production` |
 | `JWT_TTL` | `12h` | How long a session lasts |
 | `WORKER_POLL_SECONDS` | `5` | How often a worker looks for due work |
@@ -2401,6 +3139,10 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/tenants/:id/restore` | Restore a suspended tenant (admin) |
 | `GET` | `/api/tenants/isolation` | Latest isolation check: tables checked, exclusions, findings |
 | `POST` | `/api/tenants/isolation/verify` | Run the isolation check now against the database |
+| `GET` | `/api/authors/:id/attention` | Waiting items and recent actions with timestamps and priority; what waits for the caller (STORY-057) |
+| `GET` | `/api/authors/:id/governance-score?days=` | The governance score with each factor's measurement and weight (STORY-058) |
+| `GET` | `/api/authors/:id/search?q=&source=&from=&to=` | Search the tenant's audit and data access logs in the index; 503 with no index (STORY-055) |
+| `GET` | `/api/authors/:id/search/status` | How far the index has got; counts only for those who read across tenants (STORY-055) |
 
 ## Known gaps
 
@@ -2410,14 +3152,10 @@ These are deliberate deferrals, not oversights:
   refresh tokens, no lockout after repeated failures. Per-resource permissions arrived early, in
   STORY-019, because the audit log's access-control clause needed them. Seed passwords are printed
   by `npm run db:reset` and are not secret.
-- **The audit log is not encrypted at rest.** REQ-005 asks for encryption and the STORY-019 build
-  note asks specifically for AES-256 on the table. It is not done, on purpose, and the reasoning is
-  in the STORY-019 section above: it would break the STORY-013 seals, make the governance checks
-  unable to query, and put the key beside the database URL. What was built instead is redaction at
-  the single write path, because the table refuses `UPDATE` and `DELETE` and so a secret written
-  there is unremovable — which encryption does not help with. Encryption at rest belongs to the
-  volume or the managed database, and that is a deployment decision this project has not made yet
-  (see STORY-015: nothing is deployed).
+- **The audit log's key cannot yet be rotated.** Since STORY-049 every entry is AES-256 ciphertext
+  under a key kept outside the database; each row records its key id, and the invariant
+  `audit.encrypted` counts any entry under another key, but re-encrypting under a new key is not
+  built. And the running application holds the key: whoever controls it reads the log.
 - **Permissions are carried in the token, so a grant change waits for the next sign-in.** The guard
   that reads them runs before Express has matched a route and has to be synchronous. This is the
   same staleness `role` has had since STORY-064 — `role` was always a claim — so it adds no new
@@ -2521,8 +3259,9 @@ These are deliberate deferrals, not oversights:
   little on every event, including a protocol meetup (0.075, well under the floor). Coarse but
   harmless at these weights; it would need topic-level matching before it could carry more.
 - **Nothing is deployed.** STORY-015 built readiness, release records and graceful shutdown, all
-  verified locally; the Dockerfiles, compose stack and CI workflow have never been executed, and
-  there is no public URL. The list of what needs a platform is in the STORY-015 section above.
+  verified locally; the Dockerfiles and compose stack have never been executed, the CI workflow ran
+  once on GitHub and failed (STORY-053 found why and mirrors it in `npm run ci:local`), and there is no
+  public URL (STORY-030). The list of what needs a platform is in the STORY-015 section above.
 - The worker exists as of STORY-065 but has to be started (`npm run worker`) and is not supervised —
   nothing restarts it if the process dies. As of STORY-027 a worker that dies is *noticed*: it stops
   beating, the API's monitor opens an outage and pages whoever holds `system.operate`. Restarting it

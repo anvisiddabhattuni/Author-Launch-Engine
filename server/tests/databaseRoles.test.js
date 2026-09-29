@@ -33,9 +33,21 @@ import { runChecks } from '../src/services/governance.js';
  * a new table is either writable or on this list — a later migration adding
  * an append-only table that forgets its REVOKE fails the coverage test below.
  */
-const APPEND_ONLY = ['audit_checkpoints', 'audit_log'];
+const APPEND_ONLY = ['audit_checkpoints', 'data_access_events'];
+/**
+ * The audit log's encrypted storage (STORY-049). The application has no
+ * privilege on it at all: it reads and writes through the `audit_log` view,
+ * which decrypts and encrypts, and cannot reach the ciphertext directly.
+ */
+const ENCRYPTED_STORAGE = ['audit_log_sealed', 'security_log_sealed'];
 /** The owner's record of which migrations ran. The app reads it for readiness. */
 const OWNER_RECORD = ['schema_migrations'];
+/**
+ * Changed only by an approved access change, through `ale_apply_access_change`
+ * (STORY-042): who holds which permission, and each account's role. `users`
+ * stays updatable in its other columns; its role column is not.
+ */
+const REVIEWED_ONLY = ['role_permissions', 'users'];
 
 after(async () => {
   await closePool();
@@ -56,17 +68,22 @@ describe('Scenario: the application connects with the least power it needs', () 
   for (const [what, sql] of [
     ['create a table', 'CREATE TABLE sneaky (id int)'],
     ['drop a table', 'DROP TABLE drafts'],
-    ['switch off the audit triggers', 'ALTER TABLE audit_log DISABLE TRIGGER ALL'],
+    ['switch off the audit triggers', 'ALTER TABLE audit_log_sealed DISABLE TRIGGER ALL'],
     ['rewrite an audit row', "UPDATE audit_log SET action = 'rewritten' WHERE id = (SELECT MIN(id) FROM audit_log)"],
     ['delete an audit row', 'DELETE FROM audit_log WHERE id = (SELECT MIN(id) FROM audit_log)'],
     ['rewrite a seal', "UPDATE audit_checkpoints SET digest = 'x'"],
     ['empty a table', 'TRUNCATE drafts'],
     ['forge a migration record', "INSERT INTO schema_migrations (filename) VALUES ('999_fake.sql')"],
-    ['grant itself the owner', 'GRANT anvi TO ale_app_login'],
+    // Whoever owns the database, by name, asked of Postgres. This was
+    // 'GRANT anvi …' — the role on the laptop it was written on — and on any
+    // other machine, CI included, the answer was "role does not exist", which
+    // is not a refusal and failed the test (STORY-053).
+    ['grant itself the owner', async () => `GRANT ${(await ownerQuery('SELECT pg_get_userbyid(datdba) AS o FROM pg_database WHERE datname = current_database()')).rows[0].o} TO ale_app_login`],
     ['become another role', 'SET ROLE ale_readonly'],
   ]) {
     it(`cannot ${what}`, async () => {
-      await assert.rejects(() => query(sql), /permission denied|must be owner|not.*member|must have admin|append-only/i);
+      const statement = typeof sql === 'function' ? await sql() : sql;
+      await assert.rejects(() => query(statement), /permission denied|must be owner|not.*member|must have admin|append-only/i);
     });
   }
 
@@ -128,14 +145,22 @@ describe('Coverage: every table is where it should be', () => {
          FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`,
     );
     const unreadable = rows.filter((r) => !r.can_read || !r.ro_read).map((r) => r.tablename);
-    assert.deepEqual(unreadable, [], 'a table the app or the read-only role cannot read');
+    assert.deepEqual(unreadable, ENCRYPTED_STORAGE, 'a table the app or the read-only role cannot read');
 
     const noUpdate = rows.filter((r) => !r.can_update).map((r) => r.tablename).sort();
-    assert.deepEqual(noUpdate, [...APPEND_ONLY, ...OWNER_RECORD].sort(),
+    assert.deepEqual(noUpdate, [...APPEND_ONLY, ...OWNER_RECORD, ...REVIEWED_ONLY, ...ENCRYPTED_STORAGE].sort(),
       'the tables the app cannot update are not exactly the declared ones');
 
-    const noInsert = rows.filter((r) => !r.can_insert).map((r) => r.tablename);
-    assert.deepEqual(noInsert, OWNER_RECORD);
+    const noInsert = rows.filter((r) => !r.can_insert).map((r) => r.tablename).sort();
+    assert.deepEqual(noInsert, [...OWNER_RECORD, 'role_permissions', ...ENCRYPTED_STORAGE].sort());
+
+    // users: every column but the role.
+    const { rows: [cols] } = await query(
+      `SELECT has_column_privilege('ale_app', 'public.users', 'role', 'UPDATE') AS role_col,
+              has_column_privilege('ale_app', 'public.users', 'active', 'UPDATE') AS active_col`,
+    );
+    assert.equal(cols.role_col, false, 'the app can change a role without review');
+    assert.equal(cols.active_col, true);
   });
 
   it('a table added by a later migration is granted without anyone remembering', async () => {

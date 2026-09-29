@@ -3,6 +3,11 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 
 import { api, session, setSessionLostHandler } from './api.js';
 import { AuditPage } from './pages/AuditPage.jsx';
+import { AccessPage } from './pages/AccessPage.jsx';
+import { AcceptInvitePage } from './pages/AcceptInvitePage.jsx';
+import { TenantsPage } from './pages/TenantsPage.jsx';
+import { SecurityPage } from './pages/SecurityPage.jsx';
+import { ApiKeysPage } from './pages/ApiKeysPage.jsx';
 import { LoginPage } from './pages/LoginPage.jsx';
 import { OpportunitiesPage } from './pages/OpportunitiesPage.jsx';
 import { OutreachPage } from './pages/OutreachPage.jsx';
@@ -14,6 +19,7 @@ import { WorkerPage } from './pages/WorkerPage.jsx';
 import { TemplatesPage } from './pages/TemplatesPage.jsx';
 import { PerformancePage } from './pages/PerformancePage.jsx';
 import { TrustPage } from './pages/TrustPage.jsx';
+import { AttentionNotice } from './pages/TrustLive.jsx';
 
 export function App() {
   const [user, setUser] = useState(null);
@@ -70,6 +76,11 @@ export function App() {
     setBook(null);
   }
 
+  // The welcome email's link (STORY-043): no session yet, and it is not a
+  // sign-in either — the author is choosing the password they will sign in with.
+  if (window.location.pathname === '/accept-invite' && !user) {
+    return <AcceptInvitePage onSignedIn={setUser} />;
+  }
   if (checking) return <div className="shell" />;
   if (!user) return <LoginPage onSignedIn={setUser} />;
 
@@ -115,7 +126,19 @@ export function App() {
           ['/templates', 'Meme templates'],
           ['/performance', 'Performance'],
           ['/trust', 'Trust'],
-          ['/audit', 'Audit log'],
+          // STORY-050: shown only to those who may read it — the API refuses
+          // the rest anyway, and a tab that can only fail is not offered.
+          ...(user.permissions?.includes('audit.read') ? [['/audit', 'Audit log']] : []),
+          // STORY-045: this tenant's API keys — for the tenant, and admins who manage tenants.
+          ...(user.authorId || user.permissions?.includes('tenant.manage') ? [['/api-keys', 'API keys']] : []),
+          // STORY-043: onboarding, for those who can see every tenant.
+          ...(user.permissions?.includes('tenant.read.all') ? [['/tenants', 'Tenants']] : []),
+          // STORY-042: only for those who manage access or review it.
+          // STORY-044: the access audit, for the same people.
+          ...(user.permissions?.includes('access.manage') ||
+          (user.permissions?.includes('audit.read') && user.permissions?.includes('tenant.read.all'))
+            ? [['/access', 'Access'], ['/security', 'Security']]
+            : []),
         ].map(([to, label]) => (
           <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
             {label}
@@ -124,6 +147,11 @@ export function App() {
       </nav>
 
       {error && <div className="banner error">{error}</div>}
+
+      {/* STORY-057: what waits for this person, on every tab. */}
+      {author && user.permissions?.includes('content.approve') && user.permissions?.includes('audit.read') && (
+        <AttentionNotice authorId={author.id} />
+      )}
 
       {author && (
         <Routes>
@@ -134,7 +162,7 @@ export function App() {
           <Route path="/opportunities" element={<OpportunitiesPage author={author} />} />
           <Route path="/outreach" element={<OutreachPage author={author} />} />
           <Route path="/press" element={<PressPage author={author} book={book} />} />
-          <Route path="/worker" element={<WorkerPage />} />
+          <Route path="/worker" element={<WorkerPage user={user} />} />
           <Route path="/trust" element={<TrustPage author={author} user={user} />} />
           <Route
             path="/performance"
@@ -145,6 +173,11 @@ export function App() {
             element={<TemplatesPage user={user} author={author} book={book} />}
           />
           <Route path="/audit" element={<AuditPage author={author} user={user} />} />
+          <Route path="/access" element={<AccessPage user={user} />} />
+          <Route path="/tenants" element={<TenantsPage user={user} />} />
+          <Route path="/security" element={<SecurityPage user={user} />} />
+          <Route path="/api-keys" element={<ApiKeysPage author={author} user={user} />} />
+          <Route path="/accept-invite" element={<Navigate to="/upload" replace />} />
         </Routes>
       )}
     </div>

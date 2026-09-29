@@ -253,9 +253,14 @@ describe('No approve route is left unguarded', () => {
       new URL('../src/routes/index.js', import.meta.url),
       'utf8',
     );
+    // Each kind of approval has its own gate: content needs content.approve;
+    // access changes (STORY-042) need access.manage — a publicist who may
+    // approve a press release must not thereby approve who else may.
+    const GATES = [['/access/', 'ACCESS_MANAGE']];
     const unguarded = [];
     for (const match of source.matchAll(/router\.post\('([^']*\/(?:approve|reject))',\s*([^\n]*)/g)) {
-      if (!match[2].includes('CONTENT_APPROVE')) unguarded.push(match[1]);
+      const needed = GATES.find(([prefix]) => match[1].startsWith(prefix))?.[1] ?? 'CONTENT_APPROVE';
+      if (!match[2].includes(needed)) unguarded.push(`${match[1]} (needs ${needed})`);
     }
     assert.deepEqual(unguarded, [], 'an approve/reject route has no permission on it');
   });

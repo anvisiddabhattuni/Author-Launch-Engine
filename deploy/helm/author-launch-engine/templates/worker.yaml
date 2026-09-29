@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  # Safe to scale: claiming and shutdown are safe under concurrency (STORY-065).
+  replicas: {{ .Values.worker.replicas }}
+  selector: { matchLabels: { app: {{ .Release.Name }}-worker } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-worker, ale-role: app }
+    spec:
+      serviceAccountName: {{ .Release.Name }}-worker
+      {{- include "ale.appPodSecurity" . | nindent 6 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: {{ include "ale.image" (dict "root" . "name" "ale-worker") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env: {{- include "ale.appEnv" . | nindent 12 }}
+          # The worker has no port. A crash restarts it (restartPolicy
+          # Always); a hang is caught by the API's monitor from its missing
+          # heartbeat, and paged (STORY-027).
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- include "ale.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: audit-key, mountPath: /run/secrets/audit, readOnly: true }]
+      volumes: {{- include "ale.auditKeyVolume" . | nindent 8 }}

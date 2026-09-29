@@ -133,6 +133,9 @@ export async function readiness({ draining: override = null } = {}, client = poo
     ready,
     // A load balancer reads this; a person reads the checks.
     status: ready ? 'ready' : isDrainingNow ? 'draining' : 'not_ready',
+    // Which instance answered (STORY-054) — under Kubernetes, the pod's name,
+    // so a load balancer's spread can be seen from outside.
+    instance: hostname(),
     checks,
     missingMigrations: missing,
   };

@@ -167,24 +167,21 @@ describe('STORY-065: re-running is safe', () => {
     });
     assert.equal(a, b, 'two moments in the same window must produce the same key');
 
-    // Only the sweep's own rows: this file also enqueues publish jobs by hand.
-    const countSweeps = async () =>
-      (
-        await query(
-          `SELECT COUNT(*)::int AS n FROM jobs
-            WHERE kind = 'posts.publish_due' AND idempotency_key NOT LIKE '%:test:%'`,
-        )
-      ).rows[0].n;
-
     // A fixed `now`, so the three ticks cannot straddle a window boundary and
     // legitimately create a second job — which would be correct behaviour and a
     // failing test.
+    //
+    // Counted by this window's key, not across the table: other suites tick
+    // in real time alongside this one, and one that crosses into the next
+    // window during the test legitimately adds that window's sweep — which a
+    // table-wide count read as this test's ticks doubling up.
     const pinned = new Date();
-    const before = await countSweeps();
     await tick({ now: pinned });
     await tick({ now: pinned });
     await tick({ now: pinned });
-    assert.equal(await countSweeps(), before, 'three ticks in one window queued extra work');
+    const key = recurringKey({ kind: 'posts.publish_due', authorId: null, now: pinned, everySeconds: config.jobSweepSeconds });
+    const { rows } = await query('SELECT COUNT(*)::int AS n FROM jobs WHERE idempotency_key = $1', [key]);
+    assert.equal(rows[0].n, 1, 'three ticks in one window queued extra work');
   });
 
   it('windows are stable and adjacent, so no run is skipped or doubled', () => {

@@ -40,6 +40,12 @@ export function ReviewPage({ author, book }) {
       if (decision === 'approve') {
         await api.approve(draft.id, body);
         setStatus({ kind: 'ok', message: `Draft ${draft.id} approved. Schedule it on the next tab.` });
+      } else if (decision === 'changes') {
+        // STORY-047: the note is the request; a revision comes back into this queue.
+        const r = await api.requestChanges(draft.id, notes[draft.id] ?? '');
+        setStatus(r.revision
+          ? { kind: 'ok', message: `Changes requested on draft ${draft.id}. Revision #${r.revision.id} is in the queue for review.` }
+          : { kind: 'error', message: `Changes requested on draft ${draft.id}, but no revision came back: ${r.revisionError}` });
       } else {
         await api.reject(draft.id, body);
         setStatus({ kind: 'ok', message: `Draft ${draft.id} rejected.` });
@@ -284,6 +290,18 @@ export function ReviewPage({ author, book }) {
                 </div>
               )}
 
+              {draft.revision_of && (() => {
+                const original = drafts.find((x) => Number(x.id) === Number(draft.revision_of));
+                return (
+                  <div className="hint" style={{ marginTop: 6 }}>
+                    Revision of draft #{draft.revision_of}
+                    {original?.change_request ? <> — {original.changes_requested_by} asked: “{original.change_request}”</> : null}
+                  </div>
+                );
+              })()}
+
+              <BookComparison review={draft.bookReview} />
+
               {draft.themes?.length > 0 && (
                 <div className="meta">
                   {draft.themes.map((t) => (
@@ -313,6 +331,14 @@ export function ReviewPage({ author, book }) {
               <div className="row">
                 <button onClick={() => decide(draft, 'approve')} disabled={busy || !reviewer.trim()}>
                   Approve
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => decide(draft, 'changes')}
+                  disabled={busy || (notes[draft.id] ?? '').trim().length < 10}
+                  title="Write what should change in the notes box first"
+                >
+                  Request changes
                 </button>
                 <button
                   className="danger"
@@ -434,9 +460,21 @@ export function ReviewPage({ author, book }) {
                   <td className="mono">{draft.id}</td>
                   <td>{draft.platform}</td>
                   <td>
-                    <span className={`pill ${draft.status}`}>{draft.status}</span>
+                    <span className={`pill ${draft.status === 'changes_requested' ? 'pending_approval' : draft.status}`}>{draft.status.replace('_', ' ')}</span>
                   </td>
-                  <td>{draft.content.slice(0, 90)}…</td>
+                  <td>
+                    {draft.content.slice(0, 90)}…
+                    <RateDraft draft={draft} onDone={refresh} />
+                    {draft.status === 'changes_requested' && (
+                      <div className="hint">
+                        {draft.changes_requested_by}: “{draft.change_request}”
+                        {(() => {
+                          const rev = drafts.find((x) => Number(x.revision_of) === Number(draft.id));
+                          return rev ? ` → revised as #${rev.id}` : '';
+                        })()}
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -444,5 +482,82 @@ export function ReviewPage({ author, book }) {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * The draft compared with the book (STORY-047): each claimed theme, whether it
+ * is argued and in the book's own words, and each style element against the
+ * book's. Shown beside the buttons; it informs the decision, it does not make it.
+ */
+function BookComparison({ review }) {
+  if (!review) return <div className="hint" style={{ marginTop: 6 }}>Not compared with the book (drafted before STORY-047).</div>;
+  const c = review.comparison;
+  const VERDICT = { aligned: ['approved', 'matches the book'], check: ['pending_approval', 'check against the book'], misaligned: ['escalated', 'does not match the book'] };
+  const [pill, label] = VERDICT[review.verdict];
+  return (
+    <div className="book-comparison" style={{ marginTop: 8 }}>
+      <div className="meta">
+        <span className={`pill ${pill}`}>{label}</span>
+        {c.themes.map((t) => (
+          <span key={t.theme} className={`pill ${t.aligned && t.inBookLanguage ? 'approved' : t.aligned ? 'pending_approval' : 'escalated'}`}>
+            {t.theme}{t.bookWords.length ? ` · book's words: ${t.bookWords.join(', ')}` : t.learned ? ' · none of the book’s words' : ''}
+          </span>
+        ))}
+        {c.style.map((st) => (
+          <span key={st.element} className={`pill ${st.fits ? 'neutral' : 'escalated'}`} title={`draft ${st.draft} · book ${st.book}`}>
+            {st.label.toLowerCase()} {st.fits ? '✓' : `${st.draft} vs book ${st.book}`}
+          </span>
+        ))}
+        {review.model_version && <span className="pill neutral">book model v{review.model_version}</span>}
+      </div>
+      {c.notes.length > 0 && <div className="hint">{c.notes.join(' · ')}</div>}
+    </div>
+  );
+}
+
+/**
+ * A rating and a comment on a decided draft (STORY-048). Fed back into the
+ * book's model: what reviewers keep turning down stops being quoted.
+ */
+function RateDraft({ draft, onDone }) {
+  const [comment, setComment] = useState('');
+  const [sent, setSent] = useState(null);
+  async function rate(rating) {
+    try {
+      await api.rateDraft(draft.id, { rating, comment: comment.trim() || null });
+      setSent(`Rated ${rating}/5 — it counts from the next drafts.`);
+      setComment('');
+      onDone?.();
+    } catch (e) {
+      setSent(e.message);
+    }
+  }
+  if (sent) return <div className="hint">{sent}</div>;
+  const given = draft.feedback;
+  if (given) {
+    return (
+      <div className="hint" style={{ marginTop: 6 }}>
+        <span className={`pill ${given.rating >= 4 ? 'approved' : given.rating <= 2 ? 'escalated' : 'neutral'}`}>
+          {given.rating ? `rated ${given.rating}/5` : 'comment'}
+        </span>{' '}
+        {given.given_by}{given.comment ? `: “${given.comment}”` : ''}
+      </div>
+    );
+  }
+  return (
+    <div className="row" style={{ marginTop: 6, gap: 4, alignItems: 'center' }}>
+      <input
+        placeholder="What worked, or didn't (optional)"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        style={{ flex: 1, minWidth: 160, padding: '4px 8px' }}
+      />
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button key={n} className="ghost" style={{ padding: '2px 8px' }} onClick={() => rate(n)} title={`Rate ${n} of 5`}>
+          {n}
+        </button>
+      ))}
+    </div>
   );
 }

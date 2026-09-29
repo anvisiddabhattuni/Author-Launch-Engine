@@ -50,11 +50,17 @@ const codeOnly = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/
 const unavailable = () => Object.assign(new Error('503 Service Unavailable'), { status: 503 });
 
 before(async () => {
-  await query('DELETE FROM integration_circuits');
+  // Only this suite's circuits: other suites running alongside keep their own.
+  await query(
+    "DELETE FROM integration_circuits WHERE service LIKE 'circuit-%' OR service LIKE 'mailish-%' OR service = 'podcastIndex'",
+  );
 });
 
 after(async () => {
-  await query('DELETE FROM integration_circuits');
+  // Only this suite's circuits: other suites running alongside keep their own.
+  await query(
+    "DELETE FROM integration_circuits WHERE service LIKE 'circuit-%' OR service LIKE 'mailish-%' OR service = 'podcastIndex'",
+  );
   await closePool();
 });
 

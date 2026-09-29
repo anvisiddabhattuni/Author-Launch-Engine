@@ -1,0 +1,14 @@
+# STORY-056: the trust dashboard is provisioned, and people may change it.
+# allowUiUpdates lets a saved change stand; the file is only the starting point
+# for a new Grafana, never re-applied over someone's edits (updateIntervalSeconds
+# is long, and a provisioned dashboard edited in the UI keeps its new version).
+apiVersion: 1
+providers:
+  - name: author-launch-engine
+    folder: Author Launch Engine
+    type: file
+    allowUiUpdates: true
+    disableDeletion: true
+    updateIntervalSeconds: 86400
+    options:
+      path: /etc/grafana/provisioning/dashboards

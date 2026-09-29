@@ -6,9 +6,11 @@ import {
   enforceTenant,
   requirePermission,
   tenantParam,
+  requireAuditReviewer,
 } from '../middleware/auth.js';
 import { PERMISSIONS, grantMatrix, holds } from '../services/permissions.js';
 import { numericParam, validate } from '../middleware/validate.js';
+import { applyTenantScope } from '../middleware/tenantScope.js';
 import { SCHEMAS } from './schemas.js';
 
 import { draftWeeklyPosts, weekStart } from '../agents/contentDraftingAgent.js';
@@ -26,6 +28,22 @@ import {
 import { integrationHealth } from '../agents/apiIntegrationAgent.js';
 import { deploymentHistory, readiness } from '../services/deployment.js';
 import { monitorAndAlert, systemStatus } from '../services/healthMonitoring.js';
+import { busStatus, redeliver } from '../services/messageBus.js';
+import { tenantSchema } from '../services/tenantSchemas.js';
+import { accessOverview, decideChange, proposeChange, withdrawChange } from '../services/accessChanges.js';
+import { acceptInvite, resendInvite } from '../services/invites.js';
+import { accessReport, securityLogReport, setAccountBlocked, tenantAccessEvents } from '../services/dataAccess.js';
+import { createApiKey, listApiKeys, revokeApiKey } from '../services/apiKeys.js';
+import { addMaterial, describeBookModel, fitBookModel, quotedPassages, summarise as summariseModel } from '../services/bookModel.js';
+import { requestChanges } from '../services/contentReview.js';
+import { auditKeyId } from '../services/auditKey.js';
+import { auditAccessPolicy } from '../services/auditAccess.js';
+import { generateAuditReport, reportAsCsv } from '../services/auditReports.js';
+import { attentionFor } from '../services/attention.js';
+import { searchStatus, searchTenant } from '../services/searchIndex.js';
+import { governanceScore } from '../services/governanceScore.js';
+import { acknowledge, listNotifications } from '../services/securityNotifications.js';
+import { applyFeedback, feedbackFor, recordFeedback } from '../services/contentFeedback.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
 import { OPPORTUNITY_TYPES } from '../services/directories.js';
 import { draftPressKit } from '../agents/prMaterialsAgent.js';
@@ -124,6 +142,15 @@ router.post('/auth/login', validate(SCHEMAS.login), asyncRoute(async (req, res) 
 }));
 
 /** Who the current token says you are. The client uses it to restore a session. */
+/**
+ * The author sets their own password from an invitation (STORY-043), and is
+ * signed in. Public: the person following the link has no session yet.
+ */
+router.post('/auth/accept-invite', validate(SCHEMAS.acceptInvite), asyncRoute(async (req, res) => {
+  const user = await acceptInvite({ token: req.body.token, password: req.body.password });
+  res.json(await login({ email: user.email, password: req.body.password }));
+}));
+
 router.get('/auth/me', asyncRoute(async (req, res) => {
   res.json({ user: req.user });
 }));
@@ -262,7 +289,10 @@ router.post('/authors/:authorId/books', validate(SCHEMAS.createBook), asyncRoute
     after: { ...rows[0], content: `${content.slice(0, 200)}…` },
     metadata: { contentLength: content.length, themes },
   });
-  res.status(201).json(rows[0]);
+  // A new book is fitted at once (STORY-046), so the first draft is written
+  // with a model already in place — and the author sees what it learned.
+  const { model } = await fitBookModel({ bookId: rows[0].id, trigger: 'book_uploaded', actor: req.user.name });
+  res.status(201).json({ ...rows[0], model: summariseModel(model) });
 }));
 
 router.post('/authors/:authorId/social-history', validate(SCHEMAS.socialHistory), asyncRoute(async (req, res) => {
@@ -338,10 +368,25 @@ router.get('/drafts', validate(SCHEMAS.listDrafts), asyncRoute(async (req, res) 
         [rows.map((d) => d.id)],
       );
 
+  // The comparison with the book (STORY-047), kept when the draft was made.
+  const { rows: reviews } = rows.length === 0
+    ? { rows: [] }
+    : await query('SELECT * FROM content_reviews WHERE draft_id = ANY($1::bigint[])', [rows.map((d) => d.id)]);
+  // Ratings already given (STORY-048), latest per draft.
+  const { rows: ratings } = rows.length === 0
+    ? { rows: [] }
+    : await query(
+      `SELECT DISTINCT ON (draft_id) draft_id, rating, comment, given_by, created_at
+         FROM content_feedback WHERE draft_id = ANY($1::bigint[]) ORDER BY draft_id, id DESC`,
+      [rows.map((d) => d.id)],
+    );
+
   res.json(
     rows.map((draft) => ({
       ...draft,
       themes: draftThemes.filter((t) => String(t.draft_id) === String(draft.id)),
+      bookReview: reviews.find((r) => String(r.draft_id) === String(draft.id)) ?? null,
+      feedback: ratings.find((r) => String(r.draft_id) === String(draft.id)) ?? null,
       floors: {
         confidence: config.confidenceEscalationThreshold,
         themeAlignment: config.minThemeAlignment,
@@ -444,6 +489,46 @@ router.post('/drafts/:id/reject', requirePermission(PERMISSIONS.CONTENT_APPROVE)
     notes: req.body?.notes ?? '',
   });
   res.json(draft);
+}));
+
+/**
+ * A reviewer's third answer (STORY-047): not yet. The draft is set aside with
+ * the note and a revision, linked to it, comes back through the same gate.
+ */
+router.post('/drafts/:id/request-changes', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.requestChanges), asyncRoute(async (req, res) => {
+  await assertOwns(req, 'drafts', Number(req.params.id));
+  const note = req.body.note;
+  res.json(await requestChanges({
+    draftId: Number(req.params.id),
+    note,
+    reviewer: req.user.name,
+    user: req.user,
+    reviseWith: async (draft) => {
+      const { rows: [{ week }] } = await query('SELECT week_of::text AS week FROM drafts WHERE id = $1', [draft.id]);
+      // The passage the reviewer saw quoted: a revision writes from another
+      // where the book has one. `passage_ids` lists every passage grounding the
+      // theme, so the one actually quoted is found in the draft's text.
+      const { rows: grounding } = await query(
+        `SELECT p.id, p.content FROM book_passages p
+          WHERE p.id IN (SELECT unnest(passage_ids) FROM draft_themes WHERE draft_id = $1)`,
+        [draft.id],
+      );
+      const seen = quotedPassages(draft.content, grounding);
+      return draftWeeklyPosts({
+        authorId: Number(draft.author_id),
+        bookId: Number(draft.book_id),
+        count: 1,
+        platforms: [draft.platform],
+        weekOf: week,
+        memeCount: 0,
+        revisionOf: Number(draft.id),
+        revisionNote: note,
+        previousContent: draft.content,
+        revisionThemes: draft.themes_used,
+        avoidPassages: seen.map((r) => Number(r.id)),
+      });
+    },
+  }));
 }));
 
 // --- Scheduling and mocked publishing (build steps 4 and 5) ---
@@ -851,20 +936,27 @@ router.get('/press-kits', validate(SCHEMAS.listPressKits), asyncRoute(async (req
     // inner join here did not merely lose a column — it dropped the whole kit
     // from the page a publicist approves from, which is the failure mode of
     // making a required thing optional.
+    //
+    // The counts come from a lateral subquery rather than GROUP BY k.id. On a
+    // table Postgres lets `k.*` ride on grouping by the primary key; inside a
+    // tenant schema (STORY-041) `pr_kits` is a view, which has no primary key,
+    // and the same query is refused.
     `SELECT k.*,
             COALESCE(m.title, 'Requested directly')                  AS milestone_title,
             m.type AS milestone_type,
             m.event_date, m.location, m.details, m.award_name, m.outcome,
-            COUNT(p.id)::int                                        AS material_count,
-            COUNT(*) FILTER (WHERE p.status = 'approved')::int      AS approved_count,
-            COUNT(*) FILTER (WHERE p.status = 'distributed')::int   AS distributed_count,
-            COALESCE(MIN(p.theme_alignment), 0)                     AS min_theme_alignment,
-            COALESCE(MIN(p.voice_score), 0)                         AS min_voice_score
+            agg.material_count, agg.approved_count, agg.distributed_count,
+            agg.min_theme_alignment, agg.min_voice_score
        FROM pr_kits k
        LEFT JOIN milestones m ON m.id = k.milestone_id
-       LEFT JOIN pr_materials p ON p.kit_id = k.id
+       CROSS JOIN LATERAL (
+         SELECT COUNT(p.id)::int                                     AS material_count,
+                COUNT(*) FILTER (WHERE p.status = 'approved')::int   AS approved_count,
+                COUNT(*) FILTER (WHERE p.status = 'distributed')::int AS distributed_count,
+                COALESCE(MIN(p.theme_alignment), 0)                  AS min_theme_alignment,
+                COALESCE(MIN(p.voice_score), 0)                      AS min_voice_score
+           FROM pr_materials p WHERE p.kit_id = k.id) agg
        ${where}
-      GROUP BY k.id, m.title, m.type, m.event_date, m.location, m.details, m.award_name, m.outcome
       ORDER BY COALESCE(m.event_date, k.created_at::date), k.id`,
     params,
   );
@@ -921,6 +1013,12 @@ router.get('/press-kits', validate(SCHEMAS.listPressKits), asyncRoute(async (req
  */
 router.get('/books/:bookId/themes', asyncRoute(async (req, res) => {
   await assertOwns(req, 'books', Number(req.params.bookId));
+  // A book the caller cannot see is a book that does not exist, to them. This
+  // used to answer 200 with no themes for any id at all; inside a tenant schema
+  // (STORY-041) another author's book is simply absent, and 404 says so without
+  // confirming the id belongs to someone.
+  const { rows: book } = await query('SELECT 1 FROM books WHERE id = $1', [req.params.bookId]);
+  if (book.length === 0) return res.status(404).json({ error: 'Book not found' });
   const { rows } = await query(
     `SELECT t.theme,
             t.key_message,
@@ -1108,7 +1206,9 @@ router.get('/notifications', validate(SCHEMAS.listNotifications), asyncRoute(asy
  * without recomputing every check — the dashboard's own assessment is the
  * expensive part, and a chart should not pay for it.
  */
-router.get('/authors/:authorId/trust-history', validate(SCHEMAS.trustHistory), asyncRoute(async (req, res) => {
+// STORY-050: audit data, so audit.read — authors hold it for their own trail;
+// an API key, holding nothing, read all three of these before.
+router.get('/authors/:authorId/trust-history', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.trustHistory), asyncRoute(async (req, res) => {
   const authorId = Number(req.params.authorId);
   const [history, episodes] = await Promise.all([
     assessmentHistory({ authorId, limit: Number(req.query.limit ?? 30) }),
@@ -1157,6 +1257,66 @@ router.post('/authors/:authorId/escalations/scan', asyncRoute(async (req, res) =
 
 // --- Background worker (STORY-065 / REQ-004) ---
 
+// --- Access changes (STORY-042 / REQ-011) ---
+
+/**
+ * Who holds what, what is waiting for a decision, and how each privileged
+ * account got its role. Readable by whoever may change access, and by
+ * compliance — reviewing who approved whose access is their job.
+ */
+// Not `audit.read` alone: authors hold that, to read their own trail, and the
+// first version of this gate showed an author every staff account in the
+// system. Reviewing access is for whoever manages it, or reads across tenants.
+router.get('/access', requireAuditReviewer, asyncRoute(async (req, res) => {
+  const [overview, matrix] = await Promise.all([accessOverview(), grantMatrix()]);
+  return res.json({ ...overview, matrix, you: req.user.id });
+}));
+
+router.post('/access/changes', requirePermission(PERMISSIONS.ACCESS_MANAGE), validate(SCHEMAS.proposeAccessChange), asyncRoute(async (req, res) => {
+  const { kind, role, permission, userId, newRole, reason } = req.body;
+  res.status(201).json(await proposeChange({ kind, role, permission, userId, newRole, reason, user: req.user }));
+}));
+
+router.post('/access/changes/:id/approve', requirePermission(PERMISSIONS.ACCESS_MANAGE), validate(SCHEMAS.decideAccessChange), asyncRoute(async (req, res) => {
+  res.json(await decideChange({ id: req.params.id, user: req.user, approve: true, note: req.body.note }));
+}));
+
+router.post('/access/changes/:id/reject', requirePermission(PERMISSIONS.ACCESS_MANAGE), validate(SCHEMAS.decideAccessChange), asyncRoute(async (req, res) => {
+  res.json(await decideChange({ id: req.params.id, user: req.user, approve: false, note: req.body.note }));
+}));
+
+router.post('/access/changes/:id/withdraw', requirePermission(PERMISSIONS.ACCESS_MANAGE), asyncRoute(async (req, res) => {
+  res.json(await withdrawChange({ id: req.params.id, user: req.user }));
+}));
+
+// --- Tenant schema (STORY-041 / REQ-011) ---
+
+/**
+ * The caller's own schema, and the database role this very request ran as.
+ * The second is the proof: for an author it is `ale_tenant_<id>`, which can
+ * read nothing outside their schema — not the shared login.
+ */
+router.get('/authors/:authorId/tenant-schema', asyncRoute(async (req, res) => {
+  const [{ rows: [who] }, schema] = await Promise.all([
+    query("SELECT current_user AS role, current_setting('search_path') AS search_path"),
+    tenantSchema(Number(req.params.authorId)),
+  ]);
+  res.json({ ...schema, thisRequestRanAs: who.role, searchPath: who.search_path });
+}));
+
+// --- Messages between agents (STORY-039 / REQ-010) ---
+
+/** What agents have told each other, how fast, and what is stuck. */
+router.get('/messages', asyncRoute(async (req, res) => {
+  const scope = holds(req.user, PERMISSIONS.TENANT_READ_ALL) ? null : req.user.authorId;
+  res.json(await busStatus({ authorId: scope }));
+}));
+
+/** Put a dead letter back in the queue. An operator's decision, on the record. */
+router.post('/messages/:id/redeliver', requirePermission(PERMISSIONS.SYSTEM_OPERATE), asyncRoute(async (req, res) => {
+  res.json(await redeliver({ id: req.params.id, user: req.user }));
+}));
+
 /** Run health. What ran, what is waiting, and what has stopped waiting for a robot. */
 router.get('/jobs', asyncRoute(async (req, res) => {
   const params = [];
@@ -1199,8 +1359,34 @@ router.get('/jobs', asyncRoute(async (req, res) => {
  * cleans up by hand.
  */
 router.post('/tenants', requirePermission(PERMISSIONS.TENANT_MANAGE), validate(SCHEMAS.onboardTenant), asyncRoute(async (req, res) => {
-  const { name, email, password, role, voiceProfile } = req.body ?? {};
-  res.status(201).json(await onboardTenant({ name, email, password, role, voiceProfile }));
+  // No password through the API (STORY-043): the author sets their own from
+  // the emailed link. And the admin who did it goes on the record.
+  const { name, email, role, voiceProfile } = req.body ?? {};
+  res.status(201).json(await onboardTenant({ name, email, role, voiceProfile, onboardedBy: req.user }));
+}));
+
+/** Every tenant, whether they have signed in yet, and their schema — the admin's onboarding view. */
+router.get('/tenants', requirePermission(PERMISSIONS.TENANT_READ_ALL), asyncRoute(async (_req, res) => {
+  const { rows } = await query(
+    `SELECT a.id, a.name, a.email, a.tenant_status, a.onboarded_at,
+            u.id AS user_id, (u.password_hash IS NOT NULL) AS activated,
+            to_regnamespace('tenant_' || a.id) IS NOT NULL AS has_schema,
+            i.expires_at AS invite_expires_at, i.created_at AS invited_at,
+            (i.expires_at < now()) AS invite_expired,
+            (SELECT actor FROM audit_log l WHERE l.action = 'tenant.onboarded' AND l.author_id = a.id ORDER BY l.id DESC LIMIT 1) AS onboarded_by
+       FROM authors a
+       LEFT JOIN users u ON u.author_id = a.id
+       LEFT JOIN LATERAL (
+         SELECT * FROM tenant_invites t WHERE t.author_id = a.id AND t.used_at IS NULL AND t.revoked_at IS NULL
+          ORDER BY t.id DESC LIMIT 1) i ON TRUE
+      ORDER BY a.id DESC LIMIT 100`,
+  );
+  res.json(rows);
+}));
+
+/** "I never got the email": a fresh link, and the old one stops working. */
+router.post('/tenants/:authorId/invite', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
+  res.json(await resendInvite({ authorId: req.params.authorId, user: req.user }));
 }));
 
 router.post('/tenants/:authorId/suspend', requirePermission(PERMISSIONS.TENANT_MANAGE), validate(SCHEMAS.suspendTenant), asyncRoute(async (req, res) => {
@@ -1237,7 +1423,7 @@ router.get('/tenants/isolation', requirePermission(PERMISSIONS.TENANT_READ_ALL),
  * recomputed what it displays would be a second implementation free to disagree
  * with the first, and the disagreement would be invisible.
  */
-router.get('/authors/:authorId/trust-dashboard', asyncRoute(async (req, res) => {
+router.get('/authors/:authorId/trust-dashboard', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
   res.json(await trustDashboard({ authorId: Number(req.params.authorId) }));
 }));
 
@@ -1260,7 +1446,14 @@ router.get('/audit-integrity', requirePermission(PERMISSIONS.AUDIT_VERIFY), asyn
     `SELECT COUNT(*)::int AS n FROM audit_log
       WHERE id > COALESCE((SELECT MAX(to_id) FROM audit_checkpoints), 0)`,
   );
-  res.json({ ...verification, checkpoints, unsealed: unsealed[0].n });
+  // Encryption at rest (STORY-049): counted by the storage, which this login cannot read.
+  const { rows: [encryption] } = await query('SELECT * FROM audit_encryption_status()');
+  res.json({
+    ...verification,
+    checkpoints,
+    unsealed: unsealed[0].n,
+    encryption: { ...encryption, cipher: 'AES-256 (OpenPGP symmetric, with integrity check)', keyId: auditKeyId },
+  });
 }));
 
 /** Seals what is new and re-checks every seal. Detects; it cannot repair. */
@@ -1534,3 +1727,166 @@ router.get('/audit-log', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCH
   });
   res.json(rows);
 }));
+
+// STORY-041: every GET route declared above runs inside the caller's tenant
+// schema, except the ones `middleware/tenantScope.js` declares with a reason.
+// Applied last so it covers every route, including ones added later.
+// --- Tenant data access audit (STORY-044 / REQ-011) ---
+
+
+/** Every recorded access, filtered — the security officer's report. */
+router.get('/security/access', requireAuditReviewer, validate(SCHEMAS.accessReport), asyncRoute(async (req, res) => {
+  const { tenant, user, outcome, hours } = req.query;
+  res.json(await accessReport({ authorId: tenant || null, userId: user || null, outcome: outcome || null, hours }));
+}));
+
+/** Who has read this tenant's data. Through the tenant's own view when an author asks. */
+router.get('/authors/:authorId/access-events', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
+  res.json(await tenantAccessEvents(req.params.authorId));
+}));
+
+/** Mitigation: an account that keeps trying doors stops on its next request. */
+router.post('/security/accounts/:id/block', requirePermission(PERMISSIONS.ACCESS_MANAGE), validate(SCHEMAS.blockAccount), asyncRoute(async (req, res) => {
+  res.json(await setAccountBlocked({ userId: req.params.id, blocked: true, reason: req.body.reason, user: req.user }));
+}));
+
+router.post('/security/accounts/:id/unblock', requirePermission(PERMISSIONS.ACCESS_MANAGE), asyncRoute(async (req, res) => {
+  res.json(await setAccountBlocked({ userId: req.params.id, blocked: false, user: req.user }));
+}));
+
+// --- Per-tenant API keys (STORY-045 / REQ-011) ---
+
+/** This tenant's keys: prefix, name, access, who made it, last use. Never the key. */
+router.get('/authors/:authorId/api-keys', asyncRoute(async (req, res) => {
+  res.json(await listApiKeys({ authorId: req.params.authorId, user: req.user }));
+}));
+
+/** A new key, shown once in this response and stored only as a hash. */
+router.post('/authors/:authorId/api-keys', validate(SCHEMAS.createApiKey), asyncRoute(async (req, res) => {
+  const { name, access, expiresInDays } = req.body;
+  res.status(201).json(await createApiKey({ authorId: req.params.authorId, name, access, expiresInDays, user: req.user }));
+}));
+
+router.post('/authors/:authorId/api-keys/:id/revoke', asyncRoute(async (req, res) => {
+  res.json(await revokeApiKey({ authorId: req.params.authorId, keyId: req.params.id, user: req.user }));
+}));
+
+// --- A model fitted to each book (STORY-046 / REQ-012) ---
+
+/** What was fitted to this book: lexicons, lines, style, its held-out score, and every version. */
+router.get('/authors/:authorId/books/:bookId/model', asyncRoute(async (req, res) => {
+  res.json(await describeBookModel({ bookId: req.params.bookId, authorId: req.params.authorId }));
+}));
+
+/** Supplementary material — a synopsis, notes — which the model learns from; the book stays the evidence. */
+router.post('/authors/:authorId/books/:bookId/materials', validate(SCHEMAS.addMaterial), asyncRoute(async (req, res) => {
+  res.status(201).json(await addMaterial({
+    bookId: req.params.bookId, authorId: req.params.authorId, kind: req.body.kind, content: req.body.content, user: req.user,
+  }));
+}));
+
+/** Refit on demand. Refused as a no-op when nothing it learns from has changed. */
+router.post('/authors/:authorId/books/:bookId/model/refit', asyncRoute(async (req, res) => {
+  const { rows: [book] } = await query('SELECT id FROM books WHERE id = $1 AND author_id = $2', [req.params.bookId, req.params.authorId]);
+  if (!book) throw Object.assign(new Error('Book not found for this author'), { status: 404 });
+  const { model, refitted } = await fitBookModel({ bookId: book.id, trigger: 'manual', actor: req.user.name });
+  res.json({ refitted, model: summariseModel(model) });
+}));
+
+// --- The feedback loop (STORY-048 / REQ-012) ---
+
+/** A reviewer's rating and comment on a draft — whatever its status. */
+router.post('/drafts/:id/feedback', requirePermission(PERMISSIONS.CONTENT_APPROVE), validate(SCHEMAS.feedback), asyncRoute(async (req, res) => {
+  await assertOwns(req, 'drafts', Number(req.params.id));
+  res.status(201).json(await recordFeedback({ draftId: Number(req.params.id), rating: req.body.rating ?? null, comment: req.body.comment ?? null, user: req.user }));
+}));
+
+router.get('/authors/:authorId/books/:bookId/feedback', asyncRoute(async (req, res) => {
+  res.json(await feedbackFor({ bookId: req.params.bookId, authorId: req.params.authorId }));
+}));
+
+/** Process it now: the book's model refitted with every judgment so far. */
+router.post('/authors/:authorId/books/:bookId/feedback/apply', requirePermission(PERMISSIONS.CONTENT_APPROVE), asyncRoute(async (req, res) => {
+  res.json(await applyFeedback({ bookId: req.params.bookId, authorId: req.params.authorId, user: req.user }));
+}));
+
+// --- What needs attention (STORY-057 / REQ-015) ---
+
+/** Pending approvals and recent actions, with timestamps and priority; and what waits for this person. */
+router.get('/authors/:authorId/attention', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
+  res.json(await attentionFor({ authorId: req.params.authorId, user: req.user }));
+}));
+
+/**
+ * The governance score (STORY-058): a formula over what the system did, with
+ * every factor's measurement and weight, capped when an invariant is broken.
+ */
+router.get('/authors/:authorId/governance-score', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.governanceScore), asyncRoute(async (req, res) => {
+  res.json(await governanceScore({ authorId: req.params.authorId, days: req.query.days }));
+}));
+
+// --- The search index (STORY-055 / REQ-015) ---
+
+/**
+ * Searches a tenant's audit and data access logs in the index, with a time
+ * range. The tenant filter is added by searchTenant itself. 503 where no index
+ * is set up — said, not an empty result.
+ */
+router.get('/authors/:authorId/search', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.search), asyncRoute(async (req, res) => {
+  const { q, source, from, to, size } = req.query;
+  res.json(await searchTenant({
+    authorId: req.params.authorId, q, source: source || null, size,
+    from: from ? new Date(from).toISOString() : null, to: to ? new Date(to).toISOString() : null,
+  }));
+}));
+
+/** How far the index has got, per source, and what the last reconciliation found. */
+router.get('/authors/:authorId/search/status', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
+  // Counts span every tenant, so only those who read across tenants see them.
+  res.json(await searchStatus({ counts: holds(req.user, PERMISSIONS.TENANT_READ_ALL) }));
+}));
+
+// --- Audit log reports (STORY-028 / REQ-005) ---
+
+/**
+ * A report for a period: every action with its time and who did it, summarised,
+ * with a digest and the seal status. `format=csv` downloads it. An author's
+ * report is their own tenant's (the tenant rule fills authorId); across
+ * tenants needs tenant.read.all.
+ */
+router.get('/audit-reports', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.auditReport), asyncRoute(async (req, res) => {
+  const { from, to, authorId, actor, action, format } = req.query;
+  const report = await generateAuditReport({ from, to, authorId, actor, action, user: req.user });
+  if (format === 'csv') {
+    res.set('content-type', 'text/csv; charset=utf-8');
+    res.set('content-disposition', `attachment; filename="audit-report-${report.period.from.slice(0, 10)}-to-${report.period.to.slice(0, 10)}.csv"`);
+    return res.send(reportAsCsv(report));
+  }
+  return res.json(report);
+}));
+
+// --- Who may read and manage the audit logs (STORY-050 / REQ-013) ---
+
+/**
+ * The security log (STORY-051): every attempt on an audit log, with who and how
+ * it ended. Reviewers only — and reading it is itself recorded there.
+ */
+router.get('/security/audit-access', requireAuditReviewer, validate(SCHEMAS.securityLog), asyncRoute(async (req, res) => {
+  res.json(await securityLogReport({ hours: req.query.hours, outcome: req.query.outcome || null }));
+}));
+
+/** Alerts about refused attempts on the audit logs (STORY-052). For those who verify the logs. */
+router.get('/security/notifications', requirePermission(PERMISSIONS.AUDIT_VERIFY), validate(SCHEMAS.notifications), asyncRoute(async (req, res) => {
+  res.json(await listNotifications({ open: req.query.open === 'true' ? true : req.query.open === 'false' ? false : null }));
+}));
+
+router.post('/security/notifications/:id/acknowledge', requirePermission(PERMISSIONS.AUDIT_VERIFY), validate(SCHEMAS.acknowledge), asyncRoute(async (req, res) => {
+  res.json(await acknowledge({ id: req.params.id, note: req.body.note ?? '', user: req.user }));
+}));
+
+/** The policy, derived from the live grant table: every audit route, and which roles may use it. */
+router.get('/security/audit-access-policy', requireAuditReviewer, asyncRoute(async (_req, res) => {
+  res.json(await auditAccessPolicy());
+}));
+
+export const TENANT_SCOPED_ROUTES = applyTenantScope(router);

@@ -77,13 +77,19 @@ export async function verifyPassword(password, stored) {
  * has always waited for the next token. Carrying the grants alongside it adds
  * no new staleness, and the lag is written into Known gaps.
  */
-export function issueToken(user, permissions = []) {
+export function issueToken(user, permissions = [], accessVersion = null) {
   return jwt.sign(
     {
       sub: String(user.id),
       name: user.name,
+      // For the access log (STORY-044): an event names the person, not a number.
+      email: user.email,
       role: user.role,
       permissions,
+      // The access version this session was issued under (STORY-042). A
+      // session behind the current one has its role and permissions re-read
+      // before it is trusted, so a revocation takes effect on the next request.
+      accessVersion,
       // null for an admin, which is what lets them read across tenants.
       authorId: user.author_id === null ? null : Number(user.author_id),
     },
@@ -139,13 +145,16 @@ export async function login({ email, password }) {
         // Distinguished on the log but not in the response: an operator reading
         // the trail should be able to tell a disabled account from a bad
         // password, while the caller learns neither.
-        reason: !user ? 'no such user' : !user.active ? 'account inactive' : 'bad password',
+        reason: !user ? 'no such user' : !user.active ? 'account inactive'
+          : !user.password_hash ? 'invitation not yet accepted' : 'bad password',
       },
     });
     throw INVALID();
   }
 
   const permissions = await permissionsForRole(user.role);
+  const { accessVersion } = await import('./accessChanges.js');
+  const version = await accessVersion({ fresh: true });
 
   await recordAction({
     actor: user.name,
@@ -159,7 +168,7 @@ export async function login({ email, password }) {
     metadata: { role: user.role, email: user.email, permissions },
   });
 
-  return { token: issueToken(user, permissions), user: publicUser(user) };
+  return { token: issueToken(user, permissions, version), user: publicUser(user) };
 }
 
 /** Never let a password hash out of the service, even internally. */
@@ -179,9 +188,18 @@ export async function upsertUser({ email, name, password, role, authorId = null 
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (email) DO UPDATE
        SET name = EXCLUDED.name, password_hash = EXCLUDED.password_hash,
-           role = EXCLUDED.role, author_id = EXCLUDED.author_id, active = TRUE
+           author_id = EXCLUDED.author_id, active = TRUE
      RETURNING *`,
     [email, name, password_hash, role, authorId],
   );
+  // The role of an existing account is not changed here (STORY-042). It used
+  // to be — any repeat sign-up rewrote it — and a role change is now a
+  // reviewed request, applied only by `ale_apply_access_change`.
+  if (rows[0].role !== role) {
+    throw Object.assign(
+      new Error(`${email} is already ${rows[0].role}. Changing a role is a reviewed access change, not a sign-up.`),
+      { status: 409 },
+    );
+  }
   return rows[0];
 }

@@ -29,6 +29,7 @@ import {
   verifyIsolation,
 } from '../src/agents/tenantManagementAgent.js';
 import { createApp } from '../src/app.js';
+import { config } from '../src/config.js';
 import {
   authorIdsIn,
   classifyRoutes,
@@ -210,7 +211,9 @@ describe('STORY-024: the walk is derived from the router, not a list', () => {
   for (const path of walkable) {
     it(`GET ${path} returns nothing belonging to another tenant`, async () => {
       const response = await asMe(fillPath(path, { authorId: mine, bookId: myBookId }));
-      assert.ok(response.status < 500, `${path} answered ${response.status}`);
+      // Search says 503 where no index is set up (STORY-055): an answer, not a crash.
+      const unavailable = path === '/authors/:authorId/search' && !config.elasticsearchUrl && response.status === 503;
+      assert.ok(response.status < 500 || unavailable, `${path} answered ${response.status}`);
       if (response.status !== 200) return;
 
       const ids = authorIdsIn(await response.json());

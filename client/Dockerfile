@@ -1,6 +1,6 @@
 # Client image (STORY-015).
 #
-# NOT BUILT OR RUN — see server/Dockerfile.
+# BUILT AND RUN (STORY-054) — see server/Dockerfile.
 #
 # Vite output is static files, so the runtime stage is a web server and none of
 # the build toolchain. Nothing from `deps` reaches the final image.
@@ -15,6 +15,11 @@ COPY server/package.json ./server/
 COPY client/package.json ./client/
 RUN npm ci --include-workspace-root --workspace client
 COPY client ./client
+# vite.config.js imports the one CSP both the UI and the API send (STORY-031).
+# It has no imports of its own; without it the first real build failed (STORY-054).
+COPY server/src/services/securityHeaders.js ./server/src/services/securityHeaders.js
+# STORY-030: a public build does not show the demo passwords on its login page.
+ENV VITE_SHOW_DEMO_LOGINS=false
 RUN npm run build --workspace client
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 AS runtime

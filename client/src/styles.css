@@ -380,3 +380,21 @@ button:focus-visible {
     padding: 8px 6px;
   }
 }
+
+/* STORY-055: the search form on the Trust tab — one row that wraps on a phone. */
+.search-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0 12px;
+}
+.search-form input:not([type='datetime-local']) {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.search-form select,
+.search-form input[type='datetime-local'] {
+  flex: 0 0 auto;
+  width: auto;
+}

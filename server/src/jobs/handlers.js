@@ -10,6 +10,8 @@ import { alertOnBreaches } from '../services/trustHistory.js';
 import { notifyFailedPublishes } from '../services/publishFailureNotifier.js';
 import { monitorAndAlert } from '../services/healthMonitoring.js';
 import { trackEngagement } from '../services/performanceMetrics.js';
+import { config } from '../config.js';
+import { aggregate, reconcile } from '../services/searchIndex.js';
 
 /**
  * What the worker knows how to do (STORY-065).
@@ -92,6 +94,11 @@ export const RECURRING = [
     scope: 'global',
     describe: () => 'check every component is answering, and page someone if one is not',
   },
+  // Only where there is an index to fill (STORY-055). Global: the logs are
+  // one log each, and two per-tenant runs would race on the same mark.
+  ...(config.elasticsearchUrl
+    ? [{ kind: 'search.aggregate', scope: 'global', describe: () => 'copy new log rows and a metrics snapshot to the search index, then reconcile' }]
+    : []),
 ];
 
 export const HANDLERS = {
@@ -112,6 +119,7 @@ export const HANDLERS = {
     const result = await notifyPendingReviews({ authorId: Number(job.author_id) });
     return {
       notified: result.notified.length,
+      failed: result.failed?.length ?? 0,
       skipped: result.skipped.length,
       unreachable: result.unreachable,
     };
@@ -203,6 +211,16 @@ export const HANDLERS = {
    * Seals what is new, then recomputes every seal from the live rows. It cannot
    * stop anyone rewriting history; it makes sure that afterwards somebody knows.
    */
+  'search.aggregate': async () => {
+    const run = await aggregate({});
+    const checked = await reconcile({});
+    return {
+      indexed: Object.fromEntries(run.sources.map((s) => [s.source, s.indexed])),
+      repaired: checked.reduce((a, c) => a + c.filled + c.rewritten, 0) + run.sources.reduce((a, s) => a + s.repaired, 0),
+      inSync: checked.every((c) => c.inSync),
+      tookMs: run.tookMs,
+    };
+  },
   'audit.seal_and_verify': async () => {
     const { seal, verification } = await sealAndVerify();
     return {
@@ -228,6 +246,7 @@ export const HANDLERS = {
     const result = await notifyAwaitingApproval({ authorId: Number(job.author_id) });
     return {
       notified: result.notified.length,
+      failed: result.failed?.length ?? 0,
       waiting: result.queue.total,
       alreadyKnown: result.skipped.length,
       unreachable: result.unreachable,

@@ -40,7 +40,7 @@ const CHROME =
   process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TABS = [
   '/upload', '/review', '/schedule', '/opportunities', '/outreach', '/press',
-  '/worker', '/templates', '/performance', '/trust', '/audit',
+  '/worker', '/templates', '/performance', '/trust', '/audit', '/api-keys',
 ];
 const WIDTHS = [
   { name: 'phone', width: 390, height: 844 },

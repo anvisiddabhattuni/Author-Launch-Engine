@@ -43,6 +43,8 @@ export const INTEGRATIONS = Object.fromEntries(
       'Generation takes seconds to tens of seconds; the shared 10s timeout abandoned calls that would have succeeded. Two attempts, because a retry is a second paid generation.'),
     route('email', 'notification', { failureThreshold: 5, cooldownMs: 60_000, alertable: false },
       'Every alert in this system is an email, so an email outage cannot be announced by email. It is shown on the Trust tab and in the audit log instead.'),
+    route('elasticsearch', 'infrastructure', { timeoutMs: 15_000, maxAttempts: 3, backoffMs: 1_000, cooldownMs: 60_000 },
+      'The search index (STORY-055). A copy, never the record: when it is down, searching says so and indexing resumes from its mark.'),
     ...PLATFORMS.map((p) => route(p, 'social', {}, 'Publishes human-approved posts (STORY-001). A failure here is a late post, never an unapproved one.')),
     ...['podcastIndex', 'speakerBureau', 'eventFinder'].map((d) =>
       route(d, 'directory', { timeoutMs: 8_000, maxAttempts: 2, cooldownMs: 300_000 },

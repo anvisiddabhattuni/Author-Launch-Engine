@@ -19,7 +19,13 @@
     "test": "npm run test --workspace server",
     "demo": "npm run demo --workspace server",
     "check:browser": "node client/scripts/browserCheck.mjs",
-    "scan:deps": "npm audit --omit=dev --audit-level=moderate"
+    "scan:deps": "npm audit --omit=dev --audit-level=moderate",
+    "test:unit": "npm run test:unit --workspace server",
+    "test:integration": "npm run test:integration --workspace server",
+    "test:e2e": "node client/scripts/e2e.mjs",
+    "ci:local": "node scripts/ciLocal.mjs",
+    "smoke:deployed": "node scripts/smokeDeployed.mjs",
+    "search:aggregate": "npm run search:aggregate --workspace server"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

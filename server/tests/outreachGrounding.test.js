@@ -304,7 +304,8 @@ describe('All three content types are now measured the same way', () => {
   it('keeps per-theme evidence for all three', async () => {
     const { rows } = await query(
       `SELECT table_name FROM information_schema.tables
-        WHERE table_name IN ('draft_themes','pr_material_themes','outreach_message_themes')`,
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+          AND table_name IN ('draft_themes','pr_material_themes','outreach_message_themes')`,
     );
     assert.equal(rows.length, 3);
   });

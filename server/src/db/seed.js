@@ -1,9 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { addTemplate } from '../services/memeLibrary.js';
 import { upsertUser } from '../services/auth.js';
 
 import { TEMPLATE_SEED } from './memeTemplateSeed.js';
 
-import { closePool, query } from './pool.js';
+import { closePool, ownerQuery, query } from './pool.js';
 
 // Posting windows are hours in UTC. Values reflect commonly cited engagement
 // peaks per platform and are the "optimal times" the scheduler targets.
@@ -301,17 +302,26 @@ async function seed() {
   // printed below on purpose — there is no signup, and pretending these are
   // secret would only mean nobody could run the demo. A real deployment sets
   // JWT_SECRET and creates users out of band.
+  // STORY-030: on a public URL these published passwords would let anyone sign
+  // in as an admin. In production every seeded account gets a random password
+  // instead, printed once below for whoever deployed it to share privately.
+  const production = process.env.NODE_ENV === 'production';
+  const pw = (published) => (production ? randomBytes(12).toString('base64url') : published);
+  const passwords = {
+    mira: pw('quiet-craft'), ops: pw('ops-password'), tomas: pw('second-shelf'),
+    auditor: pw('compliance-only'), security: pw('second-pair-of-eyes'),
+  };
   const authorLogin = await upsertUser({
     email: 'mira@example.test',
     name: 'Mira Kovač',
-    password: 'quiet-craft',
+    password: passwords.mira,
     role: 'author',
     authorId: authorRows[0].id,
   });
   const admin = await upsertUser({
     email: 'ops@example.test',
     name: 'Ops',
-    password: 'ops-password',
+    password: passwords.ops,
     role: 'admin',
   });
 
@@ -332,7 +342,7 @@ async function seed() {
   const otherUser = await upsertUser({
     email: 'tomas@example.test',
     name: 'Tomas Beck',
-    password: 'second-shelf',
+    password: passwords.tomas,
     role: 'author',
     authorId: otherAuthor[0].id,
   });
@@ -344,17 +354,43 @@ async function seed() {
   const auditor = await upsertUser({
     email: 'auditor@example.test',
     name: 'Rae Lindqvist',
-    password: 'compliance-only',
+    password: passwords.auditor,
     role: 'compliance',
     authorId: null,
   });
 
+  // A second admin (STORY-042). Access changes need someone other than the
+  // requester to approve them, so with one admin nothing could ever be
+  // approved — which is the rule working, and not a demo anybody can use.
+  const security = await upsertUser({
+    email: 'security@example.test',
+    name: 'Jun Park',
+    password: passwords.security,
+    role: 'admin',
+    authorId: null,
+  });
+
+  // The privileged accounts above exist before anyone could have approved
+  // them. Recorded as 'bootstrap' — which only the schema owner may write —
+  // so the governance invariant can tell them from a role granted with no
+  // review.
+  for (const account of [admin, auditor, security]) {
+    await ownerQuery(
+      `INSERT INTO access_changes (kind, user_id, new_role, reason, status)
+       SELECT 'assign_role', $1, $2, $3, 'bootstrap'
+        WHERE NOT EXISTS (SELECT 1 FROM access_changes WHERE user_id = $1 AND status = 'bootstrap' AND new_role = $2)`,
+      [account.id, account.role, 'Seeded demo account, created before anyone existed to approve it'],
+    );
+  }
+
   console.log(
-    `seeded ${[authorLogin, admin, otherUser, auditor].length} logins:\n` +
-      `  ${authorLogin.email} / quiet-craft      (author, tenant ${authorLogin.author_id})\n` +
-      `  ${otherUser.email} / second-shelf   (author, tenant ${otherUser.author_id})\n` +
-      `  ${admin.email} / ops-password      (admin, all tenants)\n` +
-      `  ${auditor.email} / compliance-only (compliance, reads every tenant, changes nothing)`,
+    `seeded ${[authorLogin, admin, otherUser, auditor, security].length} logins:\n` +
+      `  ${authorLogin.email} / ${passwords.mira}      (author, tenant ${authorLogin.author_id})\n` +
+      `  ${otherUser.email} / ${passwords.tomas}   (author, tenant ${otherUser.author_id})\n` +
+      `  ${admin.email} / ${passwords.ops}      (admin, all tenants)\n` +
+      `  ${security.email} / ${passwords.security} (admin — the second approver for access changes)\n` +
+      `  ${auditor.email} / ${passwords.auditor} (compliance, reads every tenant, changes nothing)` +
+      (production ? '\n  (random, because NODE_ENV=production — shown once; share them privately)' : ''),
   );
 
   // Milestones hang off the book, which is recreated above, so they are gone

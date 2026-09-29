@@ -130,7 +130,7 @@ describe('Scenario: the images are built to be scanned and trusted', () => {
 
   it('.dockerignore keeps host modules, build output, secrets and history out of every layer', () => {
     const ignore = read('.dockerignore').split('\n').map((l) => l.trim());
-    for (const pattern of ['**/node_modules', '**/.env', '.git', '**/dist']) {
+    for (const pattern of ['**/node_modules', '**/.env', '.git', '**/dist', '**/.keys']) {
       assert.ok(ignore.includes(pattern), `.dockerignore does not exclude ${pattern}`);
     }
   });

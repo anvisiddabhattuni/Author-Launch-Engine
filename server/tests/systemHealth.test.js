@@ -28,6 +28,7 @@ import { config } from '../src/config.js';
 import { closePool, query } from '../src/db/pool.js';
 import { listAuditLog } from '../src/services/auditLog.js';
 import { recordStart } from '../src/services/deployment.js';
+import { recurringKey, windowStart } from '../src/jobs/queue.js';
 import { CHECKS, runChecks } from '../src/services/governance.js';
 import {
   ACTOR,
@@ -80,6 +81,23 @@ before(async () => {
   );
   await query('UPDATE outages SET resolved_at = now() WHERE resolved_at IS NULL');
   await query("DELETE FROM health_checks WHERE checked_by LIKE 'test:%'");
+
+  // Test isolation. Other suites run the worker's tick, and the tick runs the
+  // global health check — a second monitor, watching the stale worker row this
+  // suite plants on purpose, and opening or alerting on its outage first. The
+  // product is built for that (the API and the worker both monitor); these
+  // tests are written as the only monitor. The check runs once per sweep
+  // window, keyed by an idempotency key, so this claims the current and next
+  // windows and no other suite's tick will run one while this suite is running.
+  const every = config.jobSweepSeconds;
+  for (let w = 0; w < 3; w += 1) {
+    const at = new Date(Date.now() + w * every * 1000);
+    await query(
+      `INSERT INTO jobs (kind, idempotency_key, run_at, status, finished_at)
+       VALUES ('system.health_check', $1, $2, 'done', now()) ON CONFLICT (idempotency_key) DO NOTHING`,
+      [recurringKey({ kind: 'system.health_check', authorId: null, now: at, everySeconds: every }), windowStart(at, every)],
+    );
+  }
 
   // A real app on a real port, so the default probe is tested against the
   // actual /api/ready rather than a stand-in.
@@ -269,11 +287,12 @@ describe('Scenario: an outage is detected, and the infrastructure team is told',
   });
 
   it('an outage nobody can be told about is its own finding', async () => {
-    // Take the permission away from everyone, briefly.
-    await query("UPDATE users SET active = FALSE WHERE role = 'admin'");
+    // Nobody to tell. This used to deactivate every admin account for the
+    // length of the test, and any suite signing in as an admin at that moment
+    // failed whole (seen with STORY-043's onboarding tests).
     try {
       await query("UPDATE deployments SET last_seen_at = now() - interval '3 minutes' WHERE id = $1", [workerRow.id]);
-      const result = await monitorAndAlert({ checkedBy: 'test:unreachable', probe: apiUp(), notifier: capture() });
+      const result = await monitorAndAlert({ checkedBy: 'test:unreachable', probe: apiUp(), notifier: capture(), findOperators: async () => [] });
       assert.deepEqual(result.started.map((o) => o.component), ['worker']);
       assert.deepEqual(result.alert.alerted, []);
       assert.match(result.alert.reason, /nobody holds/);
@@ -285,7 +304,6 @@ describe('Scenario: an outage is detected, and the infrastructure team is told',
       const { rows } = await query("SELECT alerted_at FROM outages WHERE component = 'worker' AND resolved_at IS NULL");
       assert.equal(rows[0].alerted_at, null);
     } finally {
-      await query("UPDATE users SET active = TRUE WHERE role = 'admin'");
       await heartbeat({ deploymentId: workerRow.id });
       await performHealthChecks({ checkedBy: 'test:cleanup', probe: apiUp() });
     }

@@ -36,6 +36,16 @@ let current = null;
  * it records itself, beats, and checks on the API — which is the only thing
  * that can notice the API is gone, since the API cannot notice that itself.
  */
+// RabbitMQ, when configured (STORY-039). A broker that cannot be reached at
+// start is a startup failure, said loudly — silently falling back to Postgres
+// would leave an operator believing messages go through a broker they do not.
+let broker = null;
+if (config.messageTransport === 'amqp') {
+  const { connect } = await import('../services/amqpTransport.js');
+  broker = await connect();
+  console.log('[worker] messages between agents travel through RabbitMQ');
+}
+
 let deployment = null;
 let stopHeartbeat = () => {};
 let stopMonitor = () => {};
@@ -53,8 +63,14 @@ try {
 async function loop() {
   while (!stopping) {
     try {
-      current = tick();
-      const { reclaimed, scheduled, ran } = await current;
+      current = tick({ channel: broker?.channel ?? null });
+      const { reclaimed, scheduled, ran, messages = [] } = await current;
+      if (messages.length) {
+        console.log(
+          `[worker] ${new Date().toISOString()} messages=${messages.length} ` +
+            messages.map((m) => `${m.topic}→${m.to}:${m.status}`).join(' '),
+        );
+      }
       if (reclaimed.length || scheduled.length || ran.length) {
         const done = ran.filter((j) => j.status === 'done').length;
         const dead = ran.filter((j) => j.status === 'dead_letter').length;
@@ -88,6 +104,7 @@ async function shutdown(signal) {
   console.log(`[worker] ${signal} received — finishing the job in hand`);
   stopHeartbeat();
   stopMonitor();
+  await broker?.connection.close().catch(() => {});
   try {
     await current;
   } catch {

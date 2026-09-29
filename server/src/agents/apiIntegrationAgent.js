@@ -338,8 +338,10 @@ async function recordFailure({ service, policy, error, now }) {
   if (!opens) return;
 
   await pool.query(
-    "UPDATE integration_circuits SET state = 'open', opened_at = $2, updated_at = $2 WHERE service = $1",
-    [service, now],
+    `UPDATE integration_circuits SET state = 'open', opened_at = $2::timestamptz, updated_at = $2::timestamptz,
+            retry_at = $2::timestamptz + make_interval(secs => $3::double precision)
+      WHERE service = $1`,
+    [service, now, policy.cooldownMs / 1000],
   );
   await recordAction({
     actor: ACTOR,

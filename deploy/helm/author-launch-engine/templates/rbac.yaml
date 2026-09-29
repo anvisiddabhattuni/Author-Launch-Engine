@@ -1,0 +1,78 @@
+{{/*
+  People's access (STORY-054). Three roles, least first:
+    viewer        — read workloads, pods, logs, events. No secrets.
+    operator      — viewer, plus scale, restart and roll out. Still no secrets.
+    secrets-admin — the Secret, and nothing else.
+  Nobody gets all three by default; bind groups in values.rbac.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-viewer
+  labels: {{- include "ale.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, events, endpoints, persistentvolumeclaims, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-operator
+  labels: {{- include "ale.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, events, endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]            # restart one pod
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch, patch]   # rollout restart, image changes
+  - apiGroups: [apps]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [get, update, patch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-secrets-admin
+  labels: {{- include "ale.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ include "ale.secretName" . }}]
+    verbs: [get, update, patch]
+{{- range $role, $groups := dict "viewer" .Values.rbac.viewers "operator" .Values.rbac.operators "secrets-admin" .Values.rbac.secretAdmins }}
+{{- if $groups }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Release.Name }}-{{ $role }}
+  labels: {{- include "ale.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $.Release.Name }}-{{ $role }}
+subjects:
+{{- range $g := $groups }}
+  - kind: Group
+    name: {{ $g }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}
+{{- end }}

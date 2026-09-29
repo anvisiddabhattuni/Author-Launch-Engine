@@ -4,6 +4,7 @@ import helmet from 'helmet';
 
 import { config } from './config.js';
 import { router } from './routes/index.js';
+import { accessLog } from './services/dataAccess.js';
 import { observeRequests } from './services/requestStats.js';
 import { CSP_DIRECTIVES, HSTS_MAX_AGE, enforceHttps } from './services/securityHeaders.js';
 
@@ -53,6 +54,8 @@ export function createApp({ httpsRequired = config.enforceHttps, corsOrigins = c
   // is still counted. An error rate that excludes the errors is not an error
   // rate (STORY-027).
   app.use(express.json({ limit: '5mb' }));
+  // STORY-044: every request that reaches tenant data, recorded when it ends.
+  app.use('/api', accessLog());
   app.use('/api', router);
 
   app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -62,6 +65,11 @@ export function createApp({ httpsRequired = config.enforceHttps, corsOrigins = c
   app.use((error, _req, res, _next) => {
     const status = error.status ?? 500;
     if (status >= 500) console.error(error);
+    // The reason, for the access log (STORY-044): a refusal recorded without
+    // why is half a record.
+    // A refusal may carry a fuller reason than it tells the caller — an API
+    // key's "revoked" versus "unknown" is for the security officer only.
+    res.locals.accessReason = error.accessReason ?? errorMessage(error);
     // `details` is set by input validation (STORY-032): one entry per field,
     // so a client can point at the box that is wrong rather than parse prose.
     res.status(status).json(error.details ? { error: errorMessage(error), details: error.details } : { error: errorMessage(error) });

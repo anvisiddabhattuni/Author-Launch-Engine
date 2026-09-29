@@ -1,0 +1,66 @@
+{{/*
+  Elasticsearch (STORY-055): one node, holding a copy of the logs and metrics
+  that the worker rebuilds from Postgres whenever it is lost. So one node and
+  no replicas is a choice, not a shortcut: losing the volume costs a re-index,
+  not data. Its own security is off; the NetworkPolicy below is what keeps
+  everything but the app and Grafana away from it.
+*/}}
+{{- if .Values.search.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-search
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  selector: { app: {{ .Release.Name }}-search }
+  ports: [{ port: 9200, targetPort: 9200 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-search
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-search
+  replicas: 1
+  selector: { matchLabels: { app: {{ .Release.Name }}-search } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-search, ale-role: search }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: elasticsearch
+          image: {{ .Values.search.image }}
+          env:
+            - { name: discovery.type, value: single-node }
+            - { name: xpack.security.enabled, value: "false" }
+            - { name: ES_JAVA_OPTS, value: "-Xms{{ .Values.search.heapMb }}m -Xmx{{ .Values.search.heapMb }}m" }
+          ports: [{ containerPort: 9200 }]
+          readinessProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: 9200 }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.search.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /usr/share/elasticsearch/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: {{ .Values.search.storage }} } }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-search
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  podSelector: { matchLabels: { ale-role: search } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { ale-role: app } }
+        - podSelector: { matchLabels: { ale-role: dashboards } }
+      ports: [{ port: 9200 }]
+{{- end }}

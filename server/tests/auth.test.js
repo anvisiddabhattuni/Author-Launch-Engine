@@ -312,8 +312,13 @@ describe('The tenant boundary', () => {
   });
 
   it('refuses a resource whose id names no tenant at all', async () => {
-    const { status } = await req(`/books/${theirs.book.id}/themes`, { token: mine.token });
-    assert.equal(status, 403, 'ownership has to be read off the row when the URL cannot say');
+    const { status, body } = await req(`/books/${theirs.book.id}/themes`, { token: mine.token });
+    // 403 before STORY-041; 404 since, because inside the caller's tenant
+    // schema another author's book does not exist. Either refuses — 404 also
+    // declines to confirm the id belongs to somebody. What must never happen
+    // is a 200 carrying their themes.
+    assert.ok([403, 404].includes(status), `expected a refusal, got ${status}`);
+    assert.ok(!body?.themes?.length, 'another tenant\'s themes were served');
   });
 
   it('refuses to approve work belonging to another tenant', async () => {

@@ -169,6 +169,8 @@ export const stubProvider = {
     count,
     weekOf,
     memeCount = 0,
+    revision = null,
+    bookModel = null,
     visualFirstPlatforms = [],
     // Templates already chosen from the library by the agent, one per meme
     // (STORY-067). The provider does not pick: selection is a decision with a
@@ -179,18 +181,40 @@ export const stubProvider = {
     // Prefer the grounded themes: they are the ones with evidence behind them.
     // `books.themes` remains the fallback for a book with no theme index.
     const grounded = grounding?.themes ?? [];
-    const themes = grounded.length > 0
+    let themes = grounded.length > 0
       ? grounded.map((t) => t.theme)
       : (book.themes.length > 0 ? book.themes : ['the book']);
     const index = new Map(grounded.map((t) => [t.theme, t]));
+    // A revision (STORY-047) keeps the theme the reviewer saw and, where the
+    // book offers another, writes from a passage they did not. This provider
+    // cannot read the note; these two rules are what it can do honestly.
+    const seen = new Set((revision?.avoidPassages ?? []).map(Number));
+    if (revision?.themes?.length) {
+      const kept = revision.themes.filter((t) => themes.includes(t));
+      if (kept.length) themes = kept;
+    }
+    // Reviewers' preferences (STORY-048): a theme they like comes up more, one
+    // they keep turning down less — tilted, never silenced (weights 0.5–1.5).
+    const themeWeight = new Map((bookModel?.preferences?.themes ?? []).map((t) => [t.theme, t.weight]));
+    if (themeWeight.size && !revision?.themes?.length) {
+      themes = themes.flatMap((t) => Array(Math.max(1, Math.round((themeWeight.get(t) ?? 1) * 2))).fill(t));
+    }
+    const fresh = (entry) => {
+      if (!entry || seen.size === 0) return entry;
+      const unseen = entry.passages.filter((p) => !seen.has(Number(p.id)));
+      return unseen.length ? { ...entry, passages: unseen } : entry;
+    };
 
     const candidates = [];
 
     for (let i = 0; i < count; i += 1) {
       const platform = platforms[i % platforms.length];
-      const seed = hash(`${book.id}:${weekOf}:${platform}:${i}`);
+      // A revision (STORY-047) is seeded apart from the draft it replaces, so it
+      // is a different draft rather than the same one again. The offline
+      // provider cannot read the reviewer's note; the Anthropic one can.
+      const seed = hash(`${book.id}:${weekOf}:${platform}:${i}${revision ? `:rev${revision.of}` : ''}`);
       const theme = pick(themes, seed);
-      const entry = index.get(theme) ?? null;
+      const entry = fresh(index.get(theme) ?? null);
 
       const claim = claimFor(entry);
       const line = lineFor(entry, book, seed >>> 3);

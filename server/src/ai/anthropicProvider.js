@@ -26,7 +26,11 @@ function groundingBrief(grounding) {
   return [
     "What the book argues, theme by theme. Write from this, not from the theme names:",
     ...themes.map((t) => {
-      const evidence = t.passages.map((p) => `    > ${p.content}`).join('\n');
+      // A passage the book model found argues the theme without naming it
+      // (STORY-046); the model is told so, so it does not go looking for the word.
+      const evidence = t.passages
+        .map((p) => `    > ${p.content}${p.source === 'book model' ? '  [found by the book model: argues this without naming it]' : ''}`)
+        .join('\n');
       return [
         `- ${t.theme}`,
         t.keyMessage ? `    claim: ${t.keyMessage}` : '    claim: (none recorded — do not invent one)',
@@ -57,7 +61,29 @@ function voiceBrief(voice, voiceProfile) {
   ].join('\n');
 }
 
-function buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count }) {
+/**
+ * What was fitted to this book (STORY-046): the words it uses for each theme,
+ * and the lines that carry each best. The prompt is where a model that cannot
+ * be fine-tuned is adapted.
+ */
+function bookModelBrief(bookModel) {
+  const themes = bookModel?.themes?.filter((t) => t.lexicon.length || t.anchorLines?.length) ?? [];
+  if (themes.length === 0 && !(bookModel?.preferences?.notes ?? []).length) return '';
+  return [
+    'Fitted to this book — its own words for each theme, and its strongest lines. Prefer these:',
+    ...themes.map((t) => [
+      `- ${t.theme}: ${t.lexicon.map((l) => l.word ?? l.term).join(', ') || '(no words learned)'}`,
+      ...(t.anchorLines ?? []).map((a) => `    "${a.sentence}"`),
+    ].join('\n')),
+    `Book style: sentences average ${bookModel.style.meanSentenceWords} words.`,
+    // What reviewers have said about earlier drafts (STORY-048).
+    ...((bookModel.preferences?.notes ?? []).length
+      ? ['Reviewers on earlier drafts of this book:', ...bookModel.preferences.notes.map((n) => `  - (${n.label > 0 ? 'liked' : 'turned down'}) ${n.note}`)]
+      : []),
+  ].join('\n');
+}
+
+function buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel = null, revision = null }) {
   const samples = history
     .slice(0, 8)
     .map((h) => `- (${h.platform}) ${h.content}`)
@@ -75,6 +101,12 @@ function buildPrompt({ book, voiceProfile, voice, grounding, history, platforms,
     '',
     brief || `Book excerpt:\n${book.content.slice(0, 4000)}`,
     '',
+    bookModelBrief(bookModel),
+    '',
+    // A reviewer asked for changes (STORY-047): their note, and what they saw.
+    revision
+      ? `A reviewer asked for changes to an earlier draft.\nTheir note: ${revision.note}\nThe draft they saw:\n  ${revision.previous}\nWrite a new draft that answers the note.`
+      : '',
     `Write exactly ${count} posts, distributed across these platforms: ${platforms.join(', ')}.`,
     'Per-platform style:',
     ...platforms.map((p) => `- ${p}: ${PLATFORM_BRIEF[p] ?? 'concise and natural'}`),
@@ -105,10 +137,12 @@ function parsePosts(text) {
   return parsed.posts;
 }
 
+export { buildPrompt };
+
 export const anthropicProvider = {
   name: 'anthropic',
 
-  async generateCandidates({ book, voiceProfile, voice, grounding, history, platforms, count }) {
+  async generateCandidates({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel = null, revision = null }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
@@ -135,7 +169,7 @@ export const anthropicProvider = {
                   messages: [
                     {
                       role: 'user',
-                      content: buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count }),
+                      content: buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel, revision }),
                     },
                   ],
                 }),
