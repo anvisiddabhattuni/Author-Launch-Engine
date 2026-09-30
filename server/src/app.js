@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { config } from './config.js';
 import { router } from './routes/index.js';
 import { accessLog } from './services/dataAccess.js';
+import { metricsHandler } from './services/metrics.js';
 import { observeRequests } from './services/requestStats.js';
 import { CSP_DIRECTIVES, HSTS_MAX_AGE, enforceHttps } from './services/securityHeaders.js';
 
@@ -53,7 +54,17 @@ export function createApp({ httpsRequired = config.enforceHttps, corsOrigins = c
   // The counter above runs first, so a request that fails in the JSON parser
   // is still counted. An error rate that excludes the errors is not an error
   // rate (STORY-027).
-  app.use(express.json({ limit: '5mb' }));
+  // The raw bytes are kept for webhooks only: a signature is over the body as
+  // sent, and re-serialised JSON is not that (STORY-036).
+  app.use(express.json({
+    limit: '5mb',
+    verify: (req, _res, buf) => {
+      if (req.originalUrl.startsWith('/api/webhooks/')) req.rawBody = buf.toString('utf8');
+    },
+  }));
+  // STORY-062: Prometheus scrapes this on the API's own port. Not under /api,
+  // so the public entrance — which forwards only /api/ — never serves it.
+  app.get('/metrics', metricsHandler);
   // STORY-044: every request that reaches tenant data, recorded when it ends.
   app.use('/api', accessLog());
   app.use('/api', router);

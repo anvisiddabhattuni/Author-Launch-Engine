@@ -1,0 +1,25 @@
+# STORY-062: Prometheus for the Author Launch Engine.
+#
+# Scrapes the API's /metrics (not under /api, so never public) and evaluates
+# alerts.yml; firing alerts go to Alertmanager, which posts them to the API,
+# where each becomes an anomaly escalated to the operators (STORY-059).
+#
+# The target is `api:4000`: the Compose service and the chart's Service share
+# that name. On a laptop, point it at localhost:4000 (CI's monitoring job does).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: ale-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['api:4000']

@@ -1,3 +1,5 @@
+import { observeHttp } from './metrics.js';
+
 /**
  * What this API instance has been answering, and how (STORY-027).
  *
@@ -27,6 +29,8 @@ export function observeRequests() {
     res.on('finish', () => {
       const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
       record({ ms, status: res.statusCode });
+      // STORY-062: the same measurement, for Prometheus, by route pattern.
+      observeHttp({ method: req.method, route: req.route ? `${req.baseUrl}${req.route.path}` : null, status: res.statusCode, seconds: ms / 1000 });
     });
     nextFn();
   };

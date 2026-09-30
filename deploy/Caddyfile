@@ -1,6 +1,6 @@
 # STORY-030. The one public entrance: HTTPS for {$DOMAIN}, certificates from
 # Let's Encrypt, issued and renewed by Caddy. Everything else in the stack is
-# on the internal network only. NOT RUN — no domain or server exists yet.
+# on the internal network only. Run since 2026-09-29 (AWS EC2, sslip.io hostname).
 {$DOMAIN} {
 	encode gzip
 	# Caddy sets X-Forwarded-Proto: https; nginx (client) passes it to the API,

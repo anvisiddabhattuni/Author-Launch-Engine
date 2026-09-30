@@ -31,6 +31,8 @@ import { pool, withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
 import { emailApi } from '../services/emailApi.js';
 import { findReviewers } from '../services/reviewNotifier.js';
+import { sendSms, smsConfigured } from '../services/sms.js';
+import { config } from '../config.js';
 
 export const ACTOR = 'ApprovalNotificationAgent';
 
@@ -232,6 +234,7 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
   const failed = [];
   const skipped = [];
   const batchId = randomUUID();
+  const texts = [];
 
   for (const reviewer of reviewers) {
     // Only what this reviewer has not already been told about. A digest that
@@ -302,6 +305,22 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
       failed.push({ reviewer: reviewer.email, items: written.length, error: error.message });
     }
 
+    // And a text, for a reviewer who gave a number (STORY-037). In addition to
+    // the email, not instead: a failed text is retried on its own schedule and
+    // must not change whether the email counted.
+    if (reviewer.phone && smsConfigured()) {
+      const text = await sendSms({
+        to: reviewer.phone,
+        body: `Author Launch Engine: ${written.length} item${written.length === 1 ? '' : 's'} waiting for your approval (${author.name}). ${config.appUrl}/review`,
+        via: 'approval.notify_waiting_sms',
+        purpose: 'approval.waiting',
+        authorId,
+        reviewerId: reviewer.id,
+        batchId,
+      }).catch((error) => ({ status: 'failed', last_error: error.message }));
+      texts.push({ reviewer: reviewer.email, status: text.status, error: text.last_error ?? null });
+    }
+
     await recordAction({
       actor: ACTOR,
       action: delivered ? 'approval.notified' : 'approval.notify_failed',
@@ -341,5 +360,5 @@ export async function notifyAwaitingApproval({ authorId, notifier = emailApi }) 
     },
   });
 
-  return { notified, failed, skipped, unreachable: false, queue, batchId };
+  return { notified, failed, skipped, texts, unreachable: false, queue, batchId };
 }

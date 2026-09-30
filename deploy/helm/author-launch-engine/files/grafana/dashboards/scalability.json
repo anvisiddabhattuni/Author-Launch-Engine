@@ -1,0 +1,368 @@
+{
+  "uid": "ale-scalability",
+  "title": "Scalability",
+  "description": "STORY-062: performance metrics and the alert thresholds they are checked against.",
+  "tags": [
+    "author-launch-engine",
+    "scalability"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "API instances up",
+      "description": "How many copies of the API Prometheus can reach. Autoscaling (STORY-060) moves this.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "count(up{job=\"ale-api\"} == 1)",
+          "legendFormat": "instances"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Alerts firing",
+      "description": "Prometheus alerts currently firing (files/prometheus/alerts.yml).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)",
+          "legendFormat": "firing"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Requests per second, by instance",
+      "description": "Load and how evenly it is spread (STORY-061).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "sum by (instance_name) (rate(ale_http_request_duration_seconds_count[1m]))",
+          "legendFormat": "{{instance_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "p95 request time",
+      "description": "The time 95% of requests finish within. Alert above 1 s for 5 min.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ale_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Error rate",
+      "description": "Share of requests answered 5xx. Alert above 5% for 5 min.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "sum(rate(ale_http_request_duration_seconds_count{status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(ale_http_request_duration_seconds_count[5m])), 0.001)",
+          "legendFormat": "5xx"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Background work waiting",
+      "description": "Jobs queued, and the age of the oldest one due. Alert when the oldest passes 15 min.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "sum(ale_jobs{status=\"queued\"})",
+          "legendFormat": "queued"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "max(ale_jobs_oldest_queued_seconds)",
+          "legendFormat": "oldest (s)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Memory per instance",
+      "description": "Resident memory. Alert above 750 MiB for 10 min.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "ale_process_resident_memory_bytes",
+          "legendFormat": "{{instance_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Event loop lag (p99)",
+      "description": "How long work waits for the CPU inside each instance. Sustained lag means add instances.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "ale_nodejs_eventloop_lag_p99_seconds",
+          "legendFormat": "{{instance_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Database connections waiting",
+      "description": "Requests queued for a database connection. Alert if any for 5 min.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ale-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ale-prometheus"
+          },
+          "expr": "ale_db_pool_connections{state=\"waiting\"}",
+          "legendFormat": "{{instance_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

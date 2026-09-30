@@ -17,6 +17,7 @@ secrets:
   jwtSecret: ""
   auditKey: ""          # 32 random bytes, base64 (STORY-049)
   grafanaAdminPassword: ""   # only with dashboards.enabled (STORY-056)
+  alertmanagerToken: ""      # only with monitoring.enabled (STORY-062)
 
 api:
   replicas: 2           # load balanced by the Service from the first request
@@ -28,6 +29,7 @@ api:
     minReplicas: 2
     maxReplicas: 5
     targetCPUUtilizationPercentage: 70
+    scaleDownStabilizationSeconds: 300
   enforceHttps: false   # true behind a TLS-terminating ingress
 
 worker:
@@ -35,12 +37,28 @@ worker:
   resources:
     requests: { cpu: 50m, memory: 96Mi }
     limits: { cpu: 300m, memory: 256Mi }
+  # STORY-060: content generation runs here, so it scales too. Safe: claiming
+  # a job is safe under concurrency (STORY-065), and a job per author can't
+  # overlap itself (STORY-011).
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    scaleDownStabilizationSeconds: 300
 
 client:
   replicas: 2
   resources:
     requests: { cpu: 20m, memory: 32Mi }
     limits: { cpu: 200m, memory: 96Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+    scaleDownStabilizationSeconds: 300
 
 postgres:
   # In-cluster Postgres for a demo; a real deployment points DATABASE_URL at a
@@ -66,6 +84,17 @@ rbac:
   secretAdmins: []      # manage the Secret — nothing else
 
 # STORY-055/056: search and dashboards, off unless asked for.
+# STORY-062: Prometheus and Alertmanager, scraping the API and alerting
+# through it. Needs secrets.alertmanagerToken. Pinned by tag; digests on first pull.
+monitoring:
+  enabled: false
+  prometheusImage: prom/prometheus:v2.53.0
+  alertmanagerImage: prom/alertmanager:v0.27.0
+  retention: 7d
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
 # The index is a copy the worker fills from the logs; the app's own pods and
 # Grafana are the only things the NetworkPolicy lets reach it.
 search:

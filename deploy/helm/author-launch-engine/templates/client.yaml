@@ -13,7 +13,9 @@ metadata:
   name: {{ .Release.Name }}-client
   labels: {{- include "ale.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.client.autoscaling.enabled }}
   replicas: {{ .Values.client.replicas }}
+  {{- end }}
   strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector: { matchLabels: { app: {{ .Release.Name }}-client } }
   template:
@@ -50,3 +52,4 @@ spec:
             pathType: Prefix
             backend: { service: { name: {{ .Release.Name }}-client, port: { number: 8080 } } }
 {{- end }}
+{{ include "ale.hpa" (dict "root" . "name" "client" "spec" .Values.client) }}

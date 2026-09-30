@@ -1,0 +1,89 @@
+{{/*
+  Prometheus and Alertmanager (STORY-062), with the rules in files/prometheus.
+  Alertmanager posts to the API's /api/alerts/prometheus with the shared
+  token, and the API escalates each alert to the operators (STORY-059).
+*/}}
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-prometheus
+  labels: {{- include "ale.labels" . | nindent 4 }}
+data:
+  prometheus.yml: {{ .Files.Get "files/prometheus/prometheus.yml" | quote }}
+  alerts.yml: {{ .Files.Get "files/prometheus/alerts.yml" | quote }}
+  alertmanager.yml: {{ .Files.Get "files/prometheus/alertmanager.yml" | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-prometheus
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  selector: { app: {{ .Release.Name }}-prometheus }
+  ports: [{ port: 9090, targetPort: 9090 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-prometheus
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: {{ .Release.Name }}-prometheus } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-prometheus, ale-role: monitoring }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: prometheus
+          image: {{ .Values.monitoring.prometheusImage }}
+          args: ['--config.file=/etc/prometheus/prometheus.yml', '--storage.tsdb.retention.time={{ .Values.monitoring.retention }}']
+          ports: [{ containerPort: 9090 }]
+          readinessProbe: { httpGet: { path: /-/ready, port: 9090 } }
+          resources: {{- toYaml .Values.monitoring.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: config, mountPath: /etc/prometheus }]
+      volumes: [{ name: config, configMap: { name: {{ .Release.Name }}-prometheus, items: [{ key: prometheus.yml, path: prometheus.yml }, { key: alerts.yml, path: alerts.yml }] } }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # The name prometheus.yml points at.
+  name: alertmanager
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  selector: { app: {{ .Release.Name }}-alertmanager }
+  ports: [{ port: 9093, targetPort: 9093 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-alertmanager
+  labels: {{- include "ale.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: {{ .Release.Name }}-alertmanager } }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }}-alertmanager, ale-role: monitoring }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: alertmanager
+          image: {{ .Values.monitoring.alertmanagerImage }}
+          args: ['--config.file=/etc/alertmanager/alertmanager.yml']
+          ports: [{ containerPort: 9093 }]
+          resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { memory: 96Mi } }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alertmanager/alertmanager.yml, subPath: alertmanager.yml }
+            - { name: token, mountPath: /etc/alertmanager/token, subPath: token }
+      volumes:
+        - { name: config, configMap: { name: {{ .Release.Name }}-prometheus } }
+        - name: token
+          secret: { secretName: {{ include "ale.secretName" . }}, items: [{ key: alertmanager-token, path: token }], defaultMode: 0444 }
+{{- end }}

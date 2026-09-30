@@ -17,7 +17,9 @@ import { METRICS, SOURCES, mappingFor } from '../../src/services/searchIndex.js'
 
 const dir = new URL('../../../deploy/helm/author-launch-engine/files/grafana/', import.meta.url);
 const dashboard = JSON.parse(readFileSync(new URL('dashboards/trust.json', dir), 'utf8'));
-const datasources = YAML.parse(readFileSync(new URL('datasources/elasticsearch.yaml', dir), 'utf8')).datasources;
+const allDatasources = YAML.parse(readFileSync(new URL('datasources/elasticsearch.yaml', dir), 'utf8')).datasources;
+// The index-backed ones; Prometheus (STORY-062) is checked separately below.
+const datasources = allDatasources.filter((d) => d.type === 'elasticsearch');
 const provider = YAML.parse(readFileSync(new URL('dashboards/provider.yaml', dir), 'utf8')).providers[0];
 
 const fieldsOf = (index) => {
@@ -64,5 +66,20 @@ describe('STORY-056: the trust dashboard, as provisioned', () => {
   it('charts the metrics the story names: approval rates, audit entries, governance scores', () => {
     const titles = dashboard.panels.map((p) => p.title).join(' | ');
     for (const want of [/approval rate/i, /audit log entries/i, /governance score/i]) assert.match(titles, want);
+  });
+
+  it('STORY-062: the scalability dashboard reads Prometheus, and only metrics the API exports', async () => {
+    const scal = JSON.parse(readFileSync(new URL('dashboards/scalability.json', dir), 'utf8'));
+    assert.ok(allDatasources.some((d) => d.uid === 'ale-prometheus' && d.type === 'prometheus'));
+    const { registry } = await import('../../src/services/metrics.js');
+    const exported = new Set((await registry.getMetricsAsJSON()).map((m) => m.name));
+    for (const panel of scal.panels) {
+      for (const t of panel.targets) {
+        assert.equal(t.datasource.uid, 'ale-prometheus', panel.title);
+        for (const name of (t.expr.match(/\bale_[a-z0-9_]+/g) ?? []).map((n) => n.replace(/_(bucket|count|sum)$/, ''))) {
+          assert.ok(exported.has(name), `${panel.title}: ${name} is not exported`);
+        }
+      }
+    }
   });
 });

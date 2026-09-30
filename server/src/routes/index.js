@@ -41,6 +41,10 @@ import { auditAccessPolicy } from '../services/auditAccess.js';
 import { generateAuditReport, reportAsCsv } from '../services/auditReports.js';
 import { attentionFor } from '../services/attention.js';
 import { searchStatus, searchTenant } from '../services/searchIndex.js';
+import { smsLog } from '../services/sms.js';
+import { listAnomalies, recordPrometheusAlerts, updateAnomaly } from '../services/anomalyEscalation.js';
+import { timingSafeEqual } from 'node:crypto';
+import { billingFor, chargeSubscription, handleStripeEvent, markReviewed, paymentsToReview, verifyStripeSignature } from '../services/billing.js';
 import { governanceScore } from '../services/governanceScore.js';
 import { acknowledge, listNotifications } from '../services/securityNotifications.js';
 import { applyFeedback, feedbackFor, recordFeedback } from '../services/contentFeedback.js';
@@ -1095,18 +1099,18 @@ router.get('/authors/:authorId/reviewers', asyncRoute(async (req, res) => {
 }));
 
 router.post('/authors/:authorId/reviewers', validate(SCHEMAS.addReviewer), asyncRoute(async (req, res) => {
-  const { name, email, role = 'reviewer' } = req.body ?? {};
+  const { name, email, role = 'reviewer', phone = null } = req.body ?? {};
   if (!name?.trim() || !email?.trim()) {
     throw Object.assign(new Error('name and email are required'), { status: 400 });
   }
 
   const { rows } = await query(
-    `INSERT INTO reviewers (author_id, name, email, role)
-     VALUES ($1,$2,$3,$4)
+    `INSERT INTO reviewers (author_id, name, email, role, phone)
+     VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (author_id, email) DO UPDATE
-       SET name = EXCLUDED.name, role = EXCLUDED.role, active = TRUE
+       SET name = EXCLUDED.name, role = EXCLUDED.role, phone = EXCLUDED.phone, active = TRUE
      RETURNING *`,
-    [Number(req.params.authorId), name.trim(), email.trim(), role],
+    [Number(req.params.authorId), name.trim(), email.trim(), role, phone || null],
   );
 
   await recordAction({
@@ -1823,6 +1827,69 @@ router.get('/authors/:authorId/attention', requirePermission(PERMISSIONS.AUDIT_R
  */
 router.get('/authors/:authorId/governance-score', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.governanceScore), asyncRoute(async (req, res) => {
   res.json(await governanceScore({ authorId: req.params.authorId, days: req.query.days }));
+}));
+
+// --- Anomalies, escalated to a person (STORY-059 / REQ-015, REQ-006) ---
+
+/** A tenant's anomalies with their status; system-wide ones too for those who read every tenant. */
+router.get('/authors/:authorId/anomalies', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
+  res.json(await listAnomalies({ authorId: req.params.authorId, user: req.user }));
+}));
+
+/** Acknowledge, resolve or dismiss — the service decides who may. */
+router.post('/anomalies/:id/:action(acknowledge|resolve|dismiss)', validate(SCHEMAS.anomalyAction), asyncRoute(async (req, res) => {
+  res.json(await updateAnomaly({ id: req.params.id, action: req.params.action, note: req.body.note ?? '', user: req.user }));
+}));
+
+/**
+ * Alertmanager's webhook (STORY-062). No session: Alertmanager sends the shared
+ * ALERTMANAGER_TOKEN as a bearer token, and nothing is believed without it.
+ */
+router.post('/alerts/prometheus', validate(SCHEMAS.prometheusAlerts), asyncRoute(async (req, res) => {
+  const given = Buffer.from(String(req.get('authorization') ?? '').replace(/^Bearer /, ''));
+  const want = Buffer.from(config.alertmanagerToken);
+  if (!config.alertmanagerToken || given.length !== want.length || !timingSafeEqual(given, want)) {
+    return res.status(401).json({ error: 'Alert refused: missing or wrong ALERTMANAGER_TOKEN' });
+  }
+  res.json(await recordPrometheusAlerts(req.body));
+}));
+
+// --- Text messages through Twilio (STORY-037 / REQ-009, REQ-013) ---
+
+/** Every text sent for this tenant, with its attempts and outcome. Numbers are masked. */
+router.get('/authors/:authorId/sms', asyncRoute(async (req, res) => {
+  res.json(await smsLog(Number(req.params.authorId)));
+}));
+
+// --- Subscription payments through Stripe (STORY-036 / REQ-009, REQ-012) ---
+
+/** An author's subscription and payments — their own, by the tenant rule. */
+router.get('/authors/:authorId/billing', asyncRoute(async (req, res) => {
+  res.json(await billingFor(Number(req.params.authorId)));
+}));
+
+/** Charge the subscription with a Stripe PaymentMethod. Admins only: it moves money. */
+router.post('/authors/:authorId/billing/charge', requirePermission(PERMISSIONS.TENANT_MANAGE), validate(SCHEMAS.chargeSubscription), asyncRoute(async (req, res) => {
+  const result = await chargeSubscription({ authorId: Number(req.params.authorId), paymentMethod: req.body.paymentMethod, requestedBy: req.user.name });
+  // A declined card is a completed request with a failed payment, not a server error.
+  res.status(201).json(result);
+}));
+
+/** Failed payments no one has looked at yet (the story's escalation). */
+router.get('/billing/review', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (_req, res) => {
+  res.json({ payments: await paymentsToReview() });
+}));
+
+router.post('/billing/payments/:id/review', requirePermission(PERMISSIONS.TENANT_MANAGE), asyncRoute(async (req, res) => {
+  res.json(await markReviewed({ paymentId: req.params.id, reviewer: req.user.name }));
+}));
+
+/** Stripe's webhook. No session: believed only if Stripe's signature over the raw body checks out. */
+router.post('/webhooks/stripe', validate(SCHEMAS.stripeWebhook), asyncRoute(async (req, res) => {
+  const check = verifyStripeSignature(req.rawBody ?? '', req.get('stripe-signature'));
+  if (!check.ok) return res.status(400).json({ error: `Webhook refused: ${check.reason}` });
+  // Acted on as signed: the raw bytes Stripe signed, not a re-parsed copy.
+  res.json(await handleStripeEvent(JSON.parse(req.rawBody)));
 }));
 
 // --- The search index (STORY-055 / REQ-015) ---

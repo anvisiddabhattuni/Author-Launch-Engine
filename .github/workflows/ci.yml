@@ -302,6 +302,138 @@ jobs:
             api.log
           if-no-files-found: ignore
 
+  # STORY-060. Horizontal scaling, proven on a real Kubernetes cluster (kind)
+  # on every push: the chart installs, and under load the API autoscaler adds
+  # pods. EKS (deploy/eks/cluster.yaml) is the same chart on a paid cluster.
+  kubernetes:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with: { cluster_name: ale }
+      - name: metrics-server (what autoscalers read)
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+      - name: Build and load the images
+        run: |
+          docker build -f server/Dockerfile -t ale-api:ci .
+          docker build -f server/Dockerfile.worker -t ale-worker:ci .
+          docker build -f client/Dockerfile -t ale-client:ci .
+          kind load docker-image ale-api:ci ale-worker:ci ale-client:ci --name ale
+      - name: Install the chart
+        run: |
+          kubectl create namespace ale
+          helm install ale deploy/helm/author-launch-engine -n ale --wait --timeout 8m \
+            --set image.tag=ci --set image.pullPolicy=Never \
+            --set secrets.appDbPassword=ci-app --set secrets.ownerDbPassword=ci-owner \
+            --set secrets.jwtSecret=ci-only-jwt-secret --set secrets.auditKey=$(openssl rand -base64 32) \
+            --set api.autoscaling.maxReplicas=4 --set api.autoscaling.targetCPUUtilizationPercentage=30
+          kubectl -n ale get hpa
+      - name: STORY-060 — under load, more pods are deployed automatically
+        run: |
+          before=$(kubectl -n ale get deploy ale-api -o jsonpath='{.status.replicas}')
+          echo "API pods before load: $before"
+          kubectl -n ale run load --image=busybox:1.36 --restart=Never --labels=ale-role=web -- \
+            sh -c 'for w in 1 2 3 4 5 6 7 8; do (while true; do wget -qO- http://api:4000/api/ready >/dev/null 2>&1; done) & done; wait'
+          for i in $(seq 1 40); do
+            n=$(kubectl -n ale get deploy ale-api -o jsonpath='{.status.replicas}')
+            echo "t+$((i*10))s replicas=$n $(kubectl -n ale get hpa ale-api --no-headers | awk '{print $3}')"
+            if [ "$n" -gt "$before" ]; then kubectl -n ale describe hpa ale-api | grep -i rescale; exit 0; fi
+            sleep 10
+          done
+          echo "the autoscaler did not add pods under load"; kubectl -n ale describe hpa ale-api; exit 1
+
+  # STORY-061. NGINX spreads requests evenly across API instances and routes
+  # around one that dies. The same test ran on the AWS server by hand.
+  loadbalancer:
+    runs-on: ubuntu-latest
+    needs: unit
+    env:
+      APP_DB_PASSWORD: ci-app-password
+      JWT_SECRET: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v5
+      - name: Three API instances behind nginx
+        run: |
+          mkdir -p server/.keys && openssl rand -base64 32 > server/.keys/audit.key && sudo chown 10001:10001 server/.keys/audit.key && sudo chmod 400 server/.keys/audit.key
+          printf 'services:\n  postgres: { ports: !reset [] }\n  api:\n    ports: !reset []\n    deploy: { replicas: 3 }\n' > lb.yml
+          docker compose -f docker-compose.yml -f lb.yml up -d --build
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/api/ready >/dev/null && break; sleep 2; done
+          sleep 5; docker compose -f docker-compose.yml -f lb.yml ps
+      - name: STORY-061 — evenly, and around a failed instance
+        run: |
+          count() { for i in $(seq $1); do curl -s http://127.0.0.1:8080/api/ready | grep -o '"instance":"[^"]*"'; done | sort | uniq -c; }
+          echo "== 60 requests"; count 60 | tee even.txt
+          [ "$(wc -l < even.txt)" -eq 3 ] || { echo "not all three instances answered"; exit 1; }
+          awk '{ if ($1 < 18 || $1 > 22) bad=1 } END { exit bad }' even.txt || { echo "not even"; exit 1; }
+          victim=$(docker ps --filter name=api --format '{{.Names}}' | head -1)
+          (sleep 1; docker kill "$victim") &
+          ok=0; for i in $(seq 1000); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/ready)" = 200 ] && ok=$((ok+1)); done; wait
+          echo "while $victim was killed: $ok of 1000 answered"
+          [ "$ok" -ge 995 ] || exit 1
+
+  # STORY-062. The alert rules fire when they should (promtool), Prometheus
+  # scrapes the API, and an alert travels Alertmanager → API → an anomaly
+  # escalated to the operators.
+  monitoring:
+    runs-on: ubuntu-latest
+    needs: unit
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: author_launch_engine }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d author_launch_engine"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/author_launch_engine
+      DATABASE_URL: postgres://ale_app_login:ci-app-password@localhost:5432/author_launch_engine
+      APP_DB_PASSWORD: ci-app-password
+      JWT_SECRET: ci-only-not-a-secret
+      ALERTMANAGER_TOKEN: ci-alertmanager-token
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: '22', cache: npm }
+      - run: npm ci && npm run db:reset
+      - name: The rules fire when they should, and not when they should not
+        run: |
+          docker run --rm -v "$PWD/deploy/helm/author-launch-engine/files/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v2.53.0 check rules alerts.yml
+          docker run --rm -v "$PWD/deploy/helm/author-launch-engine/files/prometheus:/p" -w /p --entrypoint promtool prom/prometheus:v2.53.0 test rules alerts.test.yml
+      - name: Prometheus scrapes the API
+        run: |
+          (npm start --workspace server > api.log 2>&1 &)
+          for i in $(seq 1 30); do curl -sf localhost:4000/api/health >/dev/null && break; sleep 1; done
+          mkdir -p /tmp/prom && cp deploy/helm/author-launch-engine/files/prometheus/*.yml /tmp/prom/
+          sed -i "s/'api:4000'/'localhost:4000'/; s/'alertmanager:9093'/'localhost:9093'/" /tmp/prom/prometheus.yml
+          docker run -d --name prom --network host -v /tmp/prom:/etc/prometheus prom/prometheus:v2.53.0 --config.file=/etc/prometheus/prometheus.yml
+          for i in $(seq 1 30); do
+            up=$(curl -s 'localhost:9090/api/v1/query?query=up%7Bjob%3D%22ale-api%22%7D' | grep -o '"value":\[[^]]*"1"\]' || true)
+            [ -n "$up" ] && { echo "target up: $up"; break; }; sleep 2
+          done
+          [ -n "$up" ] || { curl -s localhost:9090/api/v1/targets; exit 1; }
+          curl -s localhost:9090/api/v1/rules | grep -o '"name":"Ale[A-Za-z]*"' | sort -u
+      - name: An alert reaches a person, through Alertmanager and the API
+        run: |
+          printf '%s' "$ALERTMANAGER_TOKEN" > /tmp/prom/token
+          sed "s#http://api:4000#http://localhost:4000#; s#/etc/alertmanager/token#/etc/alertmanager/token#" /tmp/prom/alertmanager.yml > /tmp/prom/am.yml
+          docker run -d --name am --network host -v /tmp/prom/am.yml:/etc/alertmanager/alertmanager.yml -v /tmp/prom/token:/etc/alertmanager/token prom/alertmanager:v0.27.0 --config.file=/etc/alertmanager/alertmanager.yml
+          for i in $(seq 1 20); do curl -sf localhost:9093/-/ready && break; sleep 1; done
+          curl -s -XPOST localhost:9093/api/v2/alerts -H 'content-type: application/json' \
+            -d '[{"labels":{"alertname":"AleJobBacklog","severity":"high","instance_name":"ci"},"annotations":{"summary":"Background work is falling behind (CI)"}}]'
+          for i in $(seq 1 60); do
+            n=$(psql "$MIGRATION_DATABASE_URL" -tAc "SELECT COUNT(*) FROM anomaly_events WHERE detector = 'prometheus.AleJobBacklog' AND escalated_at IS NOT NULL")
+            [ "$n" -ge 1 ] && { echo "alert recorded and escalated"; psql "$MIGRATION_DATABASE_URL" -c "SELECT detector, summary, escalated_to FROM anomaly_events"; exit 0; }
+            sleep 2
+          done
+          docker logs am | tail -20; tail -30 api.log; exit 1
+
   images:
     runs-on: ubuntu-latest
     needs: test

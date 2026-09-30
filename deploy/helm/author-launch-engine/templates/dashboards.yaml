@@ -62,6 +62,7 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ include "ale.secretName" . }}, key: grafana-admin-password } }
             - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "false" }
             - { name: ELASTICSEARCH_URL, value: "http://{{ .Release.Name }}-search:9200" }
+            - { name: PROMETHEUS_URL, value: "http://{{ .Release.Name }}-prometheus:9090" }
           ports: [{ containerPort: 3000 }]
           readinessProbe:
             httpGet: { path: /api/health, port: 3000 }

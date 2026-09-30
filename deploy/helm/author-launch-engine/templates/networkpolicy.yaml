@@ -29,4 +29,6 @@ spec:
         - podSelector: { matchLabels: { ale-role: web } }
         - podSelector: { matchLabels: { ale-role: app } }
         - podSelector: { matchLabels: { ale-role: dashboards } }
+        # STORY-062: Prometheus scrapes /metrics; Alertmanager posts alerts.
+        - podSelector: { matchLabels: { ale-role: monitoring } }
       ports: [{ port: 4000 }]

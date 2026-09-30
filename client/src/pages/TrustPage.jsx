@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api.js';
-import { AttentionCard, GovernanceScoreCard, SearchCard } from './TrustLive.jsx';
+import { AnomaliesCard, AttentionCard, GovernanceScoreCard, SearchCard } from './TrustLive.jsx';
 
 /**
  * The trust dashboard (STORY-014).
@@ -111,6 +111,9 @@ export function TrustPage({ author, user }) {
   return (
     <>
       {/* STORY-058 */}
+      {/* STORY-059: first on the page — something here is waiting on a person. */}
+      <AnomaliesCard authorId={author.id} user={user} />
+
       <GovernanceScoreCard authorId={author.id} />
 
       <div className="card">

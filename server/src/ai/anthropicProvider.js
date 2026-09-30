@@ -137,7 +137,7 @@ function parsePosts(text) {
   return parsed.posts;
 }
 
-export { buildPrompt };
+export { buildPrompt, parsePosts };
 
 export const anthropicProvider = {
   name: 'anthropic',

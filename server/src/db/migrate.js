@@ -62,7 +62,9 @@ async function applyMigrations() {
       )
     `);
 
-    const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
+    // Hidden files excluded: macOS tar packs '._name.sql' metadata beside each
+    // file, which sorts first and is not SQL (found deploying STORY-061).
+    const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql') && !f.startsWith('.')).sort();
     const { rows } = await client.query('SELECT filename FROM schema_migrations');
     const applied = new Set(rows.map((r) => r.filename));
 

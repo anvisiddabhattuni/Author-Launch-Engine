@@ -1,0 +1,19 @@
+# STORY-062: every alert goes to the API, which records it as an anomaly and
+# escalates it to the operators by email (STORY-059) — one path for "a person
+# is needed", whichever monitor noticed. The token is ALERTMANAGER_TOKEN,
+# mounted as a file rather than written here.
+route:
+  receiver: ale-api
+  group_by: [alertname, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+receivers:
+  - name: ale-api
+    webhook_configs:
+      - url: http://api:4000/api/alerts/prometheus
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/token

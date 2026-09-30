@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closePool } from '../db/pool.js';
 import { recordStart, recordStop } from '../services/deployment.js';
 import { startHeartbeat, startMonitor } from '../services/healthMonitoring.js';
+import { startAnomalyScan } from '../services/anomalyEscalation.js';
 
 import { tick } from './queue.js';
 
@@ -49,12 +50,15 @@ if (config.messageTransport === 'amqp') {
 let deployment = null;
 let stopHeartbeat = () => {};
 let stopMonitor = () => {};
+let stopAnomalies = () => {};
 const register = () =>
   recordStart({ version, commit: process.env.GIT_COMMIT ?? '', component: 'worker' });
 try {
   deployment = await register();
   stopHeartbeat = startHeartbeat({ deploymentId: deployment.id, reregister: register });
   stopMonitor = startMonitor({});
+  // STORY-059: anomalies found and escalated within a scan (a minute by default).
+  stopAnomalies = startAnomalyScan({});
 } catch (error) {
   // Same rule as the API: losing the record is bad, refusing to work is worse.
   console.error(`[worker] could not record this instance: ${error.message}`);
@@ -104,6 +108,7 @@ async function shutdown(signal) {
   console.log(`[worker] ${signal} received — finishing the job in hand`);
   stopHeartbeat();
   stopMonitor();
+  stopAnomalies();
   await broker?.connection.close().catch(() => {});
   try {
     await current;

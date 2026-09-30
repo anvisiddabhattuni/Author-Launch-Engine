@@ -145,6 +145,33 @@ export const OUTBOUND_PATHS = [
       'later attempts join the open alert (STORY-052).',
   },
   {
+    id: 'trust.escalate_anomaly',
+    kind: EXEMPT,
+    module: 'services/anomalyEscalation.js',
+    sends: 'an email telling security officers and the tenant\'s reviewers that an anomaly was detected, with its details',
+    why:
+      'Not publishing anything: it announces a finding to the people who must look at it. Holding an escalation ' +
+      'for approval would be circular — the escalation is how a human gets involved (STORY-059).',
+  },
+  {
+    id: 'approval.notify_waiting_sms',
+    kind: EXEMPT,
+    module: 'agents/approvalNotificationAgent.js',
+    sends: 'a short text to a reviewer saying how many items wait for their approval, with a link',
+    why:
+      'Not publishing anything: it announces work awaiting a decision to a reviewer the tenant named, and ' +
+      'gating it on approval would be circular — the text exists to get the approval (STORY-037).',
+  },
+  {
+    id: 'billing.notify_failure',
+    kind: EXEMPT,
+    module: 'services/billing.js',
+    sends: 'an email telling an author their own subscription payment failed, and why',
+    why:
+      'Not publishing anything: it carries no tenant content — an amount and the card issuer\'s reason — to the ' +
+      'author it is about. Holding it for approval would hide a failed payment from the one person who can fix it (STORY-036).',
+  },
+  {
     id: 'tenant.welcome',
     kind: EXEMPT,
     module: 'services/invites.js',

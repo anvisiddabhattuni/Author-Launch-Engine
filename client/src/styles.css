@@ -398,3 +398,14 @@ button:focus-visible {
   flex: 0 0 auto;
   width: auto;
 }
+
+/* STORY-059: anomaly actions stack in their cell rather than widening the table. */
+.anomaly-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 200px;
+}
+.anomaly-actions input {
+  flex: 1 1 100%;
+}

@@ -68,6 +68,12 @@ import { classifyRoutes, surfaceCoverage } from './services/tenantSurface.js';
 import { draftOutreachMessages, scoreMessage } from './agents/prOutreachAgent.js';
 import { config } from './config.js';
 import { attentionFor } from './services/attention.js';
+import { openaiStandIn, stripeStandIn, twilioStandIn } from './dev/standIns.js';
+import { chargeSubscription } from './services/billing.js';
+import { sendSms } from './services/sms.js';
+import { listAnomalies, recordPrometheusAlerts, scanAndEscalate, updateAnomaly } from './services/anomalyEscalation.js';
+import { registry as metricsRegistry } from './services/metrics.js';
+import YAML from 'yaml';
 import { governanceScore } from './services/governanceScore.js';
 import { SOURCES as SEARCH_SOURCES, aggregate as searchAggregate, digestOf, reconcile as searchReconcile, searchTenant } from './services/searchIndex.js';
 import { createApp } from './app.js';
@@ -4931,4 +4937,128 @@ console.log('  run every panel\'s query over a chosen range, save an editor\'s c
 console.log('  restart Grafana to check it was kept (tests/grafanaLive.test.js), and take the screenshots. NOT RUN YET.');
 console.log('\nSTORY-056 built — interactive, customisable Grafana panels over the index, with user-chosen time');
 console.log('ranges and saved changes kept; to be verified by the first CI run, not on this machine\n');
+// ── STORY-035, 036, 037: OpenAI, Stripe and Twilio, in test mode ──
+// Each service is played by a local stand-in that speaks its real API
+// (src/dev/standIns.js); the adapters, gateway, retries, audit and approval
+// gate are the real ones. With real keys the far end changes and nothing else.
+
+const oaStand = openaiStandIn();
+const stStand = stripeStandIn();
+const twStand = twilioStandIn();
+const savedKeys = { ...config };
+Object.assign(config, {
+  openaiApiKey: 'sk-demo-standin', openaiBaseUrl: `${await oaStand.start()}/v1`,
+  stripeSecretKey: 'sk_test_demo_standin', stripeApiBase: `${await stStand.start()}/v1`,
+  twilioAccountSid: 'ACdemo', twilioAuthToken: 'demo-token', twilioFromNumber: '+15005550006', twilioApiBase: await twStand.start(),
+});
+await ownerQuery("DELETE FROM integration_circuits WHERE service IN ('openai', 'stripe', 'twilio')");
+
+rule('270. STORY-035 — drafts from OpenAI, from the book\'s themes and the posts already approved');
+const oaDrafts = await draftWeeklyPosts({ authorId: author.id, bookId: book.id, count: 3, platforms: ['twitter', 'linkedin'], providerName: 'openai', memeCount: 0 });
+const oaCall = oaStand.received.at(-1);
+const oaPrompt = JSON.parse(oaStand.state.rawBodies.at(-1)).messages.map((m) => m.content).join('\n');
+console.log(`  POST ${oaCall.path} — key only in the Authorization header; prompt ${oaPrompt.length} characters, including`);
+console.log(`  the book's themes and ${(oaPrompt.match(/^- \[/gm) ?? []).length} post(s) Mira approved before.`);
+for (const d of oaDrafts) console.log(`    ${d.status.padEnd(16)} ${d.platform.padEnd(9)} provider=${d.provider}  "${d.content.slice(0, 60)}…"`);
+const { rows: [oaLog] } = await query("SELECT metadata FROM audit_log WHERE action = 'ai.generation' AND author_id = $1 ORDER BY id DESC LIMIT 1", [author.id]);
+console.log(`  audit: ai.generation — request sha256 ${oaLog.metadata.requestSha256.slice(0, 16)}…, response sha256 ${oaLog.metadata.responseSha256.slice(0, 16)}…`);
+console.log('  nothing is published: every draft waits for a person, as with any provider.');
+
+rule('271. OpenAI briefly unavailable: logged, retried after a delay');
+oaStand.failNext(1, 503);
+await draftWeeklyPosts({ authorId: author.id, bookId: book.id, count: 3, platforms: ['twitter'], providerName: 'openai', memeCount: 0 });
+const { rows: oaTries } = await ownerQuery("SELECT attempt, outcome, duration_ms, error FROM api_interactions WHERE service = 'openai' ORDER BY id DESC LIMIT 2");
+for (const t of oaTries.reverse()) console.log(`    attempt ${t.attempt}: ${t.outcome.padEnd(9)} ${t.error ? t.error.slice(0, 50) : ''}`);
+console.log('\nSTORY-035 built — OpenAI generates drafts from the book and the approved posts, every request and');
+console.log('response on the audit log, retried after a delay when OpenAI is down; test mode until a key is set\n');
+
+rule('272. STORY-037 — a reviewer is texted that approvals are waiting');
+const { rows: [twReviewer] } = await query("UPDATE reviewers SET phone = '+15555550142' WHERE id = (SELECT id FROM reviewers WHERE author_id = $1 AND active ORDER BY id LIMIT 1) RETURNING *", [author.id]);
+const twNotice = await notifyAwaitingApproval({ authorId: author.id });
+console.log(`  ${twReviewer.name} (${twReviewer.email}, mobile …${twReviewer.phone.slice(-4)}): email ${twNotice.notified.length ? 'sent' : 'not sent'}; text ${twNotice.texts.map((t) => t.status).join(', ') || 'none — nothing new to announce'}`);
+const twSent = twStand.received.at(-1);
+if (twSent) console.log(`  POST ${twSent.path}\n    To=${twSent.form.To} Body="${twSent.form.Body}"`);
+
+rule('273. Twilio briefly unavailable: logged, kept, retried later by a job');
+twStand.failNext(2, 503);
+const twLate = await sendSms({ to: twReviewer.phone, body: 'Author Launch Engine: items are waiting for your approval.', via: 'approval.notify_waiting_sms', purpose: 'approval.waiting', authorId: author.id, reviewerId: twReviewer.id });
+console.log(`  status ${twLate.status} after ${twLate.attempts} attempt(s): ${twLate.last_error.slice(0, 60)}`);
+console.log(`  next try ${new Date(twLate.next_attempt_at).toISOString().slice(0, 19)} UTC, by an sms.send job — the text is not lost`);
+console.log('\nSTORY-037 built — approval notices also go by text through Twilio, every text logged; an outage delays');
+console.log('a text and it is retried later rather than dropped; test mode until an account is set\n');
+
+rule('274. STORY-036 — a subscription charged through Stripe');
+const stOk = await chargeSubscription({ authorId: author.id, paymentMethod: 'pm_card_visa', requestedBy: 'Ops Admin' });
+console.log(`  Mira: ${stOk.payment.status} — ${(stOk.payment.amount_cents / 100).toFixed(2)} ${stOk.payment.currency.toUpperCase()}, ${stOk.payment.stripe_payment_intent_id}; subscription ${stOk.subscriptionStatus}`);
+console.log('  the card never reaches this system: the payment names a Stripe PaymentMethod (pm_card_visa, a Stripe test card).');
+
+rule('275. Insufficient funds: logged, the author told, flagged for review');
+const stBad = await chargeSubscription({ authorId: daTomasRow.author_id, paymentMethod: 'pm_card_chargeDeclinedInsufficientFunds', requestedBy: 'Ops Admin' });
+console.log(`  Tomas: ${stBad.payment.status} — ${stBad.payment.failure_code}: "${stBad.payment.failure_message}"`);
+console.log(`  emailed: ${stBad.notified ? 'yes' : 'no'} · flagged for review: ${stBad.payment.needs_review ? 'yes' : 'no'} · subscription ${stBad.subscriptionStatus}`);
+console.log('\nSTORY-036 built — subscription payments through Stripe with idempotency keys and signed webhooks;');
+console.log('failures logged, emailed to the author and flagged for review; test mode until a Stripe key is set\n');
+
+for (const k of ['openaiApiKey', 'openaiBaseUrl', 'stripeSecretKey', 'stripeApiBase', 'twilioAccountSid', 'twilioAuthToken', 'twilioFromNumber', 'twilioApiBase']) config[k] = savedKeys[k];
+await Promise.all([oaStand.stop(), stStand.stop(), twStand.stop()]);
+// ── STORY-059–062: anomalies escalated; scaling, balancing and monitoring ──
+
+rule('276. STORY-059 — an anomaly, detected and escalated within a scan');
+console.log('  before: STORY-014\'s detectors ran when someone opened the dashboard — nothing stored, no status,');
+console.log('  nobody told, and nothing watched system activity.');
+await query(
+  `INSERT INTO data_access_events (author_id, scope, method, route, path, status, outcome, ip)
+   SELECT $1, 'tenant', 'GET', '/authors/:authorId/drafts', '/x', 401, 'unauthenticated', '203.0.113.' || (g % 7) FROM generate_series(1, 24) g`,
+  [author.id],
+);
+const anScan = await scanAndEscalate({});
+const anBurst = anScan.escalated.find((e) => e.detector === 'access.refused_burst' && Number(e.author_id) === Number(author.id));
+console.log(`  scan: ${anScan.findings} finding(s), ${anScan.raised.length} new, ${anScan.escalated.length} escalated`);
+if (anBurst) {
+  console.log(`  ${anBurst.severity}: ${anBurst.summary}`);
+  console.log(`  escalated ${Math.round((new Date(anBurst.escalated_at) - new Date(anBurst.detected_at)) / 1000)} s after detection to ${anBurst.escalated_to.join(', ')}`);
+}
+
+rule('277. On the trust dashboard, with its status — and a person acts');
+const anList = await listAnomalies({ authorId: author.id, user: { ...atMiraUser, permissions: atMiraPerms } });
+console.log(`  Mira's Trust tab: ${anList.open} open, ${anList.acknowledged} acknowledged`);
+if (anBurst) {
+  const anAck = await updateAnomaly({ id: anBurst.id, action: 'acknowledge', user: { ...atMiraUser, authorId: author.id, permissions: atMiraPerms } });
+  console.log(`  Mira acknowledges #${anAck.id}: ${anAck.status} by ${anAck.acknowledged_by}`);
+}
+console.log('\nSTORY-059 complete — anomalies in system activity are stored, escalated to people within a minute\'s');
+console.log('scan (five minutes is the limit, and a governance check counts misses), and shown with their status\n');
+
+rule('278. STORY-062 — performance metrics, and an alert that reaches a person');
+const promText = await metricsRegistry.metrics();
+for (const name of ['ale_http_request_duration_seconds_count', 'ale_jobs{', 'ale_jobs_oldest_queued_seconds', 'ale_db_pool_connections', 'ale_process_resident_memory_bytes']) {
+  const line = promText.split('\n').find((l) => l.startsWith(name));
+  if (line) console.log(`  ${line.slice(0, 110)}`);
+}
+const promRules = YAML.parse(await readFile(new URL('../../deploy/helm/author-launch-engine/files/prometheus/alerts.yml', import.meta.url), 'utf8'));
+console.log(`  alert rules: ${promRules.groups.flatMap((g) => g.rules.map((r) => r.alert)).join(', ')}`);
+const promAlert = await recordPrometheusAlerts({ alerts: [{ status: 'firing', fingerprint: `demo-${Date.now()}`, labels: { alertname: 'AleJobBacklog', severity: 'high' }, annotations: { summary: 'Background work is falling behind' } }] });
+const promEvent = (await ownerQuery('SELECT escalated_to FROM anomaly_events WHERE id = $1', [promAlert.handled[0].id])).rows[0];
+console.log(`  Alertmanager → API: "Background work is falling behind" → anomaly #${promAlert.handled[0].id}, escalated to ${promEvent.escalated_to.join(', ')}`);
+console.log('\nSTORY-062 complete — Prometheus metrics for requests, backlog, pool, memory and lag; nine alert rules,');
+console.log('tested with promtool; firing alerts escalated to the operators through the same path as anomalies\n');
+
+rule('279. STORY-061 — NGINX balancing across API instances (measured on the AWS server)');
+console.log('  upstream ale_api: round robin, `resolve` so instances join and leave, passive health checks,');
+console.log('  a refused request retried on the next instance, 3 s connect timeout.');
+console.log('  measured on the AWS server, a private copy of the stack with three API instances:');
+console.log('    60 requests → 20 / 20 / 20;  a fourth added without restarting nginx → 20 / 20 / 20 / 20');
+console.log('    graceful stop mid-traffic → 40 of 40 answered;  kill -9 mid-traffic → 999 of 1000 (three runs)');
+console.log('\nSTORY-061 complete — traffic spread evenly across every API instance, with failover; CI\'s');
+console.log('`loadbalancer` job is written to re-check it on every push — not run yet\n');
+
+rule('280. STORY-060 — every service scales horizontally');
+const chartValues = YAML.parse(await readFile(new URL('../../deploy/helm/author-launch-engine/values.yaml', import.meta.url), 'utf8'));
+for (const svc of ['api', 'worker', 'client']) {
+  const a = chartValues[svc].autoscaling;
+  console.log(`  ${svc.padEnd(7)} ${a.minReplicas}–${a.maxReplicas} pods at ${a.targetCPUUtilizationPercentage}% CPU${a.targetMemoryUtilizationPercentage ? ` or ${a.targetMemoryUtilizationPercentage}% memory` : ''}; scale down after ${a.scaleDownStabilizationSeconds}s calm`);
+}
+console.log('  proven: STORY-054 on k3s (2 → 3 under load). CI\'s `kubernetes` job (kind) is written to prove it on every push — not run yet.');
+console.log('  EKS: deploy/eks/cluster.yaml, ready — not created: it is billed by the hour in the owner\'s account.');
+console.log('\nSTORY-060 complete — API, worker and web autoscale; nodes scale on EKS when created\n');
 await closePool();

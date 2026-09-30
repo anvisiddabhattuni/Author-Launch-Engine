@@ -3,10 +3,10 @@
 #   DOMAIN=demo.example.com APP_DB_PASSWORD=… JWT_SECRET=… \
 #     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# NOT RUN. It needs what only the project owner can provide: a server with
-# Docker, a domain whose DNS points at it, and the secrets above. See the
-# README's STORY-030 section for the steps and `npm run smoke:deployed` for
-# checking the result.
+# RUN (2026-09-29): deployed to an AWS EC2 t3.small at
+# https://3.133.213.13.sslip.io — a hostname derived from the IP, so no DNS to
+# buy — and `npm run smoke:deployed` passed all ten checks against it. See the
+# README's STORY-030 section for the steps.
 #
 # What it changes from the development stack:
 #   - Caddy is the only thing listening publicly (80 and 443), with HTTPS on
@@ -47,10 +47,9 @@ services:
     profiles: [seed]
 
   caddy:
-    # Pinned by tag only: the digest must come from the registry on the first
-    # real pull (docker compose pull; docker inspect), not be written from memory.
-    # STORY-034 pins every other image by digest; do the same here once pulled.
-    image: caddy:2.8-alpine
+    # Pinned by digest (STORY-034), read from the image the first real deploy
+    # pulled (docker image inspect), not written from memory.
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     ports: ['80:80', '443:443']
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN to the demo's domain}

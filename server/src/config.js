@@ -25,6 +25,12 @@ export const config = {
   aiProvider: process.env.AI_PROVIDER ?? 'stub',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
+  // STORY-035. The key comes from the environment only — on the server, the
+  // mode-600 .env beside the stack — and is never logged. The base URL is
+  // configurable so the tests can stand a local server in for OpenAI.
+  openaiApiKey: process.env.OPENAI_API_KEY ?? '',
+  openaiModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+  openaiBaseUrl: (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, ''),
   confidenceEscalationThreshold: number(process.env.CONFIDENCE_ESCALATION_THRESHOLD, 0.7),
   minPostsPerWeek: number(process.env.MIN_POSTS_PER_WEEK, 3),
   // At least this many meme candidates per batch (STORY-066). The acceptance
@@ -152,6 +158,37 @@ export const config = {
   // session, one address) inside the window flags it and tells the admins.
   accessAlertThreshold: number(process.env.ACCESS_ALERT_THRESHOLD, 5),
   accessAlertMinutes: number(process.env.ACCESS_ALERT_MINUTES, 10),
+  // STORY-036: Stripe. The secret key only in the server's environment; a
+  // `sk_test_` key (or the stand-in) is test mode, where no real card is charged.
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? '',
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? '',
+  stripeApiBase: (process.env.STRIPE_API_BASE ?? 'https://api.stripe.com/v1').replace(/\/+$/, ''),
+  subscriptionPriceCents: number(process.env.SUBSCRIPTION_PRICE_CENTS, 2900),
+  subscriptionCurrency: (process.env.SUBSCRIPTION_CURRENCY ?? 'usd').toLowerCase(),
+  // STORY-037: Twilio. Empty means no texts are sent (email still is).
+  twilioAccountSid: process.env.TWILIO_ACCOUNT_SID ?? '',
+  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN ?? '',
+  twilioFromNumber: process.env.TWILIO_FROM_NUMBER ?? '',
+  twilioApiBase: (process.env.TWILIO_API_BASE ?? 'https://api.twilio.com').replace(/\/+$/, ''),
+  // After the gateway's quick retries, a text waits this long (doubling each
+  // time) and is tried again, up to SMS_MAX_ATTEMPTS in all.
+  smsRetrySeconds: number(process.env.SMS_RETRY_SECONDS, 60),
+  smsMaxAttempts: number(process.env.SMS_MAX_ATTEMPTS, 4),
+  // STORY-059: anomaly detection. The worker scans this often; anything found
+  // is escalated in the same scan, well inside ANOMALY_ESCALATE_MINUTES.
+  anomalyScanSeconds: number(process.env.ANOMALY_SCAN_SECONDS, 60),
+  anomalyEscalateMinutes: number(process.env.ANOMALY_ESCALATE_MINUTES, 5),
+  anomalyWindowMinutes: number(process.env.ANOMALY_WINDOW_MINUTES, 10),
+  anomalyRefusedThreshold: number(process.env.ANOMALY_REFUSED_THRESHOLD, 20),
+  anomalyJobFailures: number(process.env.ANOMALY_JOB_FAILURES, 3),
+  anomalyPaymentFailures: number(process.env.ANOMALY_PAYMENT_FAILURES, 3),
+  anomalyBulkApprovals: number(process.env.ANOMALY_BULK_APPROVALS, 10),
+  anomalyVolumeFactor: number(process.env.ANOMALY_VOLUME_FACTOR, 5),
+  anomalyVolumeMin: number(process.env.ANOMALY_VOLUME_MIN, 30),
+  // STORY-062: when set, GET /metrics needs `Authorization: Bearer <token>`;
+  // ALERTMANAGER_TOKEN is what Alertmanager sends to POST /api/alerts/prometheus.
+  metricsToken: process.env.METRICS_TOKEN ?? '',
+  alertmanagerToken: process.env.ALERTMANAGER_TOKEN ?? '',
   // STORY-055: the search index. Empty means none — the Trust tab says so, and
   // nothing is copied anywhere.
   elasticsearchUrl: (process.env.ELASTICSEARCH_URL ?? '').replace(/\/+$/, ''),

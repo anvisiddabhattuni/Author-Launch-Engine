@@ -45,6 +45,9 @@ Implemented so far:
 - **STORY-032 — Backend Architecture Setup** (Backend Development Agent), fulfilling `REQ-003`, `REQ-004` and `REQ-008` — **input validation on every route; see below**
 - **STORY-033 — Database Architecture Setup** (Database Administration Agent), fulfilling `REQ-005`, `REQ-006` and `REQ-008` — **roles in the database, not Sequelize; see below**
 - **STORY-034 — Deployment Architecture Setup** (DevOps Agent), fulfilling `REQ-007` and `REQ-008` — **partially: images still unbuilt and unscanned; see below**
+- **STORY-035 — Integrate OpenAI API for AI Content Generation** (AI Content Generation Agent), fulfilling `REQ-009`, `REQ-010` and `REQ-011` — **built and tested in test mode; needs an OpenAI key to go live**
+- **STORY-036 — Integrate Stripe for Payment Processing** (Tenant Management Agent), fulfilling `REQ-009` and `REQ-012` — **built and tested in test mode; needs a Stripe account to go live**
+- **STORY-037 — Integrate Twilio for Messaging Services** (Approval and Notification Agent), fulfilling `REQ-009` and `REQ-013` — **built and tested in test mode; needs a Twilio account to go live**
 - **STORY-038 — API Gateway for Managing and Monitoring Integrations** (API Integration Agent), fulfilling `REQ-009` and `REQ-014` — **in-process, not Kong; see below**
 - **STORY-039 — Message Queue System for Agent Communication** (Coordination and Governance Agent), fulfilling `REQ-010` — **Postgres outbox; RabbitMQ in CI only; see below**
 - **STORY-040 — Central Task Manager for Agent Coordination** (Coordination and Governance Agent), fulfilling `REQ-010`
@@ -61,11 +64,15 @@ Implemented so far:
 - **STORY-051 — Audit Log Access Monitoring** (Trust and Monitoring Agent), fulfilling `REQ-013` — **a separate, encrypted, reviewer-only security log of every attempt**
 - **STORY-052 — Audit Log Access Notification** (Approval and Notification Agent), fulfilling `REQ-013` — **security officers told at once, a burst folded into one alert**
 - **STORY-028 — Provide Detailed Audit Log Reports** (Audit and Security Agent), fulfilling `REQ-005` — **built after STORY-053; it had been skipped**
-- **STORY-030 — Deploy System to Public Demo URL** (Infrastructure and Deployment Agent), fulfilling `REQ-007` — **ready to deploy and checked; not deployed — it needs a server and domain only the project owner can provide**
+- **STORY-030 — Deploy System to Public Demo URL** (Infrastructure and Deployment Agent), fulfilling `REQ-007` — **live at https://3.133.213.13.sslip.io (AWS EC2); `smoke:deployed` passes 10/10**
 - **STORY-053 — CI/CD Pipeline with Automated Testing and Security Checks** (Infrastructure and Deployment Agent), fulfilling `REQ-014` — **CI had run once and failed unnoticed; now three test tiers, a ZAP scan, and `npm run ci:local`**
 - **STORY-054 — Deploy Application Using Kubernetes with Role-Based Access Control** (Infrastructure and Deployment Agent), fulfilling `REQ-014` — **a Helm chart, run on a local k3s cluster: scaling, load balancing, self-healing and RBAC shown working; not on a cloud cluster**
 - **STORY-055 — Implement Data Aggregation for Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-015`, `REQ-001` and `REQ-002` — **Elasticsearch, filled by the worker rather than Logstash; the encrypted part of the log is never copied; live checks written for CI, not yet run**
 - **STORY-056 — Develop Visualization for Trust Dashboard** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-003` — **a provisioned Grafana dashboard; verified in CI, not on this machine — not yet run**
+- **STORY-059 — Implement Anomaly Detection and Escalation** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-006` — **rule-based detectors over system activity; escalated within a one-minute scan; a governance check counts any past five minutes**
+- **STORY-060 — Implement Horizontal Scaling with Kubernetes** (Infrastructure and Deployment Agent), fulfilling `REQ-016` — **API, worker and web autoscale; an EKS cluster file ready, not created (it is billed)**
+- **STORY-061 — Implement Load Balancing with NGINX** (Infrastructure and Deployment Agent), fulfilling `REQ-016` — **measured on the AWS server: 20/20/20 across three instances; 999 of 1000 answered through a kill -9**
+- **STORY-062 — Monitor Scalability with Performance Metrics** (Trust and Monitoring Agent), fulfilling `REQ-016` — **Prometheus metrics, nine alert rules tested with promtool, alerts escalated to operators**
 - **STORY-057 — Integrate Approval and Notification System** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-004`
 - **STORY-058 — Implement Governance Score Calculation** (Trust and Monitoring Agent), fulfilling `REQ-015` and `REQ-005` — **a formula over what the system did, capped when an invariant is broken**
 
@@ -2496,11 +2503,12 @@ of its records**; `format=csv` downloads it with the digest in the header. Gener
 log. An author's report is their own tenant's — confined by the tenant rule and by reading through their own
 database role; the seal check and the log entry run outside that scope, as system acts.
 
-### STORY-030 — a public demo URL (ready; not deployed)
+### STORY-030 — a public demo URL (live)
 
-Skipped when the backlog was worked through in order; caught by review. **Not deployed:** a public URL needs a
-server, a domain and DNS in the project owner's name, and publishing the product is theirs to decide. Everything
-up to that point is built and rehearsed.
+Skipped when the backlog was worked through in order; caught by review. **Live since 2026-09-29 at
+https://3.133.213.13.sslip.io** — an AWS EC2 t3.small (free plan) in the project owner's account, with 2 GB of
+swap for the build. The hostname is derived from the IP by sslip.io, so there is no domain to buy and Let's
+Encrypt still issues a real certificate. `npm run smoke:deployed` against it: **10 passed, 0 failed, 0 skipped**.
 
 | Story build step | Where it lives |
 |---|---|
@@ -2534,8 +2542,10 @@ the security headers and HSTS, no other origin let in. Rehearsed here: against t
 (the published passwords sign in; the bundle contains them); against a production seed and build it **passes**
 every check that does not need a real certificate, and says the other three were skipped.
 
-**Unverified until it runs:** the overlay and Caddyfile have never been executed (no Docker here), and the Caddy
-image is pinned by tag only — its digest must come from the registry on the first pull.
+**On the first real run:** the overlay, Caddyfile and images worked as written; the Caddy image is now pinned
+by the digest the server pulled. Secrets were generated on the server and never left it; the audit key file is
+owned by the app's uid (10001), mode 400. **Still open:** the internal Postgres superuser password is the
+compose default — not reachable from outside (no published port), but worth replacing.
 
 ### STORY-054 — Kubernetes, with access by role (run on a local cluster)
 
@@ -2656,6 +2666,87 @@ approval (an hour before the post, by Mira's account) and its audit entry with t
 **92**: the integrity factor loses half its points to the STORY-013 stage that tampers with the log on purpose,
 and three quality checks fail for reasons earlier stages show.
 
+### STORY-035, 036, 037 — OpenAI, Stripe and Twilio, in test mode
+
+Skipped when the backlog was worked through, because each needs an account in the project owner's name. Built
+now against **local stand-ins** (`server/src/dev/standIns.js`) that speak each service's real HTTP API — so the
+real adapters, the integration gateway (timeouts, retries, circuit), the audit log and the approval gate all run;
+only the far end is ours. Setting the real keys changes the far end and nothing else.
+
+| Story | What it adds | To go live |
+|---|---|---|
+| **035 OpenAI** | `ai/openaiProvider.js` — `AI_PROVIDER=openai`: the book's themes and passages, the author's voice and prior posts, **and the posts already approved**, sent to chat completions; drafts held for approval like any provider's; each request and response on the audit log (`ai.generation`, digests and sizes); retried after a delay on a 429 or 5xx, not on a 400 | `OPENAI_API_KEY` (and `AI_PROVIDER=openai`) in the server's `.env` |
+| **036 Stripe** | `services/billing.js`, migration 048, **Billing** tab — charge a subscription with a Stripe PaymentMethod (never card details); idempotency keys so a retry cannot charge twice; signed webhooks (`POST /api/webhooks/stripe`); a failure is logged, **emailed to the author** and **flagged for review** | `STRIPE_SECRET_KEY` (`sk_test_…` is test mode), `STRIPE_WEBHOOK_SECRET`, and the webhook URL in Stripe's dashboard |
+| **037 Twilio** | `services/sms.js`, migration 049 — reviewers may give a mobile number; approval notices go by **text as well as email**; every text logged in `sms_messages` and on the audit log (number masked); Twilio down → kept as `retrying`, **tried again minutes later by an `sms.send` job**, then `failed` after `SMS_MAX_ATTEMPTS` | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` |
+
+**Found by building them:** the integration gateway logged a result's `status` field as the HTTP status. A
+Stripe PaymentIntent has its own `status` ("succeeded"), so the log insert failed — and the gateway then
+**retried a charge that had succeeded**, twice. Only the idempotency key stopped three charges. Fixed in
+`apiIntegrationAgent.js`; any provider whose reply carries a text `status` would have hit it.
+
+**Product decisions left open for the owner:** the subscription price (`SUBSCRIPTION_PRICE_CENTS`, default 2900
+= 29.00 USD), the OpenAI model (`OPENAI_MODEL`, default `gpt-4o-mini` — check it against the account's models),
+and the text wording.
+
+### STORY-059 — anomalies, escalated to a person
+
+| Story build step | Where it lives |
+|---|---|
+| 1. Anomaly detection, rule-based | `services/anomalyEscalation.js` — five detectors over system activity (refused-request bursts, dead-lettered jobs, failed payments, more approvals in a minute than anyone could read, a tenant far above its own normal) plus STORY-014's four content detectors |
+| 2. An escalation workflow | Each finding is an `anomaly_events` row (migration 050) — detected → escalated → acknowledged → resolved/dismissed; emailed to the security officers and the tenant's reviewers |
+| 3. The dashboard, with details and status | The Trust tab's **Anomalies** card, first on the page; acknowledge, resolve or dismiss with a note |
+
+**Within five minutes:** the worker scans every `ANOMALY_SCAN_SECONDS` (60) and escalates in the same scan — the
+tests measure 0–1 s from detection to escalation. The governance check `anomalies.escalated_in_time` counts any
+that took longer or are still waiting after five minutes. A pattern that persists is counted (`occurrences`),
+not re-announced. Every detector states its window, threshold and sample; the volume detector declines without
+a day of history. **Found by a mutation run:** logs outlive deleted tenants, and a burst naming one crashed the
+whole scan (a foreign key) — every other anomaly unescalated with it. Now skipped and counted.
+
+### STORY-060 — every service scales horizontally
+
+| Story build step | Where it lives |
+|---|---|
+| Kubernetes configuration for each service | The Helm chart (STORY-054); `ale.hpa` gives the **API, worker and web** each an autoscaler |
+| A cluster on a cloud provider | `deploy/eks/cluster.yaml` (eksctl): managed node group 2–4 nodes, metrics-server, Cluster Autoscaler tags — **not created**: EKS is billed by the hour in the owner's account |
+| Auto-scaling policies | CPU (and memory for the worker), up at once, down one pod a minute after five calm minutes |
+
+Proven: on k3s in STORY-054 (2 → 3 under load); CI's `kubernetes` job installs the chart on kind, loads the API
+and requires the autoscaler to add pods — **not run yet**; the next push runs it.
+
+### STORY-061 — NGINX load balancing
+
+`client/nginx.conf`: an `upstream` of every API instance, **re-resolved** every 5 s (`resolve`, open-source since
+nginx 1.27.3; the image is 1.27.5) so instances join and leave without a restart; round robin; passive health
+(`max_fails=3 fail_timeout=10s`); a refused or failed request retried on the next instance; a 3 s connect
+timeout. Active health checks are NGINX Plus only — said here rather than implied.
+
+**Measured on the AWS server**, in a private copy of the stack with three API instances:
+
+| Test | Result |
+|---|---|
+| 60 requests | **20 / 20 / 20** |
+| a fourth instance added, nginx not restarted | 80 requests → **20 / 20 / 20 / 20** |
+| an instance stopped gracefully mid-traffic | **40 of 40** answered |
+| an instance killed (`kill -9`) mid-traffic, three runs | **999 of 1000** each time |
+
+The first run found requests to a dead instance waiting out nginx's 60 s connect default: now 3 s. The remaining
+1 in 1000 is the moment of the kill — a request in flight, or the few seconds DNS still lists the dead instance.
+CI's `loadbalancer` job repeats the evenness and kill tests on every push — **not run yet**.
+
+### STORY-062 — scalability metrics and alerts
+
+| Story build step | Where it lives |
+|---|---|
+| Prometheus and Grafana | `GET /metrics` on the API's port (not under `/api`, so never public; `METRICS_TOKEN` optional); `files/prometheus/`; chart `monitoring.enabled`; Grafana's **Scalability** dashboard |
+| Alerting rules that notify administrators | `alerts.yml`: API down, fewer than two instances, p95 over 1 s, errors over 5%, event-loop lag, memory, DB pool waiting, job backlog, an open circuit — each with a `for`. Alertmanager posts to `POST /api/alerts/prometheus` (bearer `ALERTMANAGER_TOKEN`), where each alert becomes an anomaly escalated to whoever holds `system.operate` |
+
+`promtool test rules alerts.test.yml` proves each fires on the series that should trip it and stays quiet on a
+healthy one (a 50% threshold mutation was caught). A test reads every metric the rules and the dashboard use and
+fails if the API does not export it — a renamed metric cannot silently disable an alert. Verified here: Prometheus
+3.15 scraping the local API, target UP, nine rules loaded. CI's `monitoring` job runs the rules, a real
+Prometheus and Alertmanager, and follows one alert to an escalated anomaly — **not run yet**.
+
 ## Requirements
 
 - Node.js 20+ (developed on 22)
@@ -2701,7 +2792,7 @@ is running.
 npm run db:reset && npm run demo
 ```
 
-Prints 269 stages with evidence at each one.
+Prints 280 stages with evidence at each one.
 
 - **Stages 1–8, STORY-001:** inputs, generated drafts with confidence scores, the weekly cadence
   check, the approval gate refusing an unapproved draft, optimal-time scheduling, mocked publishing,
@@ -2821,6 +2912,15 @@ Prints 269 stages with evidence at each one.
   check that probes the API over HTTP and reads the worker's heartbeat with a row per verdict, an
   outage opened on the transition and paged to `ops@example.test` once, recovery as a check finding
   it up rather than time passing, and the three things this monitoring cannot see, said out loud.
+
+- **Stages 276–280, STORY-059–062:** a refused-request burst detected and escalated in the same scan, and Mira
+  acknowledging it; the metrics Prometheus reads, the nine rules, and an alert escalated to the operators; the
+  NGINX results measured on the AWS server; each service's autoscaling policy.
+
+- **Stages 270–275, STORY-035, 036, 037** (test mode, against the stand-ins): drafts from OpenAI with the approved
+  posts in the request and the exchange on the audit log; an OpenAI 503 retried after a delay; a reviewer texted
+  that approvals are waiting, and a Twilio outage kept for a later retry; Mira's subscription charged, and Tomas's
+  declined for insufficient funds — logged, emailed, flagged.
 
 - **Stages 266–269, STORY-054, STORY-055, STORY-056:** the instance a request reached; an audit row as indexed,
   without its encrypted fields, and its digest; the aggregation (or, with no index configured, why not); the
@@ -3013,6 +3113,19 @@ Copy `.env.example` to `.env` to override anything. The defaults work with no `.
 | `AMQP_URL` | — | RabbitMQ, when `MESSAGE_TRANSPORT=amqp`. CI sets it; the broker test skips without it |
 | `ENFORCE_HTTPS` | `true` in production | Redirect plain-http GETs to https, refuse other methods; `/api/health` and `/api/ready` exempt (STORY-031) |
 | `CORS_ORIGINS` | `http://localhost:5173` in dev, none in production | Comma-separated browser origins allowed cross-origin. Was `*` before STORY-031 |
+| `ANOMALY_SCAN_SECONDS` | `60` | How often the worker looks for anomalies and escalates them (STORY-059) |
+| `ANOMALY_REFUSED_THRESHOLD` / `ANOMALY_JOB_FAILURES` / `ANOMALY_BULK_APPROVALS` | `20` / `3` / `10` | Detector thresholds, per `ANOMALY_WINDOW_MINUTES` (10) — or per minute for approvals |
+| `ANOMALY_VOLUME_FACTOR` / `ANOMALY_VOLUME_MIN` | `5` / `30` | A tenant's recent activity must be this many times its own normal, and at least this many actions |
+| `METRICS_TOKEN` | — | If set, `GET /metrics` needs it as a bearer token (STORY-062) |
+| `ALERTMANAGER_TOKEN` | — | What Alertmanager must send to `POST /api/alerts/prometheus`; empty refuses every alert |
+| `OPENAI_API_KEY` | — | OpenAI key for `AI_PROVIDER=openai` (STORY-035). Server environment only |
+| `OPENAI_MODEL` | `gpt-4o-mini` | The chat model asked for drafts (STORY-035) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Changed only by tests and the demo, to the stand-in |
+| `STRIPE_SECRET_KEY` | — | Stripe key; `sk_test_…` is test mode, no real card charged (STORY-036). Empty: billing says it is not set up |
+| `STRIPE_WEBHOOK_SECRET` | — | Signing secret for `POST /api/webhooks/stripe`; unsigned or wrongly signed events are refused |
+| `SUBSCRIPTION_PRICE_CENTS` / `SUBSCRIPTION_CURRENCY` | `2900` / `usd` | The monthly subscription (STORY-036) — a product decision |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | — | Twilio account for texts (STORY-037). Empty: email only |
+| `SMS_RETRY_SECONDS` / `SMS_MAX_ATTEMPTS` | `60` / `4` | A text Twilio could not take waits this long (doubling) and is tried up to this many times |
 | `ELASTICSEARCH_URL` | — | The search index (STORY-055). Empty: nothing is copied and search says it is not set up |
 | `SEARCH_BATCH_SIZE` | `500` | Rows per indexing batch; each batch is read back before the mark moves (STORY-055) |
 | `SEARCH_LOOKBACK_IDS` | `1000` | Ids re-read behind the mark each run, for rows that committed late (STORY-055) |
@@ -3139,6 +3252,16 @@ material are the verified matches rather than the provider's own claim about wha
 | `POST` | `/api/tenants/:id/restore` | Restore a suspended tenant (admin) |
 | `GET` | `/api/tenants/isolation` | Latest isolation check: tables checked, exclusions, findings |
 | `POST` | `/api/tenants/isolation/verify` | Run the isolation check now against the database |
+| `GET` | `/api/authors/:id/anomalies` | Anomalies with status; system-wide ones too for staff (STORY-059) |
+| `POST` | `/api/anomalies/:id/acknowledge` · `/resolve` · `/dismiss` | Act on an anomaly; resolve and dismiss need a note |
+| `POST` | `/api/alerts/prometheus` | Alertmanager's webhook; bearer `ALERTMANAGER_TOKEN` (STORY-062) |
+| `GET` | `/metrics` | Prometheus metrics, on the API's port only — not under `/api` |
+| `GET` | `/api/authors/:id/billing` | The author's subscription and payments (STORY-036) |
+| `POST` | `/api/authors/:id/billing/charge` | Charge the subscription with a Stripe PaymentMethod; `tenant.manage` (STORY-036) |
+| `GET` | `/api/billing/review` | Failed payments waiting for a person; `tenant.manage` |
+| `POST` | `/api/billing/payments/:id/review` | Mark a failed payment reviewed; `tenant.manage` |
+| `POST` | `/api/webhooks/stripe` | Stripe's events; no session — believed only with a valid Stripe signature |
+| `GET` | `/api/authors/:id/sms` | Texts sent for the tenant, attempts and outcome; numbers masked (STORY-037) |
 | `GET` | `/api/authors/:id/attention` | Waiting items and recent actions with timestamps and priority; what waits for the caller (STORY-057) |
 | `GET` | `/api/authors/:id/governance-score?days=` | The governance score with each factor's measurement and weight (STORY-058) |
 | `GET` | `/api/authors/:id/search?q=&source=&from=&to=` | Search the tenant's audit and data access logs in the index; 503 with no index (STORY-055) |

@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 
 import { anthropicProvider } from './anthropicProvider.js';
+import { openaiProvider } from './openaiProvider.js';
 import { outreachAnthropicProvider } from './outreachAnthropicProvider.js';
 import { outreachStubProvider } from './outreachStubProvider.js';
 import { prAnthropicProvider } from './prAnthropicProvider.js';
@@ -10,6 +11,7 @@ import { stubProvider } from './stubProvider.js';
 const socialProviders = {
   stub: stubProvider,
   anthropic: anthropicProvider,
+  openai: openaiProvider,
 };
 
 const outreachProviders = {

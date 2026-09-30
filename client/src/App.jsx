@@ -19,6 +19,7 @@ import { WorkerPage } from './pages/WorkerPage.jsx';
 import { TemplatesPage } from './pages/TemplatesPage.jsx';
 import { PerformancePage } from './pages/PerformancePage.jsx';
 import { TrustPage } from './pages/TrustPage.jsx';
+import { BillingPage } from './pages/BillingPage.jsx';
 import { AttentionNotice } from './pages/TrustLive.jsx';
 
 export function App() {
@@ -131,6 +132,8 @@ export function App() {
           ...(user.permissions?.includes('audit.read') ? [['/audit', 'Audit log']] : []),
           // STORY-045: this tenant's API keys — for the tenant, and admins who manage tenants.
           ...(user.authorId || user.permissions?.includes('tenant.manage') ? [['/api-keys', 'API keys']] : []),
+          // STORY-036: an author's own subscription; admins charge and review.
+          ...(user.authorId || user.permissions?.includes('tenant.manage') ? [['/billing', 'Billing']] : []),
           // STORY-043: onboarding, for those who can see every tenant.
           ...(user.permissions?.includes('tenant.read.all') ? [['/tenants', 'Tenants']] : []),
           // STORY-042: only for those who manage access or review it.
@@ -177,6 +180,7 @@ export function App() {
           <Route path="/tenants" element={<TenantsPage user={user} />} />
           <Route path="/security" element={<SecurityPage user={user} />} />
           <Route path="/api-keys" element={<ApiKeysPage author={author} user={user} />} />
+          <Route path="/billing" element={<BillingPage author={author} user={user} />} />
           <Route path="/accept-invite" element={<Navigate to="/upload" replace />} />
         </Routes>
       )}

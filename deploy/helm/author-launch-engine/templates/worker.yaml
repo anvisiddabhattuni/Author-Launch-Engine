@@ -5,7 +5,9 @@ metadata:
   labels: {{- include "ale.labels" . | nindent 4 }}
 spec:
   # Safe to scale: claiming and shutdown are safe under concurrency (STORY-065).
+  {{- if not .Values.worker.autoscaling.enabled }}
   replicas: {{ .Values.worker.replicas }}
+  {{- end }}
   selector: { matchLabels: { app: {{ .Release.Name }}-worker } }
   template:
     metadata:
@@ -26,3 +28,4 @@ spec:
           {{- include "ale.containerSecurity" . | nindent 10 }}
           volumeMounts: [{ name: audit-key, mountPath: /run/secrets/audit, readOnly: true }]
       volumes: {{- include "ale.auditKeyVolume" . | nindent 8 }}
+{{ include "ale.hpa" (dict "root" . "name" "worker" "spec" .Values.worker) }}

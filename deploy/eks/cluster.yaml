@@ -1,0 +1,48 @@
+# STORY-060: an EKS cluster for the Author Launch Engine — NOT CREATED.
+#
+# Creating it costs money in the owner's AWS account: the EKS control plane is
+# billed by the hour (about 0.10 USD, ~73 USD a month) on top of the nodes, and
+# none of it is in the free plan. So this file is ready, and creating it is the
+# owner's decision:
+#
+#   eksctl create cluster -f deploy/eks/cluster.yaml          # ~15 minutes
+#   helm install ale deploy/helm/author-launch-engine -n ale --create-namespace \
+#     --set image.registry=<account>.dkr.ecr.us-east-2.amazonaws.com/ --set image.pullPolicy=IfNotPresent ...
+#   eksctl delete cluster -f deploy/eks/cluster.yaml          # stops the bill
+#
+# The chart's autoscalers (API, worker, web) add pods under load; the node
+# group below adds nodes when pods no longer fit (min 2, max 4) — the two
+# halves of "additional pods are automatically deployed to handle the load".
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: author-launch-engine
+  region: us-east-2        # where the demo server runs; change freely
+  version: "1.31"
+  tags: { project: author-launch-engine }
+
+iam:
+  withOIDC: true           # lets the autoscaler act with its own narrow role
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: metrics-server   # what the HPAs read CPU and memory from
+
+managedNodeGroups:
+  - name: app
+    instanceType: t3.medium
+    minSize: 2             # two nodes: losing one never takes the API down (PDB minAvailable 1)
+    desiredCapacity: 2
+    maxSize: 4
+    volumeSize: 20
+    labels: { role: app }
+    tags:
+      # Cluster Autoscaler discovers the group by these tags.
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/author-launch-engine: "owned"
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        ebs: true

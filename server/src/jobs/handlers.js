@@ -12,6 +12,7 @@ import { monitorAndAlert } from '../services/healthMonitoring.js';
 import { trackEngagement } from '../services/performanceMetrics.js';
 import { config } from '../config.js';
 import { aggregate, reconcile } from '../services/searchIndex.js';
+import { attemptSms } from '../services/sms.js';
 
 /**
  * What the worker knows how to do (STORY-065).
@@ -260,6 +261,12 @@ export const HANDLERS = {
    * outlives a rejection fails loudly instead of sending — the gate is still in
    * the service, exactly where it has been since STORY-001.
    */
+  // A text Twilio could not take earlier (STORY-037). The service records the
+  // outcome and schedules the next try itself; the job only asks.
+  'sms.send': async ({ job }) => {
+    const m = await attemptSms(Number(job.payload.messageId));
+    return { messageId: m.id, status: m.status, attempts: m.attempts };
+  },
   'outreach.send': async ({ job }) => {
     const messageId = Number(job.payload.messageId);
     const { rows } = await query('SELECT status FROM outreach_messages WHERE id = $1', [messageId]);
@@ -282,4 +289,6 @@ export const describeJob = (job) =>
   RECURRING.find((r) => r.kind === job.kind)?.describe(job) ??
   (job.kind === 'outreach.send'
     ? `send approved outreach message ${job.payload?.messageId}`
-    : job.kind);
+    : job.kind === 'sms.send'
+      ? `retry text message ${job.payload?.messageId}`
+      : job.kind);

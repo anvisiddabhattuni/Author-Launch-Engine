@@ -265,6 +265,16 @@ export const api = {
   search: (authorId, params) =>
     request(`/authors/${authorId}/search?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),
   searchStatus: (authorId) => request(`/authors/${authorId}/search/status`),
+  // STORY-059: anomalies escalated to a person.
+  anomalies: (authorId) => request(`/authors/${authorId}/anomalies`),
+  anomalyAction: (id, action, note = '') => request(`/anomalies/${id}/${action}`, { method: 'POST', body: { note } }),
+  // STORY-036: subscription payments through Stripe.
+  billing: (authorId) => request(`/authors/${authorId}/billing`),
+  chargeSubscription: (authorId, paymentMethod) => request(`/authors/${authorId}/billing/charge`, { method: 'POST', body: { paymentMethod } }),
+  paymentsToReview: () => request('/billing/review'),
+  markPaymentReviewed: (id) => request(`/billing/payments/${id}/review`, { method: 'POST' }),
+  // STORY-037: texts sent through Twilio.
+  smsLog: (authorId) => request(`/authors/${authorId}/sms`),
   // STORY-028: audit log reports.
   auditReport: (params = {}) =>
     request(`/audit-reports?${new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null))}`),

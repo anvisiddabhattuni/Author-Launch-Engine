@@ -32,3 +32,11 @@ datasources:
     isDefault: true
     editable: false
     jsonData: { index: ale-metrics, timeField: '@timestamp', maxConcurrentShardRequests: 5 }
+  # STORY-062: performance metrics, scraped from the API.
+  - name: Prometheus
+    uid: ale-prometheus
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    editable: false
+    jsonData: { timeInterval: 15s }

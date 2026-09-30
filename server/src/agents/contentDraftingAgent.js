@@ -296,6 +296,14 @@ export async function draftWeeklyPosts({
       [authorId],
     );
 
+    // The posts a person has already approved (STORY-035): the clearest signal
+    // of what this author will publish. Providers that use them say so.
+    const { rows: approvedExamples } = await client.query(
+      `SELECT platform, content FROM drafts WHERE author_id = $1 AND status IN ('approved', 'published')
+        ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 5`,
+      [authorId],
+    );
+
     const { rows: windows } = await client.query('SELECT * FROM platform_windows');
     const maxCharsFor = new Map(windows.map((w) => [w.platform, w.max_chars]));
     // Which platforms a meme is worth routing to (STORY-066). Read from the
@@ -432,7 +440,23 @@ export async function draftWeeklyPosts({
       revision: revisionOf
         ? { of: revisionOf, note: revisionNote, previous: previousContent, themes: revisionThemes, avoidPassages }
         : null,
+      approvedExamples,
     });
+
+    // Each generation request and its response, on the audit log (STORY-035's
+    // Trust line). Digests and sizes where the provider made a real call; the
+    // drafts themselves are stored below, held for approval.
+    await recordAction(
+      {
+        actor: ACTOR,
+        action: 'ai.generation',
+        entityType: 'book',
+        entityId: String(book.id),
+        authorId,
+        metadata: { ...(candidates.exchange ?? { provider: provider.name }), candidates: candidates.length },
+      },
+      client,
+    );
 
     const saved = [];
     for (const candidate of candidates) {

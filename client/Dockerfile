@@ -27,5 +27,9 @@ FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a8
 # master process as root. This one runs as uid 101 and listens on 8080 — the
 # port nginx.conf already used — so a flaw in nginx is not a root shell.
 COPY --from=build /app/client/dist /usr/share/nginx/html
-COPY client/nginx.conf /etc/nginx/conf.d/default.conf
+# A template (STORY-061): the image's entrypoint substitutes the resolver and
+# upstream at start. Defaults suit Compose; the chart sets ALE_API_UPSTREAM.
+COPY client/nginx.conf /etc/nginx/templates/default.conf.template
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
+    ALE_API_UPSTREAM=api:4000
 EXPOSE 8080

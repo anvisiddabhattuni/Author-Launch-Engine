@@ -138,13 +138,43 @@ export const SCHEMAS = {
 
   listPressKits: byAuthor,
 
-  addReviewer: { body: { name: name.required(), email: email.required(), role: text(100) } },
+  // STORY-037: an optional mobile number, in international form, for texts.
+  addReviewer: { body: { name: name.required(), email: email.required(), role: text(100), phone: Joi.string().pattern(/^\+[1-9]\d{7,14}$/).allow('', null) } },
 
   reviewerActive: { body: { active: Joi.boolean() } },
 
   listNotifications: byAuthor,
 
   trustHistory: { query: { limit: limit(500, 30) } },
+
+  // STORY-062: Alertmanager's webhook payload; its other fields pass through.
+  prometheusAlerts: {
+    body: Joi.object({
+      alerts: Joi.array().max(500).items(Joi.object({
+        status: Joi.string().valid('firing', 'resolved').required(),
+        labels: Joi.object().unknown(true).required(),
+        annotations: Joi.object().unknown(true),
+        fingerprint: Joi.string().max(100),
+      }).unknown(true)).required(),
+    }).unknown(true),
+  },
+
+  // STORY-059: what was found or done, required to close an anomaly.
+  anomalyAction: { body: { note: text(1000) } },
+
+  // STORY-036: a Stripe event's envelope. Its other fields are Stripe's and pass through.
+  stripeWebhook: {
+    body: Joi.object({
+      id: Joi.string().max(255).required(),
+      type: Joi.string().max(255).required(),
+      data: Joi.object({ object: Joi.object().unknown(true).required() }).unknown(true).required(),
+    }).unknown(true),
+  },
+
+  // STORY-036: a Stripe PaymentMethod id — never card details.
+  chargeSubscription: {
+    body: { paymentMethod: Joi.string().pattern(/^pm_[A-Za-z0-9_]+$/).max(100).required() },
+  },
 
   onboardTenant: {
     body: {

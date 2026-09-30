@@ -64,10 +64,23 @@ describe('Scenario: the stack is defined the way Compose will read it', () => {
 
   it('the UI can reach the API: nginx proxies to a service that exists, on the port it listens on', () => {
     const nginx = read('client/nginx.conf');
-    const [, host, port] = nginx.match(/proxy_pass http:\/\/([\w-]+):(\d+)\//);
+    assert.match(nginx, /proxy_pass http:\/\/ale_api\/api\//, 'the API is reached through the upstream pool');
+    // The pool's member comes from the image's default (STORY-061).
+    const [, host, port] = read('client/Dockerfile').match(/ALE_API_UPSTREAM=([\w-]+):(\d+)/);
     assert.ok(compose.services[host], `nginx proxies to "${host}", which is not a service`);
     assert.equal(port, '4000');
     assert.match(read('server/Dockerfile'), /EXPOSE 4000/);
+  });
+
+  it('STORY-061: nginx balances across every API instance, and routes around a failed one', () => {
+    const nginx = read('client/nginx.conf');
+    const upstream = nginx.match(/upstream ale_api \{([\s\S]*?)\n\}/)[1];
+    assert.match(upstream, /zone ale_api/, 'a shared zone, which `resolve` requires');
+    assert.match(upstream, /server \$\{ALE_API_UPSTREAM\} resolve/, 'the name is re-resolved, so instances join and leave');
+    assert.match(upstream, /max_fails=\d+ fail_timeout=\d+s/, 'passive health: a failing instance is left out');
+    assert.ok(!/least_conn|ip_hash|hash /.test(upstream), 'round robin: each instance in turn');
+    assert.match(nginx, /proxy_next_upstream error timeout http_502 http_503;/, 'a refused request is retried on the next instance');
+    assert.match(read('client/Dockerfile'), /NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1/, 'the resolver comes from the container\'s own DNS');
   });
 
   it('nginx tells the API which scheme the client used — or the API refuses the UI', () => {

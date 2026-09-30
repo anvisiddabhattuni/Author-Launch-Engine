@@ -37,6 +37,8 @@ export const PRIORITIES = {
   // A human approved this email. It is the only work in the queue with a person
   // on the far side of it, and it used to sort last.
   'outreach.send': 90,
+  // A reviewer waiting to be told; below authorised outbound work (STORY-037).
+  'sms.send': 60,
   // Above the producers, below authorised outbound work. An outage noticed
   // one sweep late is five minutes nobody was told; but it is cheap, and it
   // never outranks an email a human is waiting on (STORY-027).
@@ -108,6 +110,8 @@ export const RESOURCES = {
   // Per message, not per author: two different approved emails have no reason
   // to wait for each other.
   'outreach.send': (job) => `outreach:${job.payload?.messageId}`,
+  // One attempt per text at a time: two would send it twice.
+  'sms.send': (job) => `sms:${job.payload?.messageId}`,
 };
 
 /**
@@ -128,6 +132,8 @@ export const RESOURCES = {
 export const TASKS = {
   'outreach.send':             { agent: 'PROutreachAgent',              requires: ['email'],
     reason: 'outbound work a human authorised' },
+  'sms.send':                  { agent: 'ApprovalNotificationAgent',    requires: ['twilio'],
+    reason: 'retries a text Twilio could not take; waits while Twilio\'s circuit is open' },
   'posts.publish_due':         { agent: 'SchedulingAgent',              requires: [],
     // Per platform, inside the publisher: one platform down must not hold
     // back posts to the other three.

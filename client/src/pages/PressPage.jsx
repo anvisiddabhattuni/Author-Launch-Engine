@@ -52,7 +52,8 @@ export function PressPage({ author, book }) {
   const [pending, setPending] = useState(null);
   const [reviewers, setReviewers] = useState([]);
   const [notifications, setNotifications] = useState([]);
-  const [newReviewer, setNewReviewer] = useState({ name: '', email: '', role: 'publisher' });
+  const [newReviewer, setNewReviewer] = useState({ name: '', email: '', role: 'publisher', phone: '' });
+  const [texts, setTexts] = useState(null);
   const [escalations, setEscalations] = useState(null);
   const [reviewer, setReviewer] = useState(author.name);
   const [notes, setNotes] = useState({});
@@ -82,6 +83,8 @@ export function PressPage({ author, book }) {
     setPending(p);
     setReviewers(r);
     setNotifications(n);
+    // STORY-037: separate, so a texting problem never blanks the rest of the page.
+    api.smsLog(author.id).then(setTexts).catch(() => setTexts(null));
     setEscalations(esc);
   }, [author.id, book]);
 
@@ -772,6 +775,7 @@ export function PressPage({ author, book }) {
                 <th>Name</th>
                 <th>Role</th>
                 <th>Email</th>
+                <th>Mobile</th>
                 <th>Notified</th>
                 <th />
               </tr>
@@ -784,6 +788,7 @@ export function PressPage({ author, book }) {
                     <span className="pill">{r.role}</span>
                   </td>
                   <td className="mono">{r.email}</td>
+                  <td className="mono">{r.phone ?? '—'}</td>
                   <td className="mono">
                     {notifications.filter((n) => n.reviewer_id === r.id && n.status === 'sent').length}
                   </td>
@@ -825,12 +830,19 @@ export function PressPage({ author, book }) {
             value={newReviewer.role}
             onChange={(e) => setNewReviewer({ ...newReviewer, role: e.target.value })}
           />
+          {/* STORY-037: optional; texts go to it when approvals are waiting. */}
+          <input
+            placeholder="Mobile (+15551234567), optional"
+            aria-label="Mobile number"
+            value={newReviewer.phone ?? ''}
+            onChange={(e) => setNewReviewer({ ...newReviewer, phone: e.target.value })}
+          />
           <button
             disabled={busy || !newReviewer.name.trim() || !newReviewer.email.trim()}
             onClick={() =>
               run(async () => {
                 await api.addReviewer(author.id, { ...newReviewer, actor: reviewer });
-                setNewReviewer({ name: '', email: '', role: 'publisher' });
+                setNewReviewer({ name: '', email: '', role: 'publisher', phone: '' });
               }, `${newReviewer.name} will be notified when press materials are waiting.`)
             }
           >
@@ -871,6 +883,37 @@ export function PressPage({ author, book }) {
           </>
         )}
       </div>
+
+      {texts && (
+        <div className="card">
+          <h2>Texts sent ({texts.messages.length})</h2>
+          <p className="hint">
+            When approvals are waiting, a reviewer with a mobile number gets a text through Twilio as well as the
+            email. A text Twilio can't take is kept and tried again later; numbers are shown by their last digits.
+          </p>
+          {!texts.configured && <div className="banner">Texts aren't set up here: the server has no Twilio account (TWILIO_ACCOUNT_SID).</div>}
+          {texts.messages.length > 0 && (
+            <table>
+              <thead><tr><th>When (UTC)</th><th>To</th><th>Message</th><th>Status</th><th>Attempts</th><th>Twilio / error</th></tr></thead>
+              <tbody>
+                {texts.messages.map((m) => (
+                  <tr key={m.id}>
+                    <td className="mono">{new Date(m.created_at).toISOString().slice(0, 16).replace('T', ' ')}</td>
+                    <td className="mono">{m.to_number}</td>
+                    <td>{m.body}</td>
+                    <td>
+                      <span className={`pill ${m.status === 'sent' ? 'approved' : m.status === 'failed' ? 'escalated' : 'pending_approval'}`}>{m.status}</span>
+                      {m.next_attempt_at && <div className="hint">next try {new Date(m.next_attempt_at).toISOString().slice(11, 16)} UTC</div>}
+                    </td>
+                    <td className="mono">{m.attempts}</td>
+                    <td className="mono">{m.twilio_sid ?? m.last_error ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <h2>

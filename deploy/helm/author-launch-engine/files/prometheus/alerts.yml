@@ -1,0 +1,86 @@
+# STORY-062: alerts for anomalies and resource constraints.
+#
+# Each rule names the metric it reads, a threshold and how long it must hold
+# (`for`) — a single slow request is not an alert; five minutes of them is.
+# `promtool test rules alerts.test.yml` checks each fires when it should and
+# not when it should not.
+groups:
+  - name: ale-availability
+    rules:
+      - alert: AleApiDown
+        expr: up{job="ale-api"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "API instance {{ $labels.instance }} is not answering"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for a minute."
+
+      - alert: AleFewerApiInstancesThanExpected
+        expr: count(up{job="ale-api"} == 1) < 2
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "Only {{ $value }} API instance(s) up — no headroom"
+          description: "Load balancing (STORY-061) and autoscaling (STORY-060) assume at least two."
+
+  - name: ale-performance
+    rules:
+      - alert: AleSlowRequests
+        expr: histogram_quantile(0.95, sum by (le) (rate(ale_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "95% of requests are taking over a second"
+          description: "p95 latency {{ $value | humanizeDuration }} over five minutes."
+
+      - alert: AleErrorRate
+        expr: |
+          sum(rate(ale_http_request_duration_seconds_count{status_class="5xx"}[5m]))
+            / clamp_min(sum(rate(ale_http_request_duration_seconds_count[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "More than 5% of requests are failing"
+          description: "{{ $value | humanizePercentage }} of requests answered 5xx over five minutes."
+
+      - alert: AleEventLoopLag
+        expr: ale_nodejs_eventloop_lag_p99_seconds > 0.5
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "Event loop blocked on {{ $labels.instance_name }}"
+          description: "p99 event loop lag {{ $value | humanizeDuration }}: the process is CPU-bound — add instances."
+
+  - name: ale-resources
+    rules:
+      - alert: AleMemoryHigh
+        expr: ale_process_resident_memory_bytes > 750 * 1024 * 1024
+        for: 10m
+        labels: { severity: high }
+        annotations:
+          summary: "{{ $labels.instance_name }} is using {{ $value | humanize1024 }}B of memory"
+          description: "Above 750 MiB for ten minutes — near the container limit."
+
+      - alert: AleDbPoolSaturated
+        expr: ale_db_pool_connections{state="waiting"} > 0
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "Requests are waiting for a database connection on {{ $labels.instance_name }}"
+          description: "The connection pool has been exhausted for five minutes."
+
+      - alert: AleJobBacklog
+        expr: ale_jobs_oldest_queued_seconds > 900
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "Background work is falling behind"
+          description: "The oldest due job has waited {{ $value | humanizeDuration }} — is a worker running, and are there enough?"
+
+      - alert: AleIntegrationCircuitOpen
+        expr: max by (service) (ale_integration_circuit_open) == 1
+        for: 1m
+        labels: { severity: high }
+        annotations:
+          summary: "{{ $labels.service }} is failing — its circuit is open"
+          description: "Calls to {{ $labels.service }} are paused after repeated failures (STORY-038)."

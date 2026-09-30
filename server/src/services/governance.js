@@ -107,6 +107,15 @@ export const CHECKS = [
           )::int AS n`,
   },
   {
+    id: 'anomalies.escalated_in_time',
+    severity: SEVERITY.QUALITY,
+    label: 'Every anomaly reached a person within five minutes',
+    why: 'STORY-059 / REQ-015. "Escalated within 5 minutes" is the clause; this counts the ones that were not, or are overdue now.',
+    sql: `SELECT COUNT(*)::int AS n FROM anomaly_events
+           WHERE (escalated_at IS NULL AND detected_at < now() - interval '5 minutes' AND status IN ('open', 'acknowledged'))
+              OR escalated_at > detected_at + interval '5 minutes'`,
+  },
+  {
     id: 'approvals.attributable',
     severity: SEVERITY.QUALITY,
     label: 'Every approval names an authenticated session',

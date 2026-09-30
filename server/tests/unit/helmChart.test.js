@@ -115,6 +115,19 @@ describe('STORY-054: the Helm chart', { skip }, () => {
     assert.match(dashboards['provider.yaml'], /allowUiUpdates: true/);
   });
 
+  it('STORY-060: every service scales horizontally — API, worker and web — up fast, down slowly', () => {
+    const docs = render();
+    for (const name of ['ale-api', 'ale-worker', 'ale-client']) {
+      const hpa = find(docs, 'HorizontalPodAutoscaler', name);
+      assert.ok(hpa, `${name} has an autoscaler`);
+      assert.ok(hpa.spec.maxReplicas > hpa.spec.minReplicas, name);
+      assert.equal(find(docs, 'Deployment', name).spec.replicas, undefined, `${name}: the autoscaler owns the count`);
+      assert.ok(hpa.spec.behavior.scaleDown.stabilizationWindowSeconds >= 60, `${name}: a quiet minute does not shed pods`);
+      const c = find(docs, 'Deployment', name).spec.template.spec.containers[0];
+      assert.ok(c.resources.requests.cpu, `${name}: CPU utilisation needs a request to be measured against`);
+    }
+  });
+
   it('only the app reaches the database', () => {
     const np = find(render(), 'NetworkPolicy', 'ale-database');
     assert.deepEqual(np.spec.ingress[0].from, [{ podSelector: { matchLabels: { 'ale-role': 'app' } } }]);

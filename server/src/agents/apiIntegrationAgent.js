@@ -176,7 +176,11 @@ export async function callExternal({
         callId,
         attempt,
         outcome: 'ok',
-        status: result?.status ?? 200,
+        // An HTTP status only if the result carries one. A provider's own
+        // `status` field (a Stripe PaymentIntent's "succeeded") is not one —
+        // logging it failed the insert, and the gateway then retried a call
+        // that had succeeded (found by STORY-036).
+        status: Number.isInteger(result?.status) ? result.status : 200,
         durationMs: Date.now() - started,
         authorId,
       });
@@ -259,10 +263,18 @@ export async function httpJson(url, { signal, ...init } = {}) {
 
   if (!response.ok) {
     const body = await response.text().catch(() => '');
-    throw new ExternalApiError(`HTTP ${response.status}: ${body.slice(0, 200)}`, {
+    const error = new ExternalApiError(`HTTP ${response.status}: ${body.slice(0, 200)}`, {
       status: response.status,
       retryAfterMs: retryAfterMs(response.headers),
     });
+    // The provider's own explanation, parsed, for callers that act on it — a
+    // declined card's reason (STORY-036) is in the body, not the status.
+    try {
+      error.body = JSON.parse(body);
+    } catch {
+      error.body = null;
+    }
+    throw error;
   }
 
   return response.json();

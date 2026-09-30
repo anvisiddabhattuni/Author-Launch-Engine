@@ -261,3 +261,88 @@ export function SearchCard({ authorId }) {
     </div>
   );
 }
+
+const ANOMALY_TONE = { open: 'escalated', acknowledged: 'pending_approval', resolved: 'approved', dismissed: 'neutral' };
+
+/**
+ * STORY-059: anomalies escalated to a person, first on the Trust tab. Each
+ * shows what was found, when, who was told and when, and its status — and
+ * whoever may act can acknowledge, resolve or dismiss it, saying why.
+ */
+export function AnomaliesCard({ authorId, user }) {
+  const [tick, setTick] = useState(0);
+  const [a, error] = usePolling(() => api.anomalies(authorId), [authorId, tick]);
+  const [notes, setNotes] = useState({});
+  const [problem, setProblem] = useState('');
+  if (error) return <div className="card"><h2>Anomalies</h2><div className="banner error">{error}</div></div>;
+  if (!a) return null;
+  const act = async (id, action) => {
+    try {
+      await api.anomalyAction(id, action, notes[id] ?? '');
+      setProblem('');
+      setTick((t) => t + 1);
+    } catch (e) {
+      setProblem(e.message);
+    }
+  };
+  const live = a.open + a.acknowledged;
+  const canAct = (e) => user?.permissions?.includes('audit.verify') || user?.permissions?.includes('tenant.act.all')
+    || (e.author_id != null && Number(user?.authorId) === Number(e.author_id) && user?.permissions?.includes('content.approve'));
+  return (
+    <div className="card anomalies-card">
+      <h2>Anomalies{live ? ` — ${live} need a person` : ''}</h2>
+      {a.open > 0 && (
+        <div className="banner error" role="status">
+          <strong>{a.open} open anomal{a.open === 1 ? 'y' : 'ies'}</strong> — escalated to the people below; acknowledge when you are looking at it.
+        </div>
+      )}
+      <p className="hint">
+        Checked every {a.scanEverySeconds} s; anything found is escalated in the same check, and must reach a person within
+        {' '}{a.escalateWithinMinutes} minutes (a governance check counts any that did not). Every rule says what it counted.
+      </p>
+      {problem && <div className="banner error">{problem}</div>}
+      {a.events.length === 0 ? (
+        <div className="empty">Nothing unusual found.</div>
+      ) : (
+        <table>
+          <thead><tr><th>Status</th><th>What was found</th><th>Detected (UTC)</th><th>Escalated to</th><th /></tr></thead>
+          <tbody>
+            {a.events.slice(0, 10).map((e) => (
+              <tr key={e.id}>
+                <td>
+                  <span className={`pill ${ANOMALY_TONE[e.status]}`}>{e.status}</span>
+                  <div className="hint"><span className={`pill ${e.severity === 'high' ? 'escalated' : 'pending_approval'}`}>{e.severity}</span></div>
+                </td>
+                <td>
+                  {e.summary}
+                  <div className="hint mono">{e.detector}{e.author_name ? ` · ${e.author_name}` : ' · system-wide'}{e.occurrences > 1 ? ` · seen ${e.occurrences}×` : ''}</div>
+                  {e.resolution_note && <div className="hint">{e.status} by {e.resolved_by}: {e.resolution_note}</div>}
+                </td>
+                <td className="mono">{stamp(e.detected_at)}</td>
+                <td>
+                  {e.escalated_at ? (
+                    <>
+                      <span className="mono">{stamp(e.escalated_at)}</span>
+                      <span className="hint"> · {Math.round((new Date(e.escalated_at) - new Date(e.detected_at)) / 1000)} s after</span>
+                      <div className="hint">{e.escalated_to.join(', ')}</div>
+                    </>
+                  ) : <span className="pill escalated">not yet escalated</span>}
+                </td>
+                <td>
+                  {['open', 'acknowledged'].includes(e.status) && canAct(e) && (
+                    <div className="anomaly-actions">
+                      {e.status === 'open' && <button type="button" onClick={() => act(e.id, 'acknowledge')}>Acknowledge</button>}
+                      <input aria-label="What was found or done" placeholder="What was found or done" value={notes[e.id] ?? ''} onChange={(ev) => setNotes({ ...notes, [e.id]: ev.target.value })} />
+                      <button type="button" onClick={() => act(e.id, 'resolve')}>Resolve</button>
+                      <button type="button" className="danger" onClick={() => act(e.id, 'dismiss')}>Dismiss</button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}

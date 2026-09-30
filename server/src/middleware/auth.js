@@ -22,7 +22,10 @@ const forbidden = (message) => Object.assign(new Error(message), { status: 403 }
 // load balancer, and it has no credentials and never will. It exposes which
 // migrations are missing, which is operational detail rather than tenant data
 // (STORY-015).
-const PUBLIC_PATHS = new Set(['/health', '/ready', '/auth/login', '/auth/accept-invite']);
+// `/webhooks/stripe` has no session: Stripe proves who it is by signing the
+// body, and the route refuses anything whose signature does not check (STORY-036).
+// `/alerts/prometheus` likewise: Alertmanager proves itself with ALERTMANAGER_TOKEN (STORY-062).
+const PUBLIC_PATHS = new Set(['/health', '/ready', '/auth/login', '/auth/accept-invite', '/webhooks/stripe', '/alerts/prometheus']);
 
 export async function authenticate(req, _res, next) {
   if (PUBLIC_PATHS.has(req.path)) return next();
