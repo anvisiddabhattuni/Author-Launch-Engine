@@ -12,3 +12,4 @@
 10063	FAIL	(Permissions-Policy — sent since the first real scan; camera, microphone, location, payment off)
 90005	IGNORE	(Sec-Fetch-* missing — request headers the scanner's own client did not send; nothing for a server to set)
 10049	IGNORE	(Storable but non-cacheable — deliberate: index.html is no-cache so a deploy takes effect at once)
+10094	IGNORE	(Base64 disclosure — a false positive: the build hashes asset file names, e.g. fraunces-…-7BpKI3vF.woff2)
