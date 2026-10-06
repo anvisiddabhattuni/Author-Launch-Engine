@@ -453,20 +453,37 @@ jobs:
       # `return-code: '1'` is the line that matters. The action's default is
       # '0' — it reports vulnerabilities and passes the build anyway — so the
       # example in its own README is a scan that can never fail CI.
+      #
+      # The first real run (2026-09-30) failed without scanning anything: "no
+      # $DB_PATH / --db-path or $DB_URL / --db-url set". Clair's vulnerability
+      # database is not hosted anywhere (the action's README says so); a
+      # pipeline must build it in `update` mode first. Cached per day, so a
+      # push rebuilds it at most once a day and scans against fresh data.
       - name: Save images for scanning
         run: |
           docker save -o api.tar ale-api:${{ github.sha }}
           docker save -o worker.tar ale-worker:${{ github.sha }}
           docker save -o client.tar ale-client:${{ github.sha }}
+          echo "today=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+      - name: Today's vulnerability database, if already built
+        id: clairdb
+        uses: actions/cache@v4
+        with: { path: matcher.db, key: 'clair-matcher-${{ env.today }}' }
+      - name: Build the vulnerability database
+        if: steps.clairdb.outputs.cache-hit != 'true'
+        uses: quay/clair-action@v0.0.16
+        with: { mode: update, db-file: matcher.db }
       - name: Scan the API image
         uses: quay/clair-action@v0.0.16
-        with: { image-path: api.tar, format: sarif, output: clair-api.sarif, return-code: '1' }
+        with: { image-path: api.tar, db-file: matcher.db, format: sarif, output: clair-api.sarif, return-code: '1' }
       - name: Scan the worker image
+        if: always()
         uses: quay/clair-action@v0.0.16
-        with: { image-path: worker.tar, format: sarif, output: clair-worker.sarif, return-code: '1' }
+        with: { image-path: worker.tar, db-file: matcher.db, format: sarif, output: clair-worker.sarif, return-code: '1' }
       - name: Scan the client image
+        if: always()
         uses: quay/clair-action@v0.0.16
-        with: { image-path: client.tar, format: sarif, output: clair-client.sarif, return-code: '1' }
+        with: { image-path: client.tar, db-file: matcher.db, format: sarif, output: clair-client.sarif, return-code: '1' }
       - name: Keep the reports
         if: always()
         uses: actions/upload-artifact@v4

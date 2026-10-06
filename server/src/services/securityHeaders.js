@@ -69,6 +69,12 @@ export function uiHeaders({ enforce = true, https = false } = {}) {
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'Cross-Origin-Opener-Policy': 'same-origin',
+    // From the first real ZAP scan (2026-09-30, rules 90004 and 10063): the
+    // page's files are for this origin only, and the browser features the
+    // product never uses are switched off rather than left to whoever embeds it.
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
     // HSTS over plain http is ignored by browsers and misleading to a reader,
     // so it is only sent where the connection it describes is real.
     ...(https ? { 'Strict-Transport-Security': `max-age=${HSTS_MAX_AGE}; includeSubDomains` } : {}),

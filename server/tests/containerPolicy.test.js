@@ -161,10 +161,16 @@ describe('Scenario: vulnerability scanning gates the build', () => {
   });
 
   it('every image is scanned by Clair, pinned, and the scan can fail', () => {
-    const scans = ci.jobs.images.steps.filter((s) => String(s.uses ?? '').startsWith('quay/clair-action'));
+    const clair = ci.jobs.images.steps.filter((s) => String(s.uses ?? '').startsWith('quay/clair-action'));
+    for (const s of clair) assert.match(s.uses, /@v\d+\.\d+\.\d+$/, 'pinned to a release, not @main');
+    const scans = clair.filter((s) => s.with.mode !== 'update');
     assert.equal(scans.length, 3, 'one scan per image');
+    // The first real run scanned nothing: no vulnerability database. Each scan
+    // must name the one the update step builds.
+    const update = clair.find((s) => s.with.mode === 'update');
+    assert.ok(update, 'the vulnerability database is built before scanning');
     for (const s of scans) {
-      assert.match(s.uses, /@v\d+\.\d+\.\d+$/, 'pinned to a release, not @main');
+      assert.equal(s.with['db-file'], update.with['db-file'], 'scans against the database just built');
       // The action's default is '0': report and pass. A scan that cannot fail
       // the build is a report nobody reads.
       assert.equal(String(s.with['return-code']), '1');
