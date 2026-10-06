@@ -114,7 +114,7 @@ export function UploadPage({ author }) {
 
       <div className="card">
         <h2>Your books</h2>
-        <p className="hint">Press “Write this week’s posts” to get a week of drafts. They wait for your approval on Review posts.</p>
+        <p className="hint">Press “Write this week’s posts” to get a week of drafts — it can take a minute or two. They wait for your approval on Review posts.</p>
         {books.length === 0 ? (
           <div className="empty">No books yet — add your first one below.</div>
         ) : (

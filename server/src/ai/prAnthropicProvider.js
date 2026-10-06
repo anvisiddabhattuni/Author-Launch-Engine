@@ -204,7 +204,7 @@ export const prAnthropicProvider = {
           },
           body: JSON.stringify({
             model: config.anthropicModel,
-            max_tokens: 4000,
+            max_tokens: config.anthropicMaxTokens,
             messages: [
               {
                 role: 'user',

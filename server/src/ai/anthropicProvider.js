@@ -222,12 +222,16 @@ async function callClaude(operation, prompt, maxTokens) {
         body: JSON.stringify({ model: config.anthropicModel, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
       }),
   });
-  return (body.content ?? []).map((part) => part.text ?? '').join('');
+  const text = (body.content ?? []).map((part) => (part.type === 'text' || part.type === undefined ? part.text ?? '' : '')).join('');
+  if (!text.trim() && body.stop_reason === 'max_tokens') {
+    throw new Error(`Claude used its whole reply budget (${maxTokens} tokens) before writing anything — raise ANTHROPIC_MAX_TOKENS`);
+  }
+  return text;
 }
 
 /** Claude's memes, shaped as drafting candidates. */
 async function writeMemes({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary, platforms, visualFirstPlatforms }) {
-  const text = await callClaude('social.memes', buildMemePrompt({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary }), 2500);
+  const text = await callClaude('social.memes', buildMemePrompt({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary }), config.anthropicMaxTokens);
   const routes = visualFirstPlatforms.length > 0 ? visualFirstPlatforms : platforms;
   const passagesFor = (theme) => (grounding?.themes ?? []).find((t) => t.theme.toLowerCase() === theme.toLowerCase())?.passages ?? [];
 
@@ -266,7 +270,7 @@ export const anthropicProvider = {
     const text = await callClaude(
       'social.generate',
       buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel, revision }),
-      2000,
+      config.anthropicMaxTokens,
     );
     const posts = parsePosts(text)
       .filter((post) => post && typeof post.content === 'string')

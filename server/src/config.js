@@ -25,6 +25,10 @@ export const config = {
   aiProvider: process.env.AI_PROVIDER ?? 'stub',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-5',
+  // The most a reply may use, thinking included. Claude thinks before it
+  // writes, and at 2,000 the thinking alone could use the whole budget and
+  // leave an empty reply (found live, 2026-10-06). Billing is by what is used.
+  anthropicMaxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS ?? 16000),
   // Overridable so the tests can point the real adapter at a local stand-in.
   anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/+$/, ''),
   // STORY-035. The key comes from the environment only — on the server, the

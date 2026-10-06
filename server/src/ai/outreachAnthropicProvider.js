@@ -75,7 +75,7 @@ export const outreachAnthropicProvider = {
           },
           body: JSON.stringify({
                   model: config.anthropicModel,
-                  max_tokens: 1500,
+                  max_tokens: config.anthropicMaxTokens,
                   messages: [{ role: 'user', content: buildPrompt({ opportunity, book, author }) }],
                 }),
         }),

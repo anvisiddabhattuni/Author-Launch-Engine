@@ -114,7 +114,7 @@ describe('Scenario: every integration is routed through the gateway, with its ow
 
   it('applies each integration\'s own policy', () => {
     // A 10s ceiling suits email and abandons an AI generation that takes 20.
-    assert.equal(routeFor('anthropic').timeoutMs, 60_000);
+    assert.equal(routeFor('anthropic').timeoutMs, 180_000);
     assert.equal(routeFor('anthropic').maxAttempts, 2);
     assert.ok(routeFor('email').timeoutMs < routeFor('anthropic').timeoutMs);
     assert.equal(routeFor('podcastIndex').kind, 'directory');
@@ -136,7 +136,7 @@ describe('Scenario: every integration is routed through the gateway, with its ow
     const listed = new Set(health.map((h) => h.service));
     for (const service of Object.keys(INTEGRATIONS)) assert.ok(listed.has(service), `${service} missing from the panel`);
     const anthropic = health.find((h) => h.service === 'anthropic');
-    assert.equal(anthropic.policy.timeoutMs, 60_000);
+    assert.equal(anthropic.policy.timeoutMs, 180_000);
     assert.equal(anthropic.circuit.state, 'closed');
   });
 });

@@ -39,8 +39,8 @@ const route = (service, kind, overrides = {}, why = '') => ({ service, kind, ...
 
 export const INTEGRATIONS = Object.fromEntries(
   [
-    route('anthropic', 'content', { timeoutMs: 60_000, maxAttempts: 2, backoffMs: 2_000 },
-      'Generation takes seconds to tens of seconds; the shared 10s timeout abandoned calls that would have succeeded. Two attempts, because a retry is a second paid generation.'),
+    route('anthropic', 'content', { timeoutMs: 180_000, maxAttempts: 2, backoffMs: 2_000 },
+      'Generation takes tens of seconds, longer when the model thinks first; the shared 10s timeout abandoned calls that would have succeeded, and 60s cut off long batches. Two attempts, because a retry is a second paid generation.'),
     route('email', 'notification', { failureThreshold: 5, cooldownMs: 60_000, alertable: false },
       'Every alert in this system is an email, so an email outage cannot be announced by email. It is shown on the Trust tab and in the audit log instead.'),
     route('openai', 'content', { timeoutMs: 60_000, maxAttempts: 3, backoffMs: 2_000 },
