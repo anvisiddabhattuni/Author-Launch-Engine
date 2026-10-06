@@ -97,6 +97,7 @@ import {
   retireTemplate,
   themedArtwork,
 } from '../services/memeLibrary.js';
+import { cachedReport } from '../services/reportCache.js';
 import { retrieveThemeGrounding } from '../services/themeRetrieval.js';
 import {
   deriveIdentity,
@@ -1429,7 +1430,9 @@ router.get('/tenants/isolation', requirePermission(PERMISSIONS.TENANT_READ_ALL),
  * with the first, and the disagreement would be invisible.
  */
 router.get('/authors/:authorId/trust-dashboard', requirePermission(PERMISSIONS.AUDIT_READ), asyncRoute(async (req, res) => {
-  res.json(await trustDashboard({ authorId: Number(req.params.authorId) }));
+  const authorId = Number(req.params.authorId);
+  // The last result while a fresh one is worked out (reportCache.js): this took 70 s live.
+  res.json(await cachedReport(`trust:${authorId}`, config.reportCacheSeconds * 1000, () => trustDashboard({ authorId })));
 }));
 
 // --- Audit integrity (STORY-013 / REQ-006) ---
@@ -1830,7 +1833,8 @@ router.get('/authors/:authorId/attention', requirePermission(PERMISSIONS.AUDIT_R
  * every factor's measurement and weight, capped when an invariant is broken.
  */
 router.get('/authors/:authorId/governance-score', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.governanceScore), asyncRoute(async (req, res) => {
-  res.json(await governanceScore({ authorId: req.params.authorId, days: req.query.days }));
+  const key = `score:${req.params.authorId}:${req.query.days ?? ''}`;
+  res.json(await cachedReport(key, config.reportCacheSeconds * 1000, () => governanceScore({ authorId: req.params.authorId, days: req.query.days })));
 }));
 
 // --- Anomalies, escalated to a person (STORY-059 / REQ-015, REQ-006) ---

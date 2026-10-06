@@ -36,6 +36,11 @@ export const config = {
     process.env.OPPORTUNITY_SOURCES || ((process.env.AI_PROVIDER || 'stub') === 'anthropic' ? 'web' : 'demo'),
   // Searches per scan — each is billed by Anthropic.
   webSearchMaxUses: Number(process.env.WEB_SEARCH_MAX_USES ?? 6),
+  // How old a slow report may be before a fresh one is worked out in the
+  // background (services/reportCache.js). Production only by default: the
+  // tests tamper with the log and expect the next read to notice.
+  reportCacheSeconds: Number(process.env.REPORT_CACHE_SECONDS ?? (process.env.NODE_ENV === 'production' ? 60 : 0)),
+  auditVerifyCacheSeconds: Number(process.env.AUDIT_VERIFY_CACHE_SECONDS ?? (process.env.NODE_ENV === 'production' ? 300 : 0)),
   // Overridable so the tests can point the real adapter at a local stand-in.
   anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/+$/, ''),
   // STORY-035. The key comes from the environment only — on the server, the

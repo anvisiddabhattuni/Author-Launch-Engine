@@ -32,6 +32,26 @@ const server = app.listen(config.port, async () => {
   console.log(`Author Launch Engine API on http://localhost:${config.port}`);
   console.log(`content provider: ${config.aiProvider}`);
 
+  // The slow reports, worked out now rather than on the first person's screen
+  // (reportCache.js). One at a time, in the background; production only.
+  if (config.reportCacheSeconds > 0) {
+    (async () => {
+      const { verifyAuditLogCached } = await import('./agents/auditSecurityAgent.js');
+      const { trustDashboard } = await import('./agents/trustMonitoringAgent.js');
+      const { governanceScore } = await import('./services/governanceScore.js');
+      const { cachedReport } = await import('./services/reportCache.js');
+      const { query } = await import('./db/pool.js');
+      const ms = config.reportCacheSeconds * 1000;
+      await verifyAuditLogCached();
+      const { rows } = await query('SELECT id FROM authors ORDER BY id');
+      for (const { id } of rows) {
+        await cachedReport(`trust:${id}`, ms, () => trustDashboard({ authorId: Number(id) }));
+        await cachedReport(`score:${id}:`, ms, () => governanceScore({ authorId: id }));
+      }
+      console.log(`reports warmed for ${rows.length} author(s)`);
+    })().catch((e) => console.warn(`warming reports failed: ${e.message}`));
+  }
+
   try {
     const register = () =>
       recordStart({

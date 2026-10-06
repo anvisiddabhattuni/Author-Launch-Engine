@@ -3,7 +3,7 @@ import { query, withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
 import { integrationHealth } from './apiIntegrationAgent.js';
 import { findAwaitingApproval } from './approvalNotificationAgent.js';
-import { verifyAuditLog } from './auditSecurityAgent.js';
+import { verifyAuditLog, verifyAuditLogCached } from './auditSecurityAgent.js';
 import { detectAnomalies } from '../services/anomalies.js';
 import { VERDICTS, compareFormats } from '../services/engagement.js';
 import { runChecks, scoreOf } from '../services/governance.js';
@@ -571,7 +571,7 @@ export async function recommendMix({ authorId, now = new Date() }) {
  */
 export async function trustDashboard({ authorId, now = new Date() } = {}) {
   // The expensive one first, and only once: verification walks every seal.
-  const auditIntegrity = await verifyAuditLog({});
+  const auditIntegrity = await verifyAuditLogCached();
 
   const [checks, anomalies, queue, integrations, system] = await Promise.all([
     runChecks({ auditIntegrity }),

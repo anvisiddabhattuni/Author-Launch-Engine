@@ -1,4 +1,4 @@
-import { verifyAuditLog } from '../agents/auditSecurityAgent.js';
+import { verifyAuditLogCached } from '../agents/auditSecurityAgent.js';
 import { findAwaitingApproval } from '../agents/approvalNotificationAgent.js';
 import { outsideTenantScope, pool } from '../db/pool.js';
 import { runChecks, SEVERITY } from './governance.js';
@@ -137,7 +137,7 @@ export async function governanceScore({ authorId = null, days = WINDOW_DAYS } = 
     }
     const stale = waiting.items.filter((i) => i.ageHours >= 48).length;
 
-    const seals = await verifyAuditLog({}).then((v) => v.status).catch(() => 'unknown');
+    const seals = await verifyAuditLogCached().then((v) => v.status).catch(() => 'unknown');
     const enc = await one('SELECT entries, other_keys, unopened FROM audit_encryption_status()');
     const encryptionOk = Number(enc.other_keys) + Number(enc.unopened) === 0;
 

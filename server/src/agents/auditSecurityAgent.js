@@ -16,6 +16,8 @@
  * anyone; it can make sure that afterwards somebody knows.
  */
 import { createHash } from 'node:crypto';
+import { cachedReport } from '../services/reportCache.js';
+import { config } from '../config.js';
 
 import { pool } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
@@ -169,6 +171,14 @@ export async function sealAuditLog({ now = new Date() } = {}, client = pool) {
  *
  * @returns {Promise<{status: string, checked: number, breaks: Array<object>}>}
  */
+/**
+ * The last full verification, re-run in the background once it is older than
+ * AUDIT_VERIFY_CACHE_SECONDS (production only). Re-hashing every seal decrypts
+ * the whole log; on the live system that took a minute per page view.
+ */
+export const verifyAuditLogCached = () =>
+  cachedReport('audit.verify', config.auditVerifyCacheSeconds * 1000, () => verifyAuditLog({}));
+
 export async function verifyAuditLog({ authorId = null } = {}, client = pool) {
   const { rows: checkpoints } = await client.query(
     'SELECT * FROM audit_checkpoints ORDER BY id',
