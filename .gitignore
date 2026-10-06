@@ -11,3 +11,6 @@ coverage/
 
 # STORY-049: the audit log key — never committed
 server/.keys/
+
+# Design reference images kept locally, not published
+0e13438089d1b9dd04f3bd5417b800cc.jpg
