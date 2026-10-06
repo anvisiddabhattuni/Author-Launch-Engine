@@ -38,7 +38,7 @@ const server = app.listen(config.port, async () => {
     (async () => {
       const { verifyAuditLogCached } = await import('./agents/auditSecurityAgent.js');
       const { trustDashboard } = await import('./agents/trustMonitoringAgent.js');
-      const { governanceScore } = await import('./services/governanceScore.js');
+      const { WINDOW_DAYS, governanceScore } = await import('./services/governanceScore.js');
       const { cachedReport } = await import('./services/reportCache.js');
       const { query } = await import('./db/pool.js');
       const ms = config.reportCacheSeconds * 1000;
@@ -46,7 +46,7 @@ const server = app.listen(config.port, async () => {
       const { rows } = await query('SELECT id FROM authors ORDER BY id');
       for (const { id } of rows) {
         await cachedReport(`trust:${id}`, ms, () => trustDashboard({ authorId: Number(id) }));
-        await cachedReport(`score:${id}:`, ms, () => governanceScore({ authorId: id }));
+        await cachedReport(`score:${Number(id)}:${WINDOW_DAYS}`, ms, () => governanceScore({ authorId: id }));
       }
       console.log(`reports warmed for ${rows.length} author(s)`);
     })().catch((e) => console.warn(`warming reports failed: ${e.message}`));

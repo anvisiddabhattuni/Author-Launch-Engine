@@ -45,7 +45,7 @@ import { smsLog } from '../services/sms.js';
 import { listAnomalies, recordPrometheusAlerts, updateAnomaly } from '../services/anomalyEscalation.js';
 import { timingSafeEqual } from 'node:crypto';
 import { billingFor, chargeSubscription, handleStripeEvent, markReviewed, paymentsToReview, verifyStripeSignature } from '../services/billing.js';
-import { governanceScore } from '../services/governanceScore.js';
+import { WINDOW_DAYS, governanceScore } from '../services/governanceScore.js';
 import { acknowledge, listNotifications } from '../services/securityNotifications.js';
 import { applyFeedback, feedbackFor, recordFeedback } from '../services/contentFeedback.js';
 import { monthStart, scoutOpportunities } from '../agents/opportunityScoutingAgent.js';
@@ -1833,7 +1833,8 @@ router.get('/authors/:authorId/attention', requirePermission(PERMISSIONS.AUDIT_R
  * every factor's measurement and weight, capped when an invariant is broken.
  */
 router.get('/authors/:authorId/governance-score', requirePermission(PERMISSIONS.AUDIT_READ), validate(SCHEMAS.governanceScore), asyncRoute(async (req, res) => {
-  const key = `score:${req.params.authorId}:${req.query.days ?? ''}`;
+  // Keyed by the window it covers: "no days given" and "30" are the same report.
+  const key = `score:${Number(req.params.authorId)}:${Number(req.query.days) || WINDOW_DAYS}`;
   res.json(await cachedReport(key, config.reportCacheSeconds * 1000, () => governanceScore({ authorId: req.params.authorId, days: req.query.days })));
 }));
 
