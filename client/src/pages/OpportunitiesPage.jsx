@@ -59,15 +59,16 @@ export function OpportunitiesPage({ author }) {
       <div className="card">
         <h2>Find opportunities</h2>
         <p className="hint">
-          Search podcast, event and speaker directories for places that suit your book. Then let the app write a
-          pitch for the best ones — you approve each pitch on the Outreach page before anything is sent.
+          The app searches the web for podcasts, events and speaking slots that suit your book — this can take a
+          minute. Then let it write a pitch for the best ones; you approve each pitch on the Outreach page before
+          anything is sent.
         </p>
         <div className="row">
           <button disabled={busy || !bookId} onClick={() =>
             run(() => api.scout(author.id, bookId), (r) =>
               `Looked at ${r.scanned} listings: ${r.identified.length} new opportunit${r.identified.length === 1 ? 'y' : 'ies'} found, ${r.rejected.length} not a good fit.`)
           }>
-            Search for opportunities
+            {busy ? 'Searching…' : 'Search for opportunities'}
           </button>
           <button className="ghost" disabled={busy || !bookId} onClick={() =>
             run(() => api.scout(author.id, bookId, ['speaking']), (r) =>
@@ -109,8 +110,14 @@ export function OpportunitiesPage({ author }) {
               {shown.map((o) => (
                 <tr key={o.id}>
                   <td><span className="pill">{TYPE_LABEL[o.type] ?? o.type}</span></td>
-                  <td><strong>{o.name}</strong></td>
-                  <td>{o.host}</td>
+                  <td>
+                    {o.url ? <a href={o.url} target="_blank" rel="noopener noreferrer"><strong>{o.name}</strong></a> : <strong>{o.name}</strong>}
+                    {o.source === 'web' && <div className="hint">found on the web</div>}
+                  </td>
+                  <td>
+                    {o.host || '—'}
+                    {!o.contact_email && <div className="hint">no email found — contact them through their website</div>}
+                  </td>
                   <td title={o.rationale}>
                     <span className={`pill ${o.qualified_by === 'expertise' ? 'scheduled' : 'approved'}`}>
                       {o.qualified_by === 'expertise' ? 'Fits you as an author' : 'Fits your book'}

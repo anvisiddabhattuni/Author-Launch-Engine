@@ -141,7 +141,25 @@ pool.on('error', (error) => {
   );
 });
 
-export const query = (text, params) => pool.query(text, params);
+/**
+ * One statement, retried if Postgres picks it as a deadlock victim (40P01).
+ *
+ * A lone statement outside a transaction is rolled back whole when it loses a
+ * deadlock, so running it again is safe — the standard answer, and what the
+ * suites' cascading author deletes needed when run in parallel. Inside a
+ * tenant scope the statement is part of an open transaction, which the
+ * deadlock has already aborted; that error is left to the caller.
+ */
+export async function query(text, params) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await pool.query(text, params);
+    } catch (error) {
+      if (error.code !== '40P01' || scope.getStore() || attempt >= 3) throw error;
+      await new Promise((r) => setTimeout(r, 50 * attempt));
+    }
+  }
+}
 
 /**
  * Runs `fn` inside a transaction so a partial failure cannot leave a draft

@@ -722,7 +722,7 @@ router.get('/outreach-messages', validate(SCHEMAS.listOutreach), asyncRoute(asyn
   const { rows } = await query(
     `SELECT m.*,
             o.name AS opportunity_name, o.type AS opportunity_type,
-            o.host AS opportunity_host, o.contact_email, o.relevance,
+            o.host AS opportunity_host, o.contact_email, o.url AS opportunity_url, o.relevance,
             s.status AS send_status, s.external_id AS send_external_id, s.sent_at
        FROM outreach_messages m
        JOIN opportunities o ON o.id = m.opportunity_id

@@ -83,6 +83,11 @@ describe('Scenario: malformed input is refused, never crashed on', () => {
     const crashed = [];
     for (const r of ROUTES) {
       if (r.path === '/auth/login') continue;
+      // Runs a whole worker cycle across every tenant and reads no input, so
+      // garbage proves nothing here — and running it in the middle of the
+      // suite claimed jobs and messages other suites were holding (jobs.test,
+      // messageBus.test: intermittent failures in CI's triple run).
+      if (r.method === 'POST' && r.path === '/jobs/tick') continue;
       if (r.method === 'GET') {
         const res = await call('GET', `${fill(r.path)}?authorId=abc&limit=-1&sinceHours=lots&bookId=zz&status=nope`);
         if (res.status >= 500) crashed.push(`GET ${r.path}: ${res.body?.error}`);

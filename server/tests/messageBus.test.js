@@ -68,6 +68,22 @@ after(async () => {
   await closePool();
 });
 
+/**
+ * Moves a message a day ahead and returns the time to read it at.
+ *
+ * Other suites tick the worker on the real clock, and a real-time tick
+ * delivers every due message in the table — in CI's triple run one took this
+ * suite's message first, and the test found nothing to redeliver. +1 ms
+ * because the row keeps microseconds and a JavaScript Date only milliseconds.
+ */
+async function holdAhead(messageId) {
+  const { rows: [moved] } = await query(
+    "UPDATE agent_messages SET available_at = greatest(available_at, clock_timestamp()) + interval '1 day' WHERE message_id = $1 RETURNING available_at",
+    [messageId],
+  );
+  return new Date(new Date(moved.available_at).getTime() + 1);
+}
+
 describe('Scenario: an agent sends, and the intended recipient receives', () => {
   it('is received by the recipient, with the payload intact', async () => {
     await send({
@@ -81,9 +97,10 @@ describe('Scenario: an agent sends, and the intended recipient receives', () => 
 
   it('only the intended recipient ever sees it', async () => {
     inbox.length = 0;
-    await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId } });
-    assert.deepEqual(await receive({ agent: 'ApprovalNotificationAgent', authorId }), [], 'delivered to the wrong agent');
-    const mine = await receive({ agent: 'APIIntegrationAgent', authorId });
+    const sent = await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId } });
+    const now = await holdAhead(sent.message_id);
+    assert.deepEqual(await receive({ agent: 'ApprovalNotificationAgent', now, authorId }), [], 'delivered to the wrong agent');
+    const mine = await receive({ agent: 'APIIntegrationAgent', now, authorId });
     assert.equal(mine.length, 1);
     await ack(mine[0]);
   });
@@ -122,10 +139,8 @@ describe('Delivered reliably', () => {
   });
 
   it('a message received and never acknowledged comes back', async () => {
-    await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId, n: 1 } });
-    // The database's clock, not this process's: the row was stamped by it, and
-    // a JavaScript "now" can sit milliseconds before a message that exists.
-    const now = await dbNow();
+    const sent = await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId, n: 1 } });
+    const now = await holdAhead(sent.message_id);
     const [first] = await receive({ agent: 'APIIntegrationAgent', now, authorId });
     // The consumer "dies" here. Nothing is delivered until the window passes…
     assert.deepEqual(await receive({ agent: 'APIIntegrationAgent', now: new Date(now.getTime() + 1000), authorId }), []);
@@ -137,10 +152,12 @@ describe('Delivered reliably', () => {
   });
 
   it('two consumers never take the same message', async () => {
+    let now;
     for (let i = 0; i < 6; i += 1) {
-      await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId, i } });
+      const sent = await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId, i } });
+      now = await holdAhead(sent.message_id);
     }
-    const [a, b] = await Promise.all([receive({ agent: 'APIIntegrationAgent', max: 4, authorId }), receive({ agent: 'APIIntegrationAgent', max: 4, authorId })]);
+    const [a, b] = await Promise.all([receive({ agent: 'APIIntegrationAgent', max: 4, now, authorId }), receive({ agent: 'APIIntegrationAgent', max: 4, now, authorId })]);
     const ids = [...a, ...b].map((m) => m.id);
     assert.equal(new Set(ids).size, ids.length, 'a message was delivered to both');
     assert.equal(ids.length, 6);
@@ -150,7 +167,8 @@ describe('Delivered reliably', () => {
   it('a failing handler retries with backoff, then dead-letters — never drops', async () => {
     const m = await send({ from: 'SchedulingAgent', to: 'APIIntegrationAgent', topic: 'post.publish_failed', authorId, payload: { authorId }, maxAttempts: 2 });
     const boom = { APIIntegrationAgent: { 'post.publish_failed': async () => { throw new Error('mail server down'); } } };
-    let now = await dbNow();
+    // A day ahead, out of reach of real-time worker ticks in other suites.
+    let now = await holdAhead(m.message_id);
     const first = await dispatch({ handlers: boom, now, authorId });
     assert.equal(first.find((r) => r.error)?.status, 'retrying');
     now = new Date(now.getTime() + 600_000);
@@ -164,7 +182,7 @@ describe('Delivered reliably', () => {
     assert.ok(status.dead.some((d) => Number(d.id) === Number(m.id)), 'the dead letter is not visible');
 
     await redeliver({ id: m.id, user: { name: 'test operator' } });
-    const back = await dispatch({ handlers: recording, now: new Date(now.getTime() + 1000), authorId });
+    const back = await dispatch({ handlers: recording, now: await holdAhead(m.message_id), authorId });
     assert.ok(back.some((r) => Number(r.id) === Number(m.id) && r.status === 'acked'));
   });
 });

@@ -68,6 +68,8 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-stub}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      # Where opportunities come from: web (Claude searches) or demo. Blank = web with Claude.
+      OPPORTUNITY_SOURCES: ${OPPORTUNITY_SOURCES:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GIT_COMMIT: ${GIT_COMMIT:-}
       # This stack has no TLS terminator in front of nginx, so a browser
@@ -92,6 +94,8 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-stub}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      # Where opportunities come from: web (Claude searches) or demo. Blank = web with Claude.
+      OPPORTUNITY_SOURCES: ${OPPORTUNITY_SOURCES:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AUDIT_KEY_FILE: /run/secrets/audit_key
     secrets: [audit_key]

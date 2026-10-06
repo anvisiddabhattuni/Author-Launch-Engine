@@ -3340,6 +3340,15 @@ These are deliberate deferrals, not oversights:
 - Engagement is one snapshot per post, not a time series, so nothing can show how a post accumulated
   or distinguish a fast-fading meme from a slow-burning essay. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
   tested that an image of this size and type would be accepted by a real platform.
+- Opportunities are found on the open web when `AI_PROVIDER=anthropic` (or `OPPORTUNITY_SOURCES=web`):
+  Claude runs up to `WEB_SEARCH_MAX_USES` (default 6) web searches for podcasts, speaking slots and
+  events that fit the book (`server/src/services/webOpportunities.js`). A listing is kept only if it
+  points at a page the search actually returned; a contact email only if it reads as one; each is
+  then scored by the same scorer as before. The scan and everything dropped are on the audit log
+  (`opportunity.web_searched`). A listing with no email shows "contact them through their website",
+  and the sender refuses a blank address. Anthropic bills web searches per search. Elsewhere
+  (`OPPORTUNITY_SOURCES=demo`, the default without Claude) the fixed catalogue in `directories.js`
+  is used, which is what the demo and tests run on.
 - Memes are written by Claude when `AI_PROVIDER=anthropic`: the drafter offers seven meme formats
   drawn in-house (expectation vs reality, how it started / how it's going, nobody / me, two buttons,
   nah / yeah, starter pack, expanding brain — `server/src/db/memeFormats.js`), Claude picks one per

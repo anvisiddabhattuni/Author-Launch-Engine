@@ -29,6 +29,13 @@ export const config = {
   // writes, and at 2,000 the thinking alone could use the whole budget and
   // leave an empty reply (found live, 2026-10-06). Billing is by what is used.
   anthropicMaxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS ?? 16000),
+  // Where opportunities come from. `web`: Claude searches the web
+  // (services/webOpportunities.js). `demo`: the fixed catalogue in
+  // directories.js. Defaults to the web wherever Claude is the provider.
+  opportunitySources:
+    process.env.OPPORTUNITY_SOURCES || ((process.env.AI_PROVIDER || 'stub') === 'anthropic' ? 'web' : 'demo'),
+  // Searches per scan — each is billed by Anthropic.
+  webSearchMaxUses: Number(process.env.WEB_SEARCH_MAX_USES ?? 6),
   // Overridable so the tests can point the real adapter at a local stand-in.
   anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/+$/, ''),
   // STORY-035. The key comes from the environment only — on the server, the

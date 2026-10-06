@@ -93,7 +93,10 @@ describe('STORY-057: pending approvals and recent actions, with timestamps and p
     await recordAction({ actor: 'Live Author', action: 'draft.rejected', entityType: 'draft', entityId: '1', authorId: tenant.author.id });
     await recordAction({ actor: 'TrustMonitoringAgent', action: 'governance.breach', entityType: 'check', authorId: tenant.author.id });
     const r = await call(as.author, `/authors/${tenant.author.id}/attention`);
-    const [latest, previous] = r.body.recentActions;
+    // Found by what they are, not by position: a worker tick in another suite
+    // can record something for this author in between (seen once in six runs).
+    const latest = r.body.recentActions.find((x) => x.action === 'governance.breach');
+    const previous = r.body.recentActions.find((x) => x.action === 'draft.rejected');
     assert.match(latest.created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     assert.equal(latest.priority, 'high');
     assert.equal(previous.priority, 'medium');

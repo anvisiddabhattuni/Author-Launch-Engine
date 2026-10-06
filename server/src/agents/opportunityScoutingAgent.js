@@ -3,6 +3,7 @@ import { withTransaction } from '../db/pool.js';
 import { recordAction } from '../services/auditLog.js';
 import { deriveExpertise, scoreExpertise } from '../services/authorExpertise.js';
 import { OPPORTUNITY_TYPES, searchAllDirectories } from '../services/directories.js';
+import { searchWeb } from '../services/webOpportunities.js';
 import { scoreOpportunity } from '../services/keywordAnalysis.js';
 
 export const ACTOR = 'OpportunityScoutingAgent';
@@ -83,7 +84,32 @@ export async function scoutOpportunities({
 
     const expertise = deriveExpertise({ books: allBooks, posts, trackRecord });
 
-    const listings = await searchAllDirectories({ from, types, authorId });
+    // Real search when configured; the fixed catalogue otherwise (demo, tests).
+    let listings;
+    if (config.opportunitySources === 'web') {
+      const web = await searchWeb({ book, types: types ?? OPPORTUNITY_TYPES, expertise, from, authorId });
+      listings = web.listings;
+      await recordAction(
+        {
+          actor: ACTOR,
+          action: 'opportunity.web_searched',
+          entityType: 'book',
+          entityId: String(book.id),
+          authorId,
+          metadata: {
+            searches: web.searches,
+            found: web.listings.length,
+            // What was thrown away and why — a link the search never returned
+            // is the one Claude may have made up.
+            dropped: web.dropped,
+            types: types ?? OPPORTUNITY_TYPES,
+          },
+        },
+        client,
+      );
+    } else {
+      listings = await searchAllDirectories({ from, types, authorId });
+    }
     const discoveredMonth = monthStart(from);
 
     await recordAction(

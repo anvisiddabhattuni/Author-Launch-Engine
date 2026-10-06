@@ -18,6 +18,8 @@ import http from 'node:http';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { buildMemePrompt, parseMemes } from '../src/ai/anthropicProvider.js';
+import { stubProvider } from '../src/ai/stubProvider.js';
+import { scoreDraft } from '../src/agents/contentDraftingAgent.js';
 import { draftWeeklyPosts } from '../src/agents/contentDraftingAgent.js';
 import { config } from '../src/config.js';
 import { MEME_FORMATS, SWATCH } from '../src/db/memeFormats.js';
@@ -86,6 +88,28 @@ describe('meme formats: drawn in-house, coloured per book', () => {
     for (let seed = 0; seed < 6; seed += 1) {
       const { template } = await selectTemplate({ seed, identity: DARK });
       assert.match(template.key, /^meme-/, `seed ${seed} picked ${template.key}`);
+    }
+  });
+});
+
+describe('offline, every format still carries the book’s claim', () => {
+  // Found as an intermittent failure: which format a batch gets depends on the
+  // book's id, and two formats had dropped the claim for a stock joke.
+  it('scores at least 0.5 on the book for every format', async () => {
+    const book = { id: 1, title: 'The Quiet Craft', themes: ['deep work', 'craft', 'attention'], content: '' };
+    const claims = ['Deep work is not a productivity trick.', 'Craft is the slow accumulation of decisions nobody claps for.', 'Attention is a muscle.'];
+    const grounding = { themes: book.themes.map((t, i) => ({ theme: t, keyMessage: claims[i], passages: [{ id: i + 1, content: claims.join(' ') }] })) };
+    for (const f of MEME_FORMATS) {
+      const template = { ...f, captionSlots: f.caption_slots, imageRef: f.image_ref };
+      const [meme] = (await stubProvider.generateCandidates({
+        book, voiceProfile: {}, grounding, history: [], platforms: ['twitter'], count: 0, weekOf: '2026-10-05',
+        memeCount: 1, memeTemplates: [template], visualFirstPlatforms: ['twitter'],
+      })).filter((c) => c.format === 'meme');
+      const { themeAlignment } = scoreDraft({
+        content: meme.content, themesUsed: meme.themesUsed, bookThemes: book.themes, history: [], maxChars: 280,
+        grounding, voice: null, bookTitle: book.title, readerText: [meme.content, ...meme.panels].join(' '),
+      });
+      assert.ok(themeAlignment >= 0.5, `${f.key} aligned ${themeAlignment}`);
     }
   });
 });

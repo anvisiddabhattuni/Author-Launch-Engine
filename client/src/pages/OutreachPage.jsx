@@ -71,7 +71,7 @@ export function OutreachPage({ author }) {
                   <span className="draft-id">Pitch #{message.id}</span>
                 </div>
                 <div className="email-preview">
-                  <div className="hint">To: {message.contact_email}</div>
+                  <div className="hint">To: {message.contact_email || <>no email found — <a href={message.opportunity_url} target="_blank" rel="noopener noreferrer">contact them through their website</a></>}</div>
                   <div className="email-subject">{message.subject}</div>
                   <pre>{message.body}</pre>
                 </div>
@@ -128,14 +128,21 @@ export function OutreachPage({ author }) {
               <div className="draft-head">
                 <span className="pill approved">Approved</span>
                 <strong>{message.opportunity_name}</strong>
-                <span className="hint">to {message.contact_email}</span>
+                <span className="hint">{message.contact_email ? `to ${message.contact_email}` : 'no email found'}</span>
               </div>
               <div className="email-subject">{message.subject}</div>
               <div className="row">
+                {!message.contact_email ? (
+                  <span className="hint">
+                    Copy the pitch and send it through <a href={message.opportunity_url} target="_blank" rel="noopener noreferrer">their website</a>.
+                  </span>
+                ) : (
                 <button disabled={busy} onClick={() => run(() => api.sendOutreach(message.id), `Pitch ${message.id} sent to ${message.contact_email}.`)}>
                   Send now
                 </button>
+                )}
               </div>
+              {!message.contact_email && <pre className="email-preview">{message.body}</pre>}
             </div>
           ))
         )}
