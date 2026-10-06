@@ -469,8 +469,18 @@ jobs:
         id: clairdb
         uses: actions/cache@v4
         with: { path: matcher.db, key: 'clair-matcher-${{ env.today }}' }
+      # One feed timing out (Red Hat's rhel-vex, 2026-10-06 — not a base any
+      # of these images uses) failed the whole job before a single image was
+      # scanned. A second try picks up where the first stopped; if that also
+      # fails, the job fails, so no scan ever runs on a half-built database.
       - name: Build the vulnerability database
+        id: clairupdate
         if: steps.clairdb.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: quay/clair-action@v0.0.16
+        with: { mode: update, db-file: matcher.db }
+      - name: Build the vulnerability database (second try)
+        if: steps.clairdb.outputs.cache-hit != 'true' && steps.clairupdate.outcome == 'failure'
         uses: quay/clair-action@v0.0.16
         with: { mode: update, db-file: matcher.db }
       - name: Scan the API image
