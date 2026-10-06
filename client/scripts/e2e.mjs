@@ -61,7 +61,7 @@ async function newPage() {
   return page;
 }
 async function signIn(page, email, password) {
-  await page.goto(`${base}/`, { waitUntil: 'networkidle0' });
+  await page.goto(`${base}/login`, { waitUntil: 'networkidle0' });
   await page.type('input[type=email]', email);
   await page.type('input[type=password]', password);
   await Promise.all([page.click('button[type=submit]'), page.waitForSelector('nav.tabs', { timeout: 10000 })]);
@@ -92,6 +92,19 @@ const expect = (cond, message) => { if (!cond) throw new Error(message); };
 
 const title = `E2E Field ${Date.now()}`;
 const author = await newPage();
+
+await step('the front door: a closed book that opens to the sign-in page', async () => {
+  const visitor = await newPage();
+  await visitor.goto(`${base}/`, { waitUntil: 'networkidle0' });
+  const title = await visitor.$eval('.cover-title', (t) => t.textContent.replace(/\s+/g, ' ').trim());
+  expect(/Author\s*Launch\s*Engine/.test(title), `the cover says "${title}"`);
+  await visitor.click('.cover-front');
+  await visitor.waitForFunction(() => location.pathname === '/login', { timeout: 5000 })
+    .catch(() => { throw new Error('opening the book did not arrive at /login'); });
+  await visitor.waitForFunction(() => document.activeElement?.id === 'login-email', { timeout: 5000 })
+    .catch(() => { throw new Error('the sign-in form did not take focus once the book opened'); });
+  await visitor.close();
+});
 
 await step('an author signs in and uploads a book', async () => {
   await signIn(author, 'mira@example.test', 'quiet-craft');

@@ -1,19 +1,33 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../api.js';
+import './book.css';
 
 /**
- * STORY-064: the sign-in the rest of the app has been assuming since STORY-001.
+ * The front door: a closed book titled "Author Launch Engine". Opening it swings
+ * the cover to the left, where its inside carries a short welcome, and the sign-in
+ * form is printed on the first page. `/` starts closed; `/login` starts open, so a
+ * link, a refresh or an automated check goes straight to the form.
  *
- * The masthead used to read "Signed in as …" over whichever author happened to
- * be first in the database. Nobody had signed in; there was nothing to sign in
- * to. Every approval recorded a name somebody typed into a box.
+ * STORY-064: the sign-in itself. Every approval is recorded against the account
+ * that made it; without a session the API returns 401.
  */
 export function LoginPage({ onSignedIn }) {
+  const startsOpen = typeof window !== 'undefined' && window.location.pathname !== '/';
+  const [open, setOpen] = useState(startsOpen);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const emailRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // Once open, the address says so: a refresh stays on the page, not the cover.
+    if (window.location.pathname === '/') window.history.replaceState(null, '', '/login');
+    const t = setTimeout(() => emailRef.current?.focus({ preventScroll: true }), startsOpen ? 0 : 900);
+    return () => clearTimeout(t);
+  }, [open, startsOpen]);
 
   async function submit(event) {
     event.preventDefault();
@@ -22,100 +36,116 @@ export function LoginPage({ onSignedIn }) {
     try {
       onSignedIn(await api.login(email, password));
     } catch (e) {
-      // A request that never reached the server rejects in fetch itself, with a
-      // message ("Failed to fetch") that says nothing about why. App.jsx already
-      // points at the likely cause; the sign-in screen is where someone hits it
-      // first, so it says the same thing here.
-      setError(
-        e instanceof TypeError ? `${e.message} — is the API running on port 4000?` : e.message,
-      );
+      setError(e instanceof TypeError ? `${e.message} — is the API running on port 4000?` : e.message);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="shell">
-      <header className="masthead">
-        <div>
-          <h1>Author Launch Engine</h1>
-          <div className="story">STORY-064 · Login and basic permissions</div>
-        </div>
-      </header>
+    <main className={`book-stage${open ? ' is-open' : ''}`}>
+      <div className="book" aria-live="polite">
+        {/* The first page: the sign-in form. */}
+        <section className="page page-right" aria-hidden={!open}>
+          <div className="page-inner">
+            <p className="folio">Chapter one</p>
+            <h2>Sign in</h2>
+            <p className="page-lede">Pick up where your launch left off.</p>
 
-      <div className="card" style={{ maxWidth: 460 }}>
-        <h2>Sign in</h2>
-        <p className="hint">
-          Every approval is recorded against the account that made it. Without a session the API
-          returns 401 and nothing can be drafted, published or approved.
-        </p>
+            {error && <div className="paper-banner" role="alert">{error}</div>}
 
-        {error && <div className="banner error">{error}</div>}
+            <form onSubmit={submit}>
+              <label htmlFor="login-email">Email</label>
+              <input
+                id="login-email"
+                ref={emailRef}
+                type="email"
+                autoComplete="username"
+                value={email}
+                tabIndex={open ? 0 : -1}
+                onChange={(e) => setEmail(e.target.value)}
+              />
 
-        <form onSubmit={submit}>
-          <label htmlFor="login-email">Email</label>
-          <input
-            id="login-email"
-            type="email"
-            autoComplete="username"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
+              <label htmlFor="login-password">Password</label>
+              <input
+                id="login-password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                tabIndex={open ? 0 : -1}
+                onChange={(e) => setPassword(e.target.value)}
+              />
 
-          <label htmlFor="login-password">Password</label>
-          <input
-            id="login-password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+              <button type="submit" className="paper-button" tabIndex={open ? 0 : -1} disabled={busy || !email.trim() || !password}>
+                {busy ? 'Signing in…' : 'Sign in'}
+              </button>
+            </form>
 
-          <div className="row" style={{ marginTop: 14 }}>
-            <button type="submit" disabled={busy || !email.trim() || !password}>
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
+            <p className="page-note">
+              New here? Your publisher sends an invitation — follow the link in that email to choose your password.
+            </p>
+
+            {/* STORY-030: the published demo passwords, only where they are the
+                passwords. The production build sets VITE_SHOW_DEMO_LOGINS=false. */}
+            {import.meta.env.VITE_SHOW_DEMO_LOGINS !== 'false' && (
+              <details className="demo-logins">
+                <summary>Demo accounts</summary>
+                <table>
+                  <tbody>
+                    <tr><td className="mono">mira@example.test</td><td className="mono">quiet-craft</td><td>an author</td></tr>
+                    <tr><td className="mono">tomas@example.test</td><td className="mono">second-shelf</td><td>another author</td></tr>
+                    <tr><td className="mono">ops@example.test</td><td className="mono">ops-password</td><td>admin</td></tr>
+                    <tr><td className="mono">auditor@example.test</td><td className="mono">compliance-only</td><td>read-only</td></tr>
+                  </tbody>
+                </table>
+              </details>
+            )}
+            <p className="page-number">1</p>
           </div>
-        </form>
+        </section>
 
-        {/* STORY-030: the published demo passwords, shown only where they are
-            the passwords. The production image is built with
-            VITE_SHOW_DEMO_LOGINS=false, and its seed sets random ones. */}
-        {import.meta.env.VITE_SHOW_DEMO_LOGINS !== 'false' && (
-          <>
-        <p className="hint" style={{ marginTop: 18 }}>
-          Seeded demo logins — these are printed by <span className="mono">npm run db:reset</span>{' '}
-          and are not secret:
-        </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Password</th>
-              <th>Sees</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td className="mono">mira@example.test</td>
-              <td className="mono">quiet-craft</td>
-              <td>Her own work only</td>
-            </tr>
-            <tr>
-              <td className="mono">tomas@example.test</td>
-              <td className="mono">second-shelf</td>
-              <td>A different tenant</td>
-            </tr>
-            <tr>
-              <td className="mono">ops@example.test</td>
-              <td className="mono">ops-password</td>
-              <td>All tenants (admin)</td>
-            </tr>
-          </tbody>
-        </table>
-          </>
-        )}
+        {/* The cover: front shows the title; its inside becomes the left page. */}
+        <div className="cover">
+          <button
+            type="button"
+            className="cover-front"
+            onClick={() => setOpen(true)}
+            disabled={open}
+            aria-label="Open the book to sign in"
+          >
+            <span className="cover-frame">
+              <span className="cover-kicker">A launch companion for authors</span>
+              <span className="cover-title">
+                <span>Author</span>
+                <span>Launch</span>
+                <span>Engine</span>
+              </span>
+              <span className="cover-rule" aria-hidden="true" />
+              <span className="cover-tagline">Social · Outreach · Press · Trust</span>
+            </span>
+          </button>
+          <div className="cover-back" aria-hidden={!open}>
+            <div className="page-inner">
+              <p className="folio">Frontispiece</p>
+              <blockquote>
+                Every post drafted from your book, in your voice — and nothing goes out until a person says yes.
+              </blockquote>
+              <ul className="endpaper-list">
+                <li><span>Write</span> drafts grounded in your book’s themes</li>
+                <li><span>Review</span> everything before it leaves</li>
+                <li><span>Reach</span> podcasts, events and press</li>
+                <li><span>Trust</span> an audit trail for every decision</li>
+              </ul>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+
+      {!open && (
+        <button type="button" className="open-hint" onClick={() => setOpen(true)}>
+          Open the book
+        </button>
+      )}
+    </main>
   );
 }

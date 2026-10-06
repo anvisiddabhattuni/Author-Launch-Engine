@@ -90,10 +90,7 @@ export function App() {
       <header className="masthead">
         <div>
           <h1>Author Launch Engine</h1>
-          <div className="story">
-            STORY-001 · Social content &nbsp;·&nbsp; STORY-002 · Outreach &nbsp;·&nbsp; STORY-003 ·
-            Press materials
-          </div>
+          <div className="story tagline">A launch companion for authors — social, outreach, press and trust</div>
         </div>
         <div className="story">
           Signed in as <strong>{user.name}</strong>
@@ -182,6 +179,7 @@ export function App() {
           <Route path="/api-keys" element={<ApiKeysPage author={author} user={user} />} />
           <Route path="/billing" element={<BillingPage author={author} user={user} />} />
           <Route path="/accept-invite" element={<Navigate to="/upload" replace />} />
+          <Route path="/login" element={<Navigate to="/upload" replace />} />
         </Routes>
       )}
     </div>

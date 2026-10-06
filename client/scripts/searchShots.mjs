@@ -24,7 +24,7 @@ try {
   // 1 — the app.
   const app = await browser.newPage();
   await app.setViewport({ width: 1180, height: 900, deviceScaleFactor: 2 });
-  await app.goto(UI, { waitUntil: 'networkidle0' });
+  await app.goto(`${UI}/login`, { waitUntil: 'networkidle0' });
   await app.type('input[type=email]', 'mira@example.test');
   await app.type('input[type=password]', 'quiet-craft');
   await Promise.all([app.click('button[type=submit]'), app.waitForSelector('nav.tabs')]);

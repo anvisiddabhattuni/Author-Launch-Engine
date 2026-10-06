@@ -97,7 +97,7 @@ async function signedInPage({ cspOverride = null } = {}) {
     });
   }
 
-  await page.goto(`${base}/`, { waitUntil: 'networkidle0' });
+  await page.goto(`${base}/login`, { waitUntil: 'networkidle0' });
   await page.type('input[type=email]', 'mira@example.test');
   await page.type('input[type=password]', 'quiet-craft');
   await Promise.all([
