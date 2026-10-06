@@ -32,6 +32,24 @@ import {
 } from '../src/services/memeLibrary.js';
 import { scheduleDraft } from '../src/services/scheduler.js';
 
+
+/**
+ * Deleting a test author cascades through many tables while other suites are
+ * drafting in parallel; Postgres may pick this cleanup as a deadlock victim
+ * (seen once in CI's triple run). The victim is rolled back, so trying again
+ * is safe.
+ */
+async function deleteAuthor(id) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await query('DELETE FROM authors WHERE id = $1', [id]);
+    } catch (error) {
+      if (error.code !== '40P01' || attempt >= 5) throw error;
+      await new Promise((r) => setTimeout(r, 100 * attempt));
+    }
+  }
+}
+
 const BOOK_THEMES = ['deep work', 'craft', 'attention', 'resilience'];
 const BOOK_CONTENT = [
   'Every craft has a moment where technique stops being the point. What remains is attention.',
@@ -83,7 +101,7 @@ before(async () => {
 });
 
 after(async () => {
-  await query('DELETE FROM authors WHERE id = $1', [authorId]);
+  await deleteAuthor(authorId);
   if (created.length > 0) {
     // Retired, not deleted — which is the rule this very story argues for.
     // These fixtures carry real licences, so the generator can and does pick

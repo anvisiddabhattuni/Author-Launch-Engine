@@ -25,6 +25,24 @@ import { closePool, ownerQuery, query } from '../src/db/pool.js';
 import { assessTemplate, composeFromTemplate, getTemplate, jokeFor, selectTemplate, themedArtwork } from '../src/services/memeLibrary.js';
 import { scoreIdentity } from '../src/services/visualIdentity.js';
 
+
+/**
+ * Deleting a test author cascades through many tables while other suites are
+ * drafting in parallel; Postgres may pick this cleanup as a deadlock victim
+ * (seen once in CI's triple run). The victim is rolled back, so trying again
+ * is safe.
+ */
+async function deleteAuthor(id) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await query('DELETE FROM authors WHERE id = $1', [id]);
+    } catch (error) {
+      if (error.code !== '40P01' || attempt >= 5) throw error;
+      await new Promise((r) => setTimeout(r, 100 * attempt));
+    }
+  }
+}
+
 const stamp = Date.now();
 const svgText = (ref) => Buffer.from(String(ref).split(',')[1], 'base64').toString('utf8');
 const DARK = { palette: { ground: '#120f05', ink: '#f3f3f3', accent: '#dd9645', mode: 'dark', tolerance: 60 }, doNotUse: [] };
@@ -174,7 +192,7 @@ describe('a weekly batch drafted with Claude', () => {
     config.anthropicApiKey = saved.key;
     config.anthropicBaseUrl = saved.url;
     await ownerQuery("DELETE FROM integration_circuits WHERE service = 'anthropic'");
-    await query('DELETE FROM authors WHERE id = $1', [authorId]);
+    await deleteAuthor(authorId);
     await new Promise((r) => fake.close(r));
     await closePool();
   });
