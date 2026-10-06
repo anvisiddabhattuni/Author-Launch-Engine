@@ -160,9 +160,14 @@ describe('STORY-058: a governance score, with its breakdown, from the latest dat
     const honouredBefore = before.factors.find((f) => f.id === 'honoured');
     // A post that went out with no approval on record — the thing the gate forbids.
     const d = await draft('approved', 1);
+    // `sim-`: the house mark for a simulated row (STORY-013). The global
+    // gate.posts invariant ignores it, so other suites running alongside do
+    // not see this test's deliberate breach (found in CI's third repeated run);
+    // the score's own factor counts every published post, so it still sees it.
     await ownerQuery(
-      "INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status, published_at) VALUES ($1,$2,'twitter', now(), 'published', now())",
-      [d, tenant.author.id],
+      `INSERT INTO scheduled_posts (draft_id, author_id, platform, scheduled_for, status, published_at, external_id)
+       VALUES ($1,$2,'twitter', now(), 'published', now(), $3)`,
+      [d, tenant.author.id, `sim-trustlive-${stamp}`],
     );
     const afterScore = (await call(as.author, `/authors/${tenant.author.id}/governance-score`)).body;
     const honouredAfter = afterScore.factors.find((f) => f.id === 'honoured');
