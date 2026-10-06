@@ -44,9 +44,15 @@ try {
   await g.type('input[name=user]', 'admin');
   await g.type('input[name=password]', process.env.GRAFANA_ADMIN_PASSWORD);
   await Promise.all([g.click('button[type=submit]'), g.waitForNavigation({ waitUntil: 'networkidle0' })]);
+  // Tall enough for every panel at its full height, and wait until the time
+  // series have drawn: the first screenshot (2026-09-30) caught them as empty
+  // rows, taken before uPlot had rendered.
+  await g.setViewport({ width: 1600, height: 1900, deviceScaleFactor: 1.5 });
   for (const [name, range] of [['grafana-7d', 'from=now-7d&to=now'], ['grafana-custom-range', 'from=now-6h&to=now']]) {
     await g.goto(`${GRAFANA}/d/ale-trust?orgId=1&${range}`, { waitUntil: 'networkidle0' });
-    await pause(4000);
+    await g.waitForFunction(() => document.querySelectorAll('.uplot canvas').length >= 4, { timeout: 30_000 })
+      .catch(() => console.log(`${name}: fewer than 4 charts drew within 30 s — captured as is`));
+    await pause(3000);
     await g.screenshot({ path: `${out}/${name}.png`, fullPage: true });
     console.log(`shot ${name}`);
   }

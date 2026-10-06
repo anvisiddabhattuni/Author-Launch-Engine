@@ -209,6 +209,9 @@ async function escalate(event) {
             escalated_to = $3, escalation_failed = $4 WHERE id = $1 RETURNING *`,
     [event.id, delivered.length, delivered, failed],
   );
+  // Gone while it was being escalated: its tenant was deleted, and its
+  // anomalies with it (found by CI's third repeated run). Nothing to record.
+  if (!updated) return null;
   await recordAction({
     actor: ACTOR,
     action: delivered.length ? 'anomaly.escalated' : 'anomaly.escalation_failed',
@@ -270,7 +273,10 @@ export async function scanAndEscalate({ now = new Date() } = {}) {
     }
     const { rows: pending } = await pool.query("SELECT * FROM anomaly_events WHERE escalated_at IS NULL AND status IN ('open', 'acknowledged') ORDER BY id");
     const escalated = [];
-    for (const e of pending) escalated.push(await escalate(e));
+    for (const e of pending) {
+      const done = await escalate(e);
+      if (done) escalated.push(done);
+    }
     return { findings: current.length, skippedDeletedTenants: gone.length + deletedMidScan, raised, escalated };
   });
 }
@@ -374,7 +380,7 @@ export async function recordPrometheusAlerts(payload, { now = new Date() } = {})
       );
       if (row.inserted) {
         await recordAction({ actor: 'Prometheus', action: 'anomaly.detected', entityType: 'anomaly', entityId: String(row.id), metadata: { alert: name, severity: row.severity } });
-        out.push({ alert: name, status: 'firing', id: row.id, escalated: (await escalate(row)).escalated_at != null });
+        out.push({ alert: name, status: 'firing', id: row.id, escalated: (await escalate(row))?.escalated_at != null });
       } else {
         out.push({ alert: name, status: 'firing', id: row.id, repeat: true });
       }
