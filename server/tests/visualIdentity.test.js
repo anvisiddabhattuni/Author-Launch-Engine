@@ -19,7 +19,7 @@ import { draftWeeklyPosts } from '../src/agents/contentDraftingAgent.js';
 import { config } from '../src/config.js';
 import { closePool, query } from '../src/db/pool.js';
 import { REASONS, assess } from '../src/services/escalationPolicy.js';
-import { listTemplates, selectTemplate } from '../src/services/memeLibrary.js';
+import { listTemplates, selectTemplate, themedArtwork } from '../src/services/memeLibrary.js';
 import {
   ACTOR as IDENTITY_ACTOR,
   IDENTITY_FINDINGS,
@@ -199,7 +199,8 @@ describe('STORY-068: off-identity output is caught', () => {
 
   it('prefers an on-identity template rather than making a human fix its choice', async () => {
     const { template } = await selectTemplate({ authorId, seed: 4, identity: guide });
-    const scored = scoreIdentity({ imageRef: template.imageRef, identity: guide });
+    // Judged as it will be drawn: meme formats are coloured per book.
+    const scored = scoreIdentity({ imageRef: themedArtwork(template.imageRef, guide), identity: guide });
     assert.equal(scored.score, 1, `${template.key} was chosen off-identity`);
   });
 });

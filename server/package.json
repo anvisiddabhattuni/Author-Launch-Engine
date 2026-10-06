@@ -15,7 +15,8 @@
     "worker": "node src/jobs/worker.js",
     "test:unit": "node --test tests/unit/*.test.js tests/containerPolicy.test.js",
     "test:integration": "node --test tests/*.test.js",
-    "search:aggregate": "node src/searchAggregate.js"
+    "search:aggregate": "node src/searchAggregate.js",
+    "db:sync-templates": "node src/db/syncMemeTemplates.js"
   },
   "dependencies": {
     "amqplib": "^0.10.9",

@@ -397,7 +397,8 @@ button.link:hover:not(:disabled) { background: transparent; color: var(--accent-
   margin: 12px 0;
 }
 .meme img {
-  width: 260px;
+  /* Big enough to read the words in the picture, which is the whole post. */
+  width: 420px;
   max-width: 100%;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);

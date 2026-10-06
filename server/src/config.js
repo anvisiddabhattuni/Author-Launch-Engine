@@ -25,6 +25,8 @@ export const config = {
   aiProvider: process.env.AI_PROVIDER ?? 'stub',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-5',
+  // Overridable so the tests can point the real adapter at a local stand-in.
+  anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/+$/, ''),
   // STORY-035. The key comes from the environment only — on the server, the
   // mode-600 .env beside the stack — and is never logged. The base URL is
   // configurable so the tests can stand a local server in for OpenAI.

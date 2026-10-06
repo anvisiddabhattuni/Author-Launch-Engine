@@ -95,6 +95,7 @@ import {
   assessTemplate,
   listTemplates,
   retireTemplate,
+  themedArtwork,
 } from '../services/memeLibrary.js';
 import { retrieveThemeGrounding } from '../services/themeRetrieval.js';
 import {
@@ -1653,11 +1654,14 @@ router.get('/meme-templates', validate(SCHEMAS.listTemplates), asyncRoute(async 
   res.json(
     templates.map((template) => {
       const verdict = assessTemplate(template);
+      // A meme format is shown, and judged, in this book's colours.
+      const imageRef = themedArtwork(template.imageRef, identity);
       const fit = identity
-        ? scoreIdentity({ imageRef: template.imageRef, identity })
+        ? scoreIdentity({ imageRef, identity })
         : null;
       return {
         ...template,
+        imageRef,
         usable: verdict.usable,
         reason: verdict.reason,
         detail: verdict.detail,

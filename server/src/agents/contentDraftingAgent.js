@@ -7,7 +7,8 @@ import { reviewDraft } from '../services/contentReview.js';
 import { assess } from '../services/escalationPolicy.js';
 import { checkVoice, deriveVoice } from '../services/voiceProfile.js';
 import { RIGHTS, reviewMemeCandidate } from '../services/brandSafety.js';
-import { composeFromTemplate, selectTemplate } from '../services/memeLibrary.js';
+import { MEME_FORMAT_KEYS } from '../db/memeFormats.js';
+import { ACTOR as LIBRARY_ACTOR, assessTemplate, composeFromTemplate, jokeFor, listTemplates, selectTemplate } from '../services/memeLibrary.js';
 import { deriveIdentity, getActiveIdentity, saveIdentity, scoreIdentity } from '../services/visualIdentity.js';
 import {
   ACTOR as CONTENT_AGENT,
@@ -421,6 +422,14 @@ export async function draftWeeklyPosts({
       chosenTemplates.push(template);
     }
 
+    // The meme formats a writer that can choose (Claude) may pick from: licensed,
+    // active, and drawn to be coloured per book, so every one is on-identity.
+    const memeLibrary = chosenTemplates.length > 0
+      ? (await listTemplates({ activeOnly: true }, client))
+          .filter((t) => MEME_FORMAT_KEYS.has(t.key) && assessTemplate(t).usable)
+          .map((t) => ({ ...t, joke: jokeFor(t) }))
+      : [];
+
     const candidates = await provider.generateCandidates({
       book,
       author,
@@ -436,6 +445,7 @@ export async function draftWeeklyPosts({
       memeCount: memes,
       visualFirstPlatforms: visualFirst,
       memeTemplates: chosenTemplates,
+      memeLibrary,
       bookModel: bookModel.parameters,
       revision: revisionOf
         ? { of: revisionOf, note: revisionNote, previous: previousContent, themes: revisionThemes, avoidPassages }
@@ -457,6 +467,23 @@ export async function draftWeeklyPosts({
       },
       client,
     );
+
+    // A writer that picked its own format: the choice goes on the record like
+    // the library's own selections do.
+    for (const c of candidates) {
+      if (c.format !== 'meme' || c.chosenBy !== 'writer') continue;
+      await recordAction(
+        {
+          actor: LIBRARY_ACTOR,
+          action: 'meme_template.selected',
+          entityType: 'meme_template',
+          entityId: c.template.key,
+          authorId,
+          metadata: { template: c.template.key, layout: c.template.layout, licence: c.template.licence, chosenBy: provider.name },
+        },
+        client,
+      );
+    }
 
     const saved = [];
     for (const candidate of candidates) {
@@ -496,6 +523,8 @@ export async function draftWeeklyPosts({
             imageRef: composeFromTemplate({
               template: candidate.template,
               captions: candidate.captions,
+              // In the book's colours (memeFormats.js), the version in force now.
+              identity,
             }),
             altText: candidate.altText ?? '',
             template: candidate.template.key,
@@ -513,6 +542,8 @@ export async function draftWeeklyPosts({
               templateName: candidate.template.name,
               origin: candidate.template.source,
               generator: 'composeFromTemplate/svg',
+              // Who wrote the words in the picture.
+              writer: candidate.writtenBy ?? provider.name,
               licence: candidate.template.licence,
             },
           }

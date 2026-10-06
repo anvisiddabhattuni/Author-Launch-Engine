@@ -1,7 +1,8 @@
 import { callExternal, httpJson } from '../agents/apiIntegrationAgent.js';
 import { config } from '../config.js';
+import { stubProvider } from './stubProvider.js';
 
-const API_URL = 'https://api.anthropic.com/v1/messages';
+const apiUrl = () => `${config.anthropicBaseUrl}/v1/messages`;
 
 const PLATFORM_BRIEF = {
   twitter: 'under 280 characters, punchy, at most one hashtag',
@@ -137,52 +138,167 @@ function parsePosts(text) {
   return parsed.posts;
 }
 
-export { buildPrompt, parsePosts };
+/**
+ * The meme brief: the formats on offer, what the book argues, and the voice.
+ *
+ * Claude picks the format that fits each joke and writes the words in the
+ * picture — the first version of this filled every format from one fixed
+ * phrase per slot, which read like a quote card with a template's name on it.
+ */
+function buildMemePrompt({ book, voiceProfile, voice, grounding, bookModel = null, memeCount, memeLibrary }) {
+  const formats = memeLibrary.map((t) => [
+    `- "${t.key}" — ${t.name}. ${t.joke ?? ''}`,
+    ...t.captionSlots.map((sl) => `    ${sl.name}: ${sl.role} (at most ${sl.maxChars} characters)`),
+  ].join('\n'));
+
+  return [
+    `You make memes that promote the book "${book.title}" on social media.`,
+    'A good one is funny or painfully relatable to the book\'s readers AND carries one of the book\'s real ideas.',
+    'It must be about this book specifically — a reader should be able to tell which book it came from.',
+    '',
+    `Book themes: ${book.themes.join(', ') || 'unspecified'}`,
+    voiceBrief(voice, voiceProfile),
+    '',
+    groundingBrief(grounding) || `Book excerpt:\n${book.content.slice(0, 4000)}`,
+    '',
+    bookModelBrief(bookModel),
+    '',
+    'Meme formats you may use (fill every slot the format lists, short and punchy):',
+    ...formats,
+    '',
+    `Write exactly ${memeCount} meme${memeCount === 1 ? '' : 's'}. Use a different format for each where you can.`,
+    'For each: the format key, the one theme it argues (from the themes above), the words for each slot,',
+    'a short post to go with the image (1–2 sentences, in the author\'s voice), and alt text describing the',
+    'finished image for someone who cannot see it.',
+    'No exclamation marks or hype words unless the author\'s own posts use them.',
+    'Respond with JSON only, in exactly this shape:',
+    '{"memes":[{"format":"meme-expectation-reality","theme":"...","captions":{"expectation":"...","reality":"..."},"post":"...","altText":"..."}]}',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** The memes in a reply, checked against the formats that were offered. */
+function parseMemes(text, memeLibrary) {
+  const raw = (text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1] ?? text);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error(`Anthropic meme response contained no JSON object: ${text.slice(0, 200)}`);
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  if (!Array.isArray(parsed.memes)) throw new Error('Anthropic meme response JSON has no "memes" array');
+
+  const byKey = new Map(memeLibrary.map((t) => [t.key, t]));
+  return parsed.memes.flatMap((m) => {
+    const template = byKey.get(m?.format);
+    // A format nobody offered, or a reply with no words for the picture, is dropped.
+    if (!template || !m.captions || typeof m.captions !== 'object') return [];
+    const captions = {};
+    for (const sl of template.captionSlots) {
+      const words = String(m.captions[sl.name] ?? '').replace(/\s+/g, ' ').trim();
+      if (!words) continue;
+      captions[sl.name] = sl.maxChars && words.length > sl.maxChars ? `${words.slice(0, sl.maxChars - 1).trimEnd()}…` : words;
+    }
+    if (Object.keys(captions).length < template.captionSlots.length) return [];
+    return [{ template, theme: String(m.theme ?? ''), captions, post: String(m.post ?? '').trim(), altText: String(m.altText ?? '').trim() }];
+  });
+}
+
+async function callClaude(operation, prompt, maxTokens) {
+  // Through the API Integration Agent (STORY-016): timed out rather than
+  // hanging forever, retried on a 429 or a 5xx and not on a 400, and every
+  // attempt on the record.
+  const body = await callExternal({
+    service: 'anthropic',
+    operation,
+    fn: (signal) =>
+      httpJson(apiUrl(), {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': config.anthropicApiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({ model: config.anthropicModel, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+      }),
+  });
+  return (body.content ?? []).map((part) => part.text ?? '').join('');
+}
+
+/** Claude's memes, shaped as drafting candidates. */
+async function writeMemes({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary, platforms, visualFirstPlatforms }) {
+  const text = await callClaude('social.memes', buildMemePrompt({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary }), 2500);
+  const routes = visualFirstPlatforms.length > 0 ? visualFirstPlatforms : platforms;
+  const passagesFor = (theme) => (grounding?.themes ?? []).find((t) => t.theme.toLowerCase() === theme.toLowerCase())?.passages ?? [];
+
+  return parseMemes(text, memeLibrary).slice(0, memeCount).map((m, i) => {
+    const theme = book.themes.find((t) => t.toLowerCase() === m.theme.toLowerCase()) ?? m.theme;
+    const panels = m.template.captionSlots.map((sl) => m.captions[sl.name]).filter(Boolean);
+    return {
+      format: 'meme',
+      platform: routes[i % routes.length],
+      content: m.post || panels.join(' '),
+      themesUsed: theme ? [theme] : [],
+      groundedIn: passagesFor(theme).map((p) => p.id),
+      template: m.template,
+      captions: m.captions,
+      panels,
+      altText: m.altText || `${m.template.name} meme: ${panels.join(' — ')}`,
+      chosenBy: 'writer',
+      writtenBy: 'anthropic',
+    };
+  });
+}
+
+export { buildMemePrompt, buildPrompt, parseMemes, parsePosts };
 
 export const anthropicProvider = {
   name: 'anthropic',
 
-  async generateCandidates({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel = null, revision = null }) {
+  async generateCandidates({
+    book, voiceProfile, voice, grounding, history, platforms, count, bookModel = null, revision = null,
+    memeCount = 0, memeTemplates = [], memeLibrary = [], visualFirstPlatforms = [], weekOf,
+  }) {
     if (!config.anthropicApiKey) {
       throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set');
     }
 
-    // Through the API Integration Agent (STORY-016): timed out rather than
-    // hanging forever, retried on a 429 or a 5xx and not on a 400, and every
-    // attempt on the record. This is the one adapter that makes a real
-    // network call, so it is the one where a bare fetch was a live hazard.
-    const body = await callExternal({
-      service: 'anthropic',
-      operation: 'social.generate',
-      fn: (signal) =>
-        httpJson(API_URL, {
-          method: 'POST',
-          signal,
-          headers: {
-            'content-type': 'application/json',
-            'x-api-key': config.anthropicApiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-                  model: config.anthropicModel,
-                  max_tokens: 2000,
-                  messages: [
-                    {
-                      role: 'user',
-                      content: buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel, revision }),
-                    },
-                  ],
-                }),
-        }),
-    });
-    const text = (body.content ?? []).map((part) => part.text ?? '').join('');
-
-    return parsePosts(text)
+    const text = await callClaude(
+      'social.generate',
+      buildPrompt({ book, voiceProfile, voice, grounding, history, platforms, count, bookModel, revision }),
+      2000,
+    );
+    const posts = parsePosts(text)
       .filter((post) => post && typeof post.content === 'string')
       .map((post) => ({
         platform: platforms.includes(post.platform) ? post.platform : platforms[0],
         content: post.content,
         themesUsed: Array.isArray(post.themesUsed) ? post.themesUsed : [],
       }));
+
+    // A revision rewrites one text post; memes are a batch's business.
+    if (revision || memeCount <= 0) return posts;
+
+    // Memes are written by Claude from the formats on offer. If that call fails
+    // or returns fewer than asked, the gap is filled by the offline writer so
+    // the batch still carries its memes — marked as such on each draft.
+    let memes = [];
+    if (memeLibrary.length > 0) {
+      try {
+        memes = await writeMemes({ book, voiceProfile, voice, grounding, bookModel, memeCount, memeLibrary, platforms, visualFirstPlatforms });
+      } catch (error) {
+        console.warn(`[anthropic] memes fell back to the offline writer: ${error.message}`);
+      }
+    }
+    if (memes.length < memeCount && memeTemplates.length > 0) {
+      const filler = await stubProvider.generateCandidates({
+        book, voiceProfile, voice, grounding, history, platforms, count: 0, weekOf,
+        memeCount: memeCount - memes.length,
+        memeTemplates: memeTemplates.slice(memes.length),
+        visualFirstPlatforms,
+      });
+      memes = memes.concat(filler.filter((c) => c.format === 'meme').map((c) => ({ ...c, writtenBy: 'stub (fallback)' })));
+    }
+    return posts.concat(memes);
   },
 };

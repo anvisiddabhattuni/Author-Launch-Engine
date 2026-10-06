@@ -3340,6 +3340,15 @@ These are deliberate deferrals, not oversights:
 - Engagement is one snapshot per post, not a time series, so nothing can show how a post accumulated
   or distinguish a fast-fading meme from a slow-burning essay. The mocked publisher accepts a meme's caption and never sees the image, so nothing has
   tested that an image of this size and type would be accepted by a real platform.
+- Memes are written by Claude when `AI_PROVIDER=anthropic`: the drafter offers seven meme formats
+  drawn in-house (expectation vs reality, how it started / how it's going, nobody / me, two buttons,
+  nah / yeah, starter pack, expanding brain — `server/src/db/memeFormats.js`), Claude picks one per
+  meme and writes its words from what the book argues, and the picture is coloured in the book's own
+  palette so it always passes the identity check. If Claude's meme reply is unusable the batch still
+  carries its memes, written by the offline writer and marked `writer: "stub (fallback)"` on the
+  draft. Offline (`stub`) memes are fixed shapes around the book's claim. New formats reach a live
+  database with `npm run db:sync-templates --workspace server`; `db:reset` seeds them. The OpenAI
+  adapter writes text posts only.
 - Meme images are SVG **drawn**, not generated. As of STORY-067 the artwork lives in the database as
   a licensed asset rather than being composed from a palette at draft time, which is what makes
   replacing it with a photograph a data change rather than a code change — but there is still no

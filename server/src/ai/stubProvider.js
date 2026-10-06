@@ -118,6 +118,15 @@ const slug = (theme) => theme.replace(/[^a-zA-Z0-9]+/g, '');
  * all — and one introducing a new slot name degrades to the book's claim rather
  * than rendering empty.
  */
+/** The claim's first sentence, cut at a word if it is still too long for a picture. */
+const firstSentence = (text, max) => {
+  const sentence = String(text ?? '').split(/(?<=[.!?])\s/)[0].trim();
+  if (sentence.length <= max) return sentence;
+  return `${sentence.slice(0, max).replace(/\s+\S*$/, '')}…`;
+};
+
+const cap = (text) => String(text).charAt(0).toUpperCase() + String(text).slice(1);
+
 const SLOT_FILLERS = {
   // The expectation the meme is about to overturn.
   setup: ({ theme }) => `What everyone thinks ${theme} is`,
@@ -134,6 +143,27 @@ const SLOT_FILLERS = {
   quote: ({ claim }) => claim,
   note: ({ claim }) => claim,
   attribution: ({ title }) => `— ${title}`,
+  // Meme formats (memeFormats.js). Offline these are fixed shapes around the
+  // book's claim; with Claude configured, Claude writes them instead.
+  expectation: ({ theme }) => `${cap(theme)} will come naturally`,
+  reality: ({ short }) => short,
+  started: ({ title }) => `“I’ll just read one chapter of ${title}”`,
+  going: ({ short }) => short,
+  me: ({ short }) => `quoting “${short}” to people who did not ask`,
+  option_a: ({ theme }) => `Skip the ${theme} part`,
+  option_b: ({ theme }) => `Do the ${theme} part properly`,
+  who: ({ title }) => `Me, halfway through ${title}`,
+  nah: ({ theme }) => `${cap(theme)}, as advertised`,
+  yeah: ({ short }) => short,
+  title: ({ theme }) => `The ${theme} starter pack`,
+  item1: ({ title }) => `A dog-eared copy of ${title}`,
+  item2: () => 'A third draft nobody asked for',
+  item3: () => 'Cold coffee, still drinking it',
+  item4: ({ theme }) => `Strong opinions about ${theme}`,
+  level1: ({ theme }) => `${cap(theme)} is a talent`,
+  level2: ({ theme }) => `${cap(theme)} is a habit`,
+  level3: ({ theme }) => `${cap(theme)} is a practice`,
+  level4: ({ short }) => short,
 };
 
 /** Fills every slot a template declares, in the template's own order. */
@@ -264,6 +294,8 @@ export const stubProvider = {
       const captions = fillSlots(template, {
         theme,
         claim: claim ?? line,
+        // A meme's words are read at a glance: one short sentence of the claim.
+        short: firstSentence(claim ?? line, 70),
         title: book.title,
       });
       // What the picture says, in the template's own slot order.
@@ -281,7 +313,7 @@ export const stubProvider = {
         // Alt text is written here, at generation, because the drafter is the
         // only thing that knows what the image was built to show — and what it
         // shows is the panels, not the caption sitting beside it.
-        altText: `${template.name}: ${panels.join(' — ')}`,
+        altText: `${template.name} meme. ${panels.join(' — ')}`,
       });
     }
 

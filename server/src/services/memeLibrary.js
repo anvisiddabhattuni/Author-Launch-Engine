@@ -15,7 +15,40 @@
 import { pool } from '../db/pool.js';
 import { recordAction } from './auditLog.js';
 import { RIGHTS, checkImageRights } from './brandSafety.js';
+import { MEME_FORMATS, SWATCH, isMemeFormat } from '../db/memeFormats.js';
 import { scoreIdentity } from './visualIdentity.js';
+
+/** How each meme format works, for the writer. Null for the older card templates. */
+export const jokeFor = (template) => MEME_FORMATS.find((f) => f.key === template?.key)?.joke ?? null;
+
+const mix = (a, b, t) => {
+  const c = (hex, i) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16);
+  return `#${[0, 1, 2].map((i) => Math.round(c(a, i) + (c(b, i) - c(a, i)) * t).toString(16).padStart(2, '0')).join('')}`;
+};
+
+/** The placeholder colours a format was drawn in, mapped to a book's palette. */
+function swatchFor(identity) {
+  const p = identity?.palette;
+  if (!p?.ground || !p?.ink || !p?.accent) return null;
+  return { [SWATCH.ground]: p.ground, [SWATCH.panel]: mix(p.ground, p.ink, 0.07), [SWATCH.ink]: p.ink, [SWATCH.accent]: p.accent };
+}
+
+const recolour = (text, map) =>
+  map ? String(text).replace(/#[0-9a-fA-F]{6}\b/g, (hex) => map[hex.toLowerCase()] ?? hex) : String(text);
+
+/**
+ * A meme format's artwork in the book's own colours.
+ *
+ * Formats are drawn in placeholder colours (memeFormats.js) and coloured here,
+ * so a meme is always in the book's palette — the identity check (STORY-068)
+ * has nothing to catch. Older templates have fixed colours and pass through.
+ */
+export function themedArtwork(imageRef, identity) {
+  const map = swatchFor(identity);
+  if (!map || !String(imageRef).startsWith('data:image/svg+xml;base64,')) return imageRef;
+  const artwork = Buffer.from(imageRef.split(',')[1], 'base64').toString('utf8');
+  return `data:image/svg+xml;base64,${Buffer.from(recolour(artwork, map), 'utf8').toString('base64')}`;
+}
 
 /** The story names the AI Content Generation Agent as the owner. */
 export const ACTOR = 'AIContentGenerationAgent';
@@ -148,10 +181,13 @@ export async function selectTemplate(
   let onIdentity = [];
   if (identity) {
     onIdentity = usable.filter(
-      (t) => scoreIdentity({ imageRef: t.imageRef, identity }).score >= 1,
+      (t) => scoreIdentity({ imageRef: themedArtwork(t.imageRef, identity), identity }).score >= 1,
     );
     if (onIdentity.length > 0) pool_ = onIdentity;
   }
+  // Real meme formats before the older quote cards, whenever any is usable.
+  const memeFormats = pool_.filter(isMemeFormat);
+  if (memeFormats.length > 0) pool_ = memeFormats;
 
   const template = pool_[Math.abs(seed) % pool_.length];
 
@@ -218,8 +254,9 @@ const fitSize = (lines, max) => Math.max(18, Math.min(max, Math.floor((max * 3) 
  * @param {object} input.template
  * @param {Record<string,string>} input.captions Keyed by slot name.
  */
-export function composeFromTemplate({ template, captions }) {
-  const artwork = Buffer.from(template.imageRef.split(',')[1], 'base64').toString('utf8');
+export function composeFromTemplate({ template, captions, identity = null }) {
+  const map = swatchFor(identity);
+  const artwork = Buffer.from(themedArtwork(template.imageRef, identity).split(',')[1], 'base64').toString('utf8');
 
   const overlays = [];
   for (const slot of template.captionSlots) {
@@ -232,12 +269,13 @@ export function composeFromTemplate({ template, captions }) {
     // Centred on the slot's y, so a two-line caption and a five-line one both
     // sit where the artwork expects text to be.
     const startY = slot.y - ((lines.length - 1) * step) / 2;
-    const fill = slot.fill ?? '#f4f6f8';
+    const fill = recolour(slot.fill ?? '#f4f6f8', map);
+    const family = escape(slot.family ?? 'Georgia,serif');
 
     lines.forEach((line, i) => {
       overlays.push(
         `<text x="${slot.x}" y="${Math.round(startY + i * step)}" ` +
-          `text-anchor="${slot.anchor ?? 'start'}" font-family="Georgia,serif" ` +
+          `text-anchor="${slot.anchor ?? 'start'}" font-family="${family}"${slot.weight ? ` font-weight="${slot.weight}"` : ''} ` +
           `font-size="${size}" fill="${fill}">${escape(line)}</text>`,
       );
     });

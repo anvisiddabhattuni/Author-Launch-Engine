@@ -18,6 +18,8 @@
  * a template it may not have.
  */
 
+import { MEME_FORMATS } from './memeFormats.js';
+
 /** Shared background pieces, so each artwork is composition rather than repetition. */
 const defs = (id, from, to) =>
   `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">` +
@@ -244,4 +246,6 @@ export const TEMPLATE_SEED = [
       { name: 'statement', role: 'one line, informal', maxChars: 120, x: 400, y: 300, size: 40, anchor: 'middle', wrap: 24 },
     ],
   },
+  // Real meme formats, drawn in-house and coloured per book (memeFormats.js).
+  ...MEME_FORMATS,
 ];
