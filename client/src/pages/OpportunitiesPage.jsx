@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localDate, statusLabel } from '../labels.js';
+
+const TYPE_LABEL = { podcast: 'podcast', speaking: 'speaking event', event: 'event', 'book-club': 'book club', festival: 'festival' };
+const pct = (x) => `${Math.round(Number(x) * 100)}%`;
 
 const TYPES = ['speaking', 'podcast', 'event'];
 
@@ -53,144 +57,69 @@ export function OpportunitiesPage({ author }) {
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
       <div className="card">
-        <h2>Monthly discovery</h2>
+        <h2>Find opportunities</h2>
         <p className="hint">
-          Acceptance criterion: at least five relevant opportunities identified per month,
-          categorized by type.
+          Search podcast, event and speaker directories for places that suit your book. Then let the app write a
+          pitch for the best ones — you approve each pitch on the Outreach page before anything is sent.
         </p>
-
-        {monthly.length === 0 ? (
-          <div className="empty">No scan has run yet.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Month</th>
-                <th>Found</th>
-                <th>Types</th>
-                <th>Breakdown</th>
-                <th>Meets minimum</th>
-              </tr>
-            </thead>
-            <tbody>
-              {monthly.map((month) => (
-                <tr key={month.discovered_month}>
-                  <td className="mono">{String(month.discovered_month).slice(0, 7)}</td>
-                  <td>{month.total}</td>
-                  <td>{month.types}</td>
-                  <td className="mono">
-                    {Object.entries(month.breakdown)
-                      .map(([type, n]) => `${type} ${n}`)
-                      .join(' · ')}
-                  </td>
-                  <td>
-                    <span className={`pill ${month.meetsMinimum ? 'approved' : 'escalated'}`}>
-                      {month.meetsMinimum ? `yes (>= ${month.minimum})` : `no (< ${month.minimum})`}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        <div className="row" style={{ marginTop: 16 }}>
+        <div className="row">
           <button disabled={busy || !bookId} onClick={() =>
-            run(
-              () => api.scout(author.id, bookId),
-              (r) =>
-                `Scanned ${r.scanned} listings: ${r.identified.length} new opportunities recorded, ` +
-                `${r.rejected.length} rejected.`,
-            )
+            run(() => api.scout(author.id, bookId), (r) =>
+              `Looked at ${r.scanned} listings: ${r.identified.length} new opportunit${r.identified.length === 1 ? 'y' : 'ies'} found, ${r.rejected.length} not a good fit.`)
           }>
-            Scan directories
+            Search for opportunities
           </button>
           <button className="ghost" disabled={busy || !bookId} onClick={() =>
-            run(
-              () => api.scout(author.id, bookId, ['speaking']),
-              (r) =>
-                `Searched the speaker bureaus only: ${r.scanned} listings, ` +
-                `${r.identified.length} new speaking opportunities recorded.`,
-            )
+            run(() => api.scout(author.id, bookId, ['speaking']), (r) =>
+              `Searched speaking events only: ${r.identified.length} new found out of ${r.scanned} listings.`)
           }>
-            Search speaking only
+            Speaking events only
           </button>
           <button className="ghost" disabled={busy || !bookId} onClick={() =>
-            run(
-              () => api.draftOutreach(author.id, bookId, { limit: 10 }),
-              (r) => `Drafted ${r.length} outreach messages. Review them on the Outreach tab.`,
-            )
+            run(() => api.draftOutreach(author.id, bookId, { limit: 10 }), (r) =>
+              `Wrote ${r.length} pitch${r.length === 1 ? '' : 'es'}. Read and approve them on the Outreach page.`)
           }>
-            Draft outreach for these
+            Write pitches for the best ones
           </button>
         </div>
       </div>
 
       <div className="card">
-        <h2>Opportunities ({shown.length})</h2>
+        <h2>What was found ({shown.length})</h2>
         <p className="hint">
-          Scored twice, because there are two reasons to say yes. <strong>Themes</strong> is how well
-          the listing matches what this book argues; <strong>author</strong> is how well it matches
-          you — your subjects across every book, and the fact that a published author is what an
-          author panel is looking for. A lead qualifies on either, and the column says which.
+          Each one fits either your book’s themes or you as an author. Hover over the fit to see why it was chosen.
         </p>
 
-        <label htmlFor="type">Filter by type</label>
-        <select id="type" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+        <label htmlFor="type">Show</label>
+        <select id="type" className="narrow" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
           <option value="">All types</option>
           {TYPES.map((type) => (
-            <option key={type} value={type}>
-              {type}
-            </option>
+            <option key={type} value={type}>{TYPE_LABEL[type] ?? type}</option>
           ))}
         </select>
 
         {shown.length === 0 ? (
-          <div className="empty">Nothing found yet. Run a scan.</div>
+          <div className="empty">Nothing found yet. Press “Search for opportunities” above.</div>
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>Type</th>
-                <th>Name</th>
-                <th>Host</th>
-                <th>Themes</th>
-                <th>Author</th>
-                <th>Qualified by</th>
-                <th>Matched</th>
-                <th>Deadline</th>
-                <th>Outreach</th>
-              </tr>
+              <tr><th>Type</th><th>Name</th><th>Host</th><th>Why it fits</th><th>Topics</th><th>Deadline</th><th>Pitch</th></tr>
             </thead>
             <tbody>
               {shown.map((o) => (
                 <tr key={o.id}>
-                  <td>
-                    <span className="pill">{o.type}</span>
-                  </td>
-                  <td>{o.name}</td>
+                  <td><span className="pill">{TYPE_LABEL[o.type] ?? o.type}</span></td>
+                  <td><strong>{o.name}</strong></td>
                   <td>{o.host}</td>
-                  <td className="mono">{Number(o.relevance).toFixed(3)}</td>
-                  <td className="mono">{Number(o.expertise ?? 0).toFixed(3)}</td>
-                  <td>
-                    <span
-                      className={`pill ${o.qualified_by === 'expertise' ? 'scheduled' : 'approved'}`}
-                      title={o.rationale}
-                    >
-                      {o.qualified_by === 'expertise' ? 'you, not the book' : o.qualified_by}
+                  <td title={o.rationale}>
+                    <span className={`pill ${o.qualified_by === 'expertise' ? 'scheduled' : 'approved'}`}>
+                      {o.qualified_by === 'expertise' ? 'Fits you as an author' : 'Fits your book'}
                     </span>
+                    <div className="hint">book {pct(o.relevance)} · you {pct(o.expertise ?? 0)}</div>
                   </td>
-                  <td className="mono">
-                    {[...(o.matched_themes ?? []), ...(o.expertise_matched ?? [])].join(', ') || '—'}
-                  </td>
-                  <td className="mono">{o.deadline ? String(o.deadline).slice(0, 10) : '—'}</td>
-                  <td>
-                    {o.message_status ? (
-                      <span className={`pill ${o.message_status}`}>{o.message_status}</span>
-                    ) : (
-                      <span className="mono">—</span>
-                    )}
-                  </td>
+                  <td>{[...(o.matched_themes ?? []), ...(o.expertise_matched ?? [])].join(', ') || '—'}</td>
+                  <td>{o.deadline ? localDate(o.deadline) : '—'}</td>
+                  <td>{o.message_status ? <span className={`pill ${o.message_status}`}>{statusLabel(o.message_status)}</span> : <span className="muted">not yet</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -198,49 +127,52 @@ export function OpportunitiesPage({ author }) {
         )}
       </div>
 
-      <div className="card">
-        <h2>Rejected by the filter ({rejections.length})</h2>
-        <p className="hint">
-          What the scan decided you should never see, and how close each came to a floor. This is the
-          part of the scan nobody could previously check: an identified lead is visible and can be
-          judged wrong, but one dropped for a bad reason used to leave no trace at all. Both floors
-          are stored with the verdict, so a call made under an older policy can be re-derived.
-        </p>
-        {rejections.length === 0 ? (
-          <div className="empty">Nothing rejected yet. Run a scan.</div>
+      <details className="card disclosure">
+        <summary><h2>Monthly goal</h2></summary>
+        <p className="hint">The aim is at least five good opportunities a month, of different kinds.</p>
+        {monthly.length === 0 ? (
+          <div className="empty">No searches yet.</div>
         ) : (
           <table>
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>Name</th>
-                <th>Themes</th>
-                <th>Author</th>
-                <th>Topics</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Month</th><th>Found</th><th>Kinds</th><th>Goal</th></tr></thead>
             <tbody>
-              {rejections.map((r) => (
-                <tr key={r.id}>
-                  <td>
-                    <span className="pill">{r.type}</span>
-                  </td>
-                  <td title={r.rationale}>{r.name}</td>
-                  <td className="mono">
-                    {Number(r.relevance).toFixed(3)}{' '}
-                    <span className="muted">/ {Number(r.relevance_floor).toFixed(2)}</span>
-                  </td>
-                  <td className="mono">
-                    {Number(r.expertise).toFixed(3)}{' '}
-                    <span className="muted">/ {Number(r.expertise_floor).toFixed(2)}</span>
-                  </td>
-                  <td className="mono">{(r.topics ?? []).join(', ')}</td>
+              {monthly.map((month) => (
+                <tr key={month.discovered_month}>
+                  <td>{new Date(month.discovered_month).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</td>
+                  <td>{month.total}</td>
+                  <td>{Object.entries(month.breakdown).map(([type, n]) => `${n} ${TYPE_LABEL[type] ?? type}`).join(', ')}</td>
+                  <td><span className={`pill ${month.meetsMinimum ? 'approved' : 'escalated'}`}>{month.meetsMinimum ? 'Met' : `Below goal (${month.minimum} needed)`}</span></td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </details>
+
+      <details className="card disclosure">
+        <summary><h2>Not a good fit ({rejections.length})</h2></summary>
+        <p className="hint">
+          Listings the search left out, and how close each came. Shown so you can check nothing good was missed.
+        </p>
+        {rejections.length === 0 ? (
+          <div className="empty">Nothing left out yet.</div>
+        ) : (
+          <table>
+            <thead><tr><th>Type</th><th>Name</th><th>Fit with your book</th><th>Fit with you</th><th>Topics</th></tr></thead>
+            <tbody>
+              {rejections.map((r) => (
+                <tr key={r.id}>
+                  <td><span className="pill">{TYPE_LABEL[r.type] ?? r.type}</span></td>
+                  <td title={r.rationale}>{r.name}</td>
+                  <td>{pct(r.relevance)} <span className="muted">(needs {pct(r.relevance_floor)})</span></td>
+                  <td>{pct(r.expertise)} <span className="muted">(needs {pct(r.expertise_floor)})</span></td>
+                  <td>{(r.topics ?? []).join(', ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </details>
     </>
   );
 }

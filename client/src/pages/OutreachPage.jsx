@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { statusLabel } from '../labels.js';
+
+const pct = (x) => `${Math.round(Number(x) * 100)}%`;
 
 const DECIDABLE = ['pending_approval', 'escalated'];
 
@@ -44,157 +47,120 @@ export function OutreachPage({ author }) {
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
       <div className="card">
-        <h2>Awaiting your decision ({queue.length})</h2>
+        <h2>Pitches waiting for you ({queue.length})</h2>
         <p className="hint">
-          Nothing is emailed without an approval recorded against your name. A message is escalated
-          when confidence is low, when it does not carry what the book argues, or when it does not
-          sound like the author — three separate floors, so a pitch cannot pass on one by being
-          strong on another. This is the channel that reaches a named stranger, so it is measured
-          the same way social posts and press materials are (STORY-023).
+          Each pitch is an email to a real person, so nothing is sent until you approve it. Pitches marked{' '}
+          <span className="pill escalated">flagged</span> didn’t pass an automatic check — read those carefully.
         </p>
 
-        <label htmlFor="reviewer">Reviewer</label>
-        <input id="reviewer" value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
+        <label htmlFor="reviewer">Your name</label>
+        <input id="reviewer" className="narrow" value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
 
         {queue.length === 0 ? (
-          <div className="empty">Nothing pending. Draft outreach on the Opportunities tab.</div>
+          <div className="empty">No pitches waiting. Write some from the Opportunities page.</div>
         ) : (
-          queue.map((message) => (
-            <div className="draft" key={message.id}>
-              <div className="meta">
-                <span className={`pill ${message.status}`}>{message.status.replace('_', ' ')}</span>
-                <span className="pill">{message.opportunity_type}</span>
-                <strong>{message.opportunity_name}</strong>
-                <span>to {message.contact_email}</span>
-                <span>confidence {Number(message.confidence).toFixed(3)}</span>
-                {/* STORY-023: both were computed and blended away before. A
-                    reviewer deciding on a pitch needs to see the two numbers
-                    that can escalate it, not only the one that averages them. */}
-                {message.theme_alignment !== null && message.theme_alignment !== undefined && (
-                  <span>alignment {Number(message.theme_alignment).toFixed(2)}</span>
-                )}
-                {message.voice_score !== null && message.voice_score !== undefined && (
-                  <span>voice {Number(message.voice_score).toFixed(2)}</span>
-                )}
-                {message.themes_used?.length > 0 && (
-                  <span className="mono">themes: {message.themes_used.join(', ')}</span>
-                )}
-              </div>
-
-              {message.voice_violations?.length > 0 && (
-                <p className="hint">
-                  Reads unlike the author on:{' '}
-                  <span className="mono">{message.voice_violations.join(', ')}</span>
-                </p>
-              )}
-
-              <div style={{ marginTop: 10 }}>
-                <strong>{message.subject}</strong>
-              </div>
-              <pre>{message.body}</pre>
-
-              <div className="meta mono">{message.rationale}</div>
-
-              <input
-                placeholder="Notes for the record (optional)"
-                value={notes[message.id] ?? ''}
-                onChange={(e) => setNotes({ ...notes, [message.id]: e.target.value })}
-                style={{ marginTop: 12 }}
-              />
-
-              <div className="row">
-                <button
-                  disabled={busy || !reviewer.trim()}
-                  onClick={() =>
-                    run(
-                      () =>
-                        api.approveOutreach(message.id, { reviewer, notes: notes[message.id] ?? '' }),
-                      `Message ${message.id} approved. It can now be sent.`,
-                    )
-                  }
-                >
-                  Approve
-                </button>
-                <button
-                  className="danger"
-                  disabled={busy || !reviewer.trim()}
-                  onClick={() =>
-                    run(
-                      () =>
-                        api.rejectOutreach(message.id, { reviewer, notes: notes[message.id] ?? '' }),
-                      `Message ${message.id} rejected.`,
-                    )
-                  }
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          ))
+          queue.map((message) => {
+            const themeOk = message.theme_alignment == null || Number(message.theme_alignment) >= 0.5;
+            const voiceOk = message.voice_score == null || Number(message.voice_score) >= 0.5;
+            return (
+              <article className={`draft${message.status === 'escalated' ? ' draft-flagged' : ''}`} key={message.id}>
+                <div className="draft-head">
+                  <span className={`pill ${message.status}`}>{message.status === 'escalated' ? 'Flagged — check carefully' : 'Needs review'}</span>
+                  <strong>{message.opportunity_name}</strong>
+                  <span className="pill neutral">{message.opportunity_type}</span>
+                  <span className="draft-id">Pitch #{message.id}</span>
+                </div>
+                <div className="email-preview">
+                  <div className="hint">To: {message.contact_email}</div>
+                  <div className="email-subject">{message.subject}</div>
+                  <pre>{message.body}</pre>
+                </div>
+                <div className="checks">
+                  {message.theme_alignment != null && (
+                    <span className={`check ${themeOk ? 'ok' : 'bad'}`}>{themeOk ? '✓' : '!'} Matches your book <strong>{pct(message.theme_alignment)}</strong></span>
+                  )}
+                  {message.voice_score != null && (
+                    <span className={`check ${voiceOk ? 'ok' : 'bad'}`}>{voiceOk ? '✓' : '!'} Sounds like you <strong>{pct(message.voice_score)}</strong></span>
+                  )}
+                </div>
+                <details className="draft-details">
+                  <summary>Details — how this pitch was checked</summary>
+                  {message.themes_used?.length > 0 && <p className="hint">Themes used: {message.themes_used.join(', ')}</p>}
+                  {message.voice_violations?.length > 0 && <p className="hint">Doesn’t sound like you because of: {message.voice_violations.join(', ')}</p>}
+                  <p className="hint mono">Overall confidence {pct(message.confidence)} · {message.rationale}</p>
+                </details>
+                <label htmlFor={`note-${message.id}`}>Note <span className="label-hint">— optional</span></label>
+                <input
+                  id={`note-${message.id}`}
+                  placeholder="Notes — anything worth recording about this decision"
+                  value={notes[message.id] ?? ''}
+                  onChange={(e) => setNotes({ ...notes, [message.id]: e.target.value })}
+                />
+                <div className="row">
+                  <button
+                    disabled={busy || !reviewer.trim()}
+                    onClick={() => run(() => api.approveOutreach(message.id, { reviewer, notes: notes[message.id] ?? '' }), `Pitch ${message.id} approved. Send it from the list below when you’re ready.`)}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={busy || !reviewer.trim()}
+                    onClick={() => run(() => api.rejectOutreach(message.id, { reviewer, notes: notes[message.id] ?? '' }), `Pitch ${message.id} rejected. It won’t be sent.`)}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </article>
+            );
+          })
         )}
       </div>
 
       <div className="card">
-        <h2>Approved, ready to send ({approved.length})</h2>
-        <p className="hint">Sending goes through a mocked email provider; no real mail leaves.</p>
+        <h2>Approved — ready to send ({approved.length})</h2>
+        <p className="hint">In this demo, sending is simulated — no real email leaves the app.</p>
         {approved.length === 0 ? (
           <div className="empty">Nothing approved yet.</div>
         ) : (
           approved.map((message) => (
             <div className="draft" key={message.id}>
-              <div className="meta">
-                <span className="pill approved">approved</span>
+              <div className="draft-head">
+                <span className="pill approved">Approved</span>
                 <strong>{message.opportunity_name}</strong>
-                <span>to {message.contact_email}</span>
+                <span className="hint">to {message.contact_email}</span>
               </div>
-              <div style={{ marginTop: 8 }}>
-                <strong>{message.subject}</strong>
+              <div className="email-subject">{message.subject}</div>
+              <div className="row">
+                <button disabled={busy} onClick={() => run(() => api.sendOutreach(message.id), `Pitch ${message.id} sent to ${message.contact_email}.`)}>
+                  Send now
+                </button>
               </div>
-              <button
-                style={{ marginTop: 12 }}
-                disabled={busy}
-                onClick={() =>
-                  run(() => api.sendOutreach(message.id), `Message ${message.id} sent.`)
-                }
-              >
-                Send
-              </button>
             </div>
           ))
         )}
       </div>
 
-      <div className="card">
-        <h2>Sent and rejected ({done.length})</h2>
+      <details className="card disclosure">
+        <summary><h2>Sent and rejected ({done.length})</h2></summary>
         {done.length === 0 ? (
           <div className="empty">Nothing yet.</div>
         ) : (
           <table>
-            <thead>
-              <tr>
-                <th>Opportunity</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Recipient</th>
-                <th>Provider id</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Opportunity</th><th>Type</th><th>Status</th><th>Sent to</th></tr></thead>
             <tbody>
               {done.map((message) => (
                 <tr key={message.id}>
                   <td>{message.opportunity_name}</td>
                   <td>{message.opportunity_type}</td>
-                  <td>
-                    <span className={`pill ${message.status}`}>{message.status}</span>
-                  </td>
-                  <td className="mono">{message.contact_email}</td>
-                  <td className="mono">{message.send_external_id ?? '—'}</td>
+                  <td><span className={`pill ${message.status}`}>{statusLabel(message.status)}</span></td>
+                  <td>{message.contact_email}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </details>
     </>
   );
 }

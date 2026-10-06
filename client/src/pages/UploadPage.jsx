@@ -32,7 +32,7 @@ export function UploadPage({ author }) {
           .map((t) => t.trim())
           .filter(Boolean),
       });
-      setStatus({ kind: 'ok', message: `Uploaded "${book.title}" (id ${book.id}).` });
+      setStatus({ kind: 'ok', message: `“${book.title}” is added. You can now write posts from it below.` });
       setTitle('');
       setContent('');
       setThemes('');
@@ -64,7 +64,7 @@ export function UploadPage({ author }) {
       if (posts.length === 0) throw new Error('Add at least one line as "platform | post text".');
 
       await api.uploadHistory(author.id, posts);
-      setStatus({ kind: 'ok', message: `Added ${posts.length} prior posts for voice matching.` });
+      setStatus({ kind: 'ok', message: `Added ${posts.length} past post${posts.length === 1 ? '' : 's'}. New posts will be written to sound like these.` });
       setHistory('');
     } catch (error) {
       // Before STORY-032 a typo'd platform was stored and this said "Added".
@@ -97,9 +97,9 @@ export function UploadPage({ author }) {
       setStatus({
         kind: 'ok',
         message:
-          `Generated ${drafts.length} drafts` +
-          (escalated > 0 ? `, ${escalated} escalated for low confidence` : '') +
-          '. Open "Review & approve" to decide on them.',
+          `Wrote ${drafts.length} draft posts` +
+          (escalated > 0 ? ` (${escalated} flagged for a closer look)` : '') +
+          '. Open Review posts to read and approve them.',
       });
     } catch (error) {
       setStatus({ kind: 'error', message: error.message });
@@ -112,69 +112,24 @@ export function UploadPage({ author }) {
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
-      <form className="card" onSubmit={submitBook}>
-        <h2>Book content</h2>
-        <p className="hint">
-          The drafting agent quotes from this text and anchors every post in the themes you list.
-        </p>
-
-        <label htmlFor="title">Title</label>
-        <input id="title" value={title} onChange={(e) => setTitle(e.target.value)} required />
-
-        <label htmlFor="themes">Themes (comma separated)</label>
-        <input
-          id="themes"
-          value={themes}
-          onChange={(e) => setThemes(e.target.value)}
-          placeholder="deep work, craft, attention"
-        />
-
-        <label htmlFor="content">Manuscript excerpt</label>
-        <textarea id="content" value={content} onChange={(e) => setContent(e.target.value)} required />
-
-        <button type="submit" disabled={busy}>
-          Upload book
-        </button>
-      </form>
-
-      <form className="card" onSubmit={submitHistory}>
-        <h2>Previous social posts</h2>
-        <p className="hint">
-          One per line as <span className="mono">platform | post text</span>. Used to score how closely
-          a draft matches your voice.
-        </p>
-        <textarea
-          value={history}
-          onChange={(e) => setHistory(e.target.value)}
-          placeholder={'twitter | Craft is the slow accumulation of decisions nobody claps for.'}
-        />
-        <button type="submit" className="ghost" disabled={busy}>
-          Add posts
-        </button>
-      </form>
-
       <div className="card">
         <h2>Your books</h2>
-        <p className="hint">Generating drafts creates a week of platform-tailored posts for review.</p>
+        <p className="hint">Press “Write this week’s posts” to get a week of drafts. They wait for your approval on Review posts.</p>
         {books.length === 0 ? (
-          <div className="empty">No books uploaded yet.</div>
+          <div className="empty">No books yet — add your first one below.</div>
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>Title</th>
-                <th>Themes</th>
-                <th />
-              </tr>
+              <tr><th>Title</th><th>Themes</th><th /></tr>
             </thead>
             <tbody>
               {books.map((book) => (
                 <tr key={book.id}>
-                  <td>{book.title}</td>
-                  <td className="mono">{book.themes.join(', ') || '—'}</td>
-                  <td>
+                  <td><strong>{book.title}</strong></td>
+                  <td>{book.themes.join(', ') || '—'}</td>
+                  <td className="cell-action">
                     <button onClick={() => generate(book.id)} disabled={busy}>
-                      Generate weekly drafts
+                      {busy ? 'Writing…' : 'Write this week’s posts'}
                     </button>
                   </td>
                 </tr>
@@ -183,6 +138,49 @@ export function UploadPage({ author }) {
           </table>
         )}
       </div>
+
+      <form className="card" onSubmit={submitBook}>
+        <h2>Add a book</h2>
+        <p className="hint">
+          Paste a chapter or a few pages. Posts quote and build on this text, so pick passages that show what the book is about.
+        </p>
+
+        <label htmlFor="title">Book title</label>
+        <input id="title" value={title} onChange={(e) => setTitle(e.target.value)} required />
+
+        <label htmlFor="themes">Main themes <span className="label-hint">— a few words each, separated by commas</span></label>
+        <input
+          id="themes"
+          value={themes}
+          onChange={(e) => setThemes(e.target.value)}
+          placeholder="e.g. deep work, craft, attention"
+        />
+
+        <label htmlFor="content">Text from the book</label>
+        <textarea id="content" value={content} onChange={(e) => setContent(e.target.value)} required placeholder="Paste a chapter or a few pages here…" />
+
+        <button type="submit" disabled={busy}>
+          Add book
+        </button>
+      </form>
+
+      <form className="card" onSubmit={submitHistory}>
+        <h2>Your past posts</h2>
+        <p className="hint">
+          Paste a few posts you’ve written before, so new posts sound like you. One per line: the platform, a
+          vertical bar <span className="mono">|</span>, then the post.
+        </p>
+        <label htmlFor="history">Past posts</label>
+        <textarea
+          id="history"
+          value={history}
+          onChange={(e) => setHistory(e.target.value)}
+          placeholder={'twitter | Craft is the slow accumulation of decisions nobody claps for.\nlinkedin | One lesson from writing this book…'}
+        />
+        <button type="submit" className="ghost" disabled={busy}>
+          Add posts
+        </button>
+      </form>
 
       {/* STORY-046 */}
       <BookModelPanel author={author} books={books} />

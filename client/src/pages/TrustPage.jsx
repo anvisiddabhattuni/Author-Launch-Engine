@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localTime } from '../labels.js';
 import { AnomaliesCard, AttentionCard, GovernanceScoreCard, SearchCard } from './TrustLive.jsx';
 
 /**
@@ -16,15 +17,15 @@ import { AnomaliesCard, AttentionCard, GovernanceScoreCard, SearchCard } from '.
  * same whether it checked and found nothing or never checked at all.
  */
 const STATUS_COPY = {
-  breach: { kind: 'error', label: 'Breach' },
-  degraded: { kind: 'error', label: 'Degraded' },
-  healthy: { kind: 'ok', label: 'Healthy' },
+  breach: { kind: 'error', label: 'Something went wrong' },
+  degraded: { kind: 'error', label: 'Needs attention' },
+  healthy: { kind: 'ok', label: 'All good' },
 };
 
 const CONFIDENCE_COPY = {
-  reported: { pill: 'escalated', label: 'found' },
-  insufficient_evidence: { pill: 'neutral', label: 'not enough evidence to say' },
-  clear: { pill: 'approved', label: 'looked, found nothing' },
+  reported: { pill: 'escalated', label: 'Found something' },
+  insufficient_evidence: { pill: 'neutral', label: 'Not enough to tell' },
+  clear: { pill: 'approved', label: 'Nothing found' },
 };
 
 /** How a component or instance reads at a glance (STORY-027). */
@@ -35,14 +36,15 @@ const UP_COPY = {
   not_deployed: { pill: 'neutral', label: 'not running' },
   unchecked: { pill: 'neutral', label: 'not checked yet' },
 };
+const COMPONENT_WORD = { database: 'Database', api: 'Website server', worker: 'Background jobs' };
 const upPill = (status) => UP_COPY[status] ?? { pill: 'neutral', label: status ?? 'not checked yet' };
 
 const ago = (iso) => {
   if (!iso) return 'never';
   const s = Math.round((Date.now() - new Date(iso)) / 1000);
-  if (s < 90) return `${s}s ago`;
+  if (s < 90) return 'just now';
   if (s < 5400) return `${Math.round(s / 60)} min ago`;
-  return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 3600)} hours ago`;
 };
 
 export function TrustPage({ author, user }) {
@@ -97,81 +99,88 @@ export function TrustPage({ author, user }) {
     <tr key={c.id}>
       <td>
         <span className={`pill ${c.passed ? 'approved' : 'escalated'}`}>
-          {c.passed ? 'pass' : 'fail'}
+          {c.passed ? 'OK' : 'Problem'}
         </span>
       </td>
       <td>
         {c.label}
         <div className="hint">{c.why}</div>
       </td>
-      <td className="mono">{c.passed ? '—' : c.violations}</td>
+      <td className="num">{c.passed ? '—' : c.violations}</td>
     </tr>
   );
 
   return (
     <>
-      {/* STORY-058 */}
-      {/* STORY-059: first on the page — something here is waiting on a person. */}
+      {/* The verdict first, in a sentence — then what is waiting on a person. */}
+      <div className={`banner ${status.kind}`}>
+        <strong>{status.label}.</strong> {governance.headline} ({governance.passed} of {governance.total} safety checks OK.)
+      </div>
+
+      {/* STORY-059: something here may be waiting on a person. */}
       <AnomaliesCard authorId={author.id} user={user} />
 
+      {/* STORY-057: pending approvals and recent actions, live, with priority. */}
+      <AttentionCard authorId={author.id} />
+
+      {/* STORY-058 */}
       <GovernanceScoreCard authorId={author.id} />
 
       <div className="card">
-        <h2>Governance</h2>
-        <div className={`banner ${status.kind}`}>
-          <strong>{status.label}.</strong> {governance.headline}
-        </div>
+        <h2>Safety checks</h2>
         <p className="hint">
-          {governance.passed} of {governance.total} checks passing. The score is a summary of the
-          list below, not the verdict — a single broken invariant means the system did the one thing
-          it promises not to, and no number of passing checks offsets that.
+          The app checks its own promises all the time. The first list must <strong>never</strong> fail — one problem
+          there matters more than any score.
         </p>
 
-        <h3>Invariants — must never be true</h3>
+        <h3>Must never happen ({invariants.filter((c) => c.passed).length} of {invariants.length} OK)</h3>
         <table>
           <thead>
             <tr>
               <th>Result</th>
               <th>Check</th>
-              <th>Violations</th>
+              <th>Problems</th>
             </tr>
           </thead>
           <tbody>{invariants.map(checkRow)}</tbody>
         </table>
 
-        <h3>Governance quality — should be true</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Result</th>
-              <th>Check</th>
-              <th>Violations</th>
-            </tr>
-          </thead>
-          <tbody>{quality.map(checkRow)}</tbody>
-        </table>
+        <details className="draft-details">
+          <summary>Good practice ({quality.filter((c) => c.passed).length} of {quality.length} OK)</summary>
+          <table>
+            <thead>
+              <tr>
+                <th>Result</th>
+                <th>Check</th>
+                <th>Problems</th>
+              </tr>
+            </thead>
+            <tbody>{quality.map(checkRow)}</tbody>
+          </table>
+        </details>
       </div>
 
       {/* STORY-041: where this author's data lives, and proof that their
           reads are confined to it — the role this request actually ran as. */}
       {tenant && (
         <div className="card">
-          <h2>Your data</h2>
-          <div className="meta">
-            <span className="pill mono">schema {tenant.schema}</span>
-            <span className={`pill ${tenant.thisRequestRanAs === tenant.role ? 'approved' : 'neutral'}`}>
-              this page's reads ran as {tenant.thisRequestRanAs}
-            </span>
-            <span className="pill">
-              {tenant.views.length} views of {tenant.thisRequestRanAs === tenant.role ? 'your' : `${author.name}'s`} rows
-            </span>
-            <span className="pill neutral">{tenant.shared.filter((x) => x.readable).length} shared reference tables</span>
-          </div>
+          <h2>Your data is kept separate</h2>
           <p className="hint">
             {tenant.thisRequestRanAs === tenant.role
-              ? 'Every page you open reads through your own database schema, as a role that can see nothing outside it. If a query anywhere in the product forgot to filter by author, the database would still return only your rows.'
-              : 'You are signed in with access across tenants, so your reads are not confined to one schema. Authors\' reads are.'}
+              ? 'Your books, posts and notes are stored in your own private area. Other authors can’t see them — even if the app had a bug, the database itself would refuse.'
+              : 'You’re signed in with access to every author, so this page isn’t limited to one author’s private area. Authors themselves only ever see their own.'}
           </p>
+          <details className="draft-details">
+            <summary>Technical details</summary>
+            <div className="meta">
+              <span className="pill mono">schema {tenant.schema}</span>
+              <span className={`pill ${tenant.thisRequestRanAs === tenant.role ? 'approved' : 'neutral'}`}>
+                this page read as {tenant.thisRequestRanAs}
+              </span>
+              <span className="pill">{tenant.views.length} private views</span>
+              <span className="pill neutral">{tenant.shared.filter((x) => x.readable).length} shared reference tables</span>
+            </div>
+          </details>
         </div>
       )}
 
@@ -184,28 +193,26 @@ export function TrustPage({ author, user }) {
           <div className="card">
             <h2>Who opened {tenant?.thisRequestRanAs === tenant?.role ? 'your' : `${author.name}'s`} data</h2>
             <div className="meta">
-              <span className="pill neutral">last {accesses.length} requests</span>
+              <span className="pill neutral">last {accesses.length} times</span>
               <span className="pill">{accesses.length - others.length} by {tenant?.thisRequestRanAs === tenant?.role ? 'you' : 'the author'}</span>
-              <span className={`pill ${others.length ? 'pending_approval' : 'approved'}`}>{others.length - refused.length} by staff</span>
-              <span className={`pill ${refused.length ? 'escalated' : 'approved'}`}>{refused.length} refused attempts</span>
+              <span className={`pill ${others.length ? 'pending_approval' : 'approved'}`}>{others.length - refused.length} by staff (allowed)</span>
+              <span className={`pill ${refused.length ? 'escalated' : 'approved'}`}>{refused.length} blocked attempts</span>
             </div>
             <p className="hint">
-              Every request that touches this data is recorded — who made it, what it asked for, and
-              whether it was allowed. Staff reads are shown; attempts from other accounts are shown and
-              were refused.
+              Every time anyone opens this data it is recorded. Here are the times it wasn’t you.
             </p>
             {others.length > 0 && (
               <table>
                 <thead>
-                  <tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Outcome</th></tr>
+                  <tr><th>When</th><th>Who</th><th>Result</th><th>Technical</th></tr>
                 </thead>
                 <tbody>
                   {others.slice(0, 12).map((e, i) => (
                     <tr key={i}>
-                      <td className="mono">{new Date(e.occurred_at).toISOString().slice(0, 19).replace('T', ' ')}</td>
-                      <td>{e.user_email ?? 'no session'}{e.user_role ? <span className="hint"> · {e.user_role}</span> : null}</td>
-                      <td className="mono">{e.method} {e.route}</td>
-                      <td><span className={`pill ${e.outcome === 'allowed' ? 'approved' : 'escalated'}`}>{e.outcome}</span></td>
+                      <td className="num">{localTime(e.occurred_at)}</td>
+                      <td>{e.user_email ?? 'not signed in'}{e.user_role ? <span className="hint"> · {e.user_role}</span> : null}</td>
+                      <td><span className={`pill ${e.outcome === 'allowed' ? 'approved' : 'escalated'}`}>{e.outcome === 'allowed' ? 'Allowed' : 'Blocked'}</span></td>
+                      <td className="audit-detail mono">{e.method} {e.route}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -215,8 +222,13 @@ export function TrustPage({ author, user }) {
         );
       })()}
 
-      <div className="card">
-        <h2>System health</h2>
+      {/* STORY-055: the logs, searchable over any time range. */}
+      <SearchCard authorId={author.id} />
+
+      <h2 className="section-label">Technical details</h2>
+
+      <details className="card disclosure">
+        <summary><h2>Is the app running properly?</h2></summary>
 
         {/* STORY-027: whether the processes are up, from rows the checks
             wrote. Before this the panel could say when the worker last ran
@@ -229,14 +241,14 @@ export function TrustPage({ author, user }) {
                 const copy = upPill(c.status);
                 return (
                   <span className={`pill ${copy.pill}`} key={component}>
-                    {component} {copy.label}
+                    {COMPONENT_WORD[component]}: {copy.label}
                     {component === 'database' && c.latencyMs != null ? ` · ${c.latencyMs}ms` : ''}
                     {component !== 'database' && c.instances > 1 ? ` · ${c.instances} instances` : ''}
                   </span>
                 );
               })}
               <span className="pill neutral">
-                last checked {ago(health.system.lastCheckAt)} · {health.system.checksRecorded} checks logged
+                last checked {ago(health.system.lastCheckAt)}
               </span>
               {canOperate && (
                 <button className="ghost" onClick={checkNow} disabled={checking}>
@@ -324,26 +336,23 @@ export function TrustPage({ author, user }) {
               </>
             )}
             <p className="hint">
-              An instance is down when it stops saying it is alive, or when its /ready stops
-              answering — not when it forgets to write a stop row. Outages open on the transition and
-              page the operators once; they close when a check finds the component up again, never
-              because time passed. The database outage is the one this cannot record, because it is
-              recorded in the database.
+              A part counts as down when it stops checking in. Operators are alerted once when that happens, and the
+              outage closes only when a check finds it working again.
             </p>
           </>
         )}
 
-        <h3>Background work</h3>
+        <h3>Background jobs</h3>
         <div className="meta">
           <span className={`pill ${health.workerSeen ? 'approved' : 'escalated'}`}>
             {health.workerSeen
-              ? `worker last ran ${health.minutesSinceRun} min ago`
-              : 'the worker has never run'}
+              ? `background jobs last ran ${health.minutesSinceRun} min ago`
+              : 'background jobs have never run'}
           </span>
           <span
             className={`pill ${health.auditIntegrity === 'intact' ? 'approved' : health.auditIntegrity === 'altered' ? 'escalated' : 'neutral'}`}
           >
-            audit log {health.auditIntegrity.replace(/_/g, ' ')}
+            activity history {health.auditIntegrity === 'intact' ? 'unchanged' : health.auditIntegrity.replace(/_/g, ' ')}
           </span>
           {Object.entries(health.jobs).map(([k, n]) => (
             <span className={`pill ${k === 'dead_letter' ? 'escalated' : ''}`} key={k}>
@@ -351,18 +360,14 @@ export function TrustPage({ author, user }) {
             </span>
           ))}
         </div>
-        <p className="hint">
-          A worker that has never run and a worker that stopped an hour ago look identical in a
-          status count, and are very different problems — so the two are distinguished here.
-        </p>
+
 
         {health.integrations?.length > 0 && (
           <>
-            <h3>External integrations, last 24 hours</h3>
+            <h3>Outside services, last 24 hours</h3>
             <p className="hint">
-              Every outbound call goes through one gateway with a policy per integration. When a
-              provider fails repeatedly its circuit opens: the gateway stops calling it for a
-              cooldown, alerts the operators once, then lets one call test it.
+              Outside services the app talks to. If one keeps failing, the app pauses calls to it for a while
+              (“circuit open”) and alerts the operators.
             </p>
             <table>
               <thead>
@@ -418,58 +423,43 @@ export function TrustPage({ author, user }) {
                 ))}
               </tbody>
             </table>
-            <p className="hint">
-              Attempts higher than calls means work is being retried — a provider degrading rather
-              than failing, which is the state worth catching before it becomes the other one.
-            </p>
           </>
         )}
-      </div>
-
-      {/* STORY-057: pending approvals and recent actions, live, with priority. */}
-      <AttentionCard authorId={author.id} />
-
-      {/* STORY-055: the logs, searchable over any time range. */}
-      <SearchCard authorId={author.id} />
+      </details>
 
       {/* STORY-021: the dimension the dashboard did not have. A score with
           nothing to compare it to is a number, not a metric. */}
       {history?.length > 0 && (
-        <div className="card">
-          <h2>Trust over time ({history.length} assessments)</h2>
-          <p className="hint">
-            Every assessment is stored, so the score is a series rather than a snapshot. Before this
-            the dashboard recomputed on each load and compared it to nothing — which made “when did
-            this start failing?” and “is this getting worse?” unanswerable.
-          </p>
+        <details className="card disclosure">
+          <summary><h2>Safety checks over time ({history.length})</h2></summary>
+          <p className="hint">Each bar is one check-up. Green is all good, amber needs attention, red means something went wrong.</p>
           <div className="meta" style={{ alignItems: 'flex-end', gap: 3, minHeight: 60 }}>
             {[...history].reverse().map((h) => (
               <span
                 key={h.id}
-                title={`${new Date(h.assessed_at).toISOString().slice(0, 19).replace('T', ' ')} · ${h.status} · ${h.passed}/${h.total}`}
+                title={`${localTime(h.assessed_at)} · ${(STATUS_COPY[h.status] ?? { label: h.status }).label} · ${h.passed}/${h.total} OK`}
                 style={{
                   display: 'inline-block',
                   width: 10,
                   height: Math.max(4, Math.round(Number(h.score ?? 0) * 56)),
                   background:
-                    h.status === 'breach' ? '#c0392b' : h.status === 'degraded' ? '#d68910' : '#27ae60',
+                    h.status === 'breach' ? 'var(--danger)' : h.status === 'degraded' ? 'var(--caramel)' : 'var(--ok)',
                 }}
               />
             ))}
           </div>
           <p className="hint">
-            Oldest left, newest right. Height is the passing fraction; colour is the verdict, because
-            a high score with a broken invariant is still a breach.
+            Oldest on the left, newest on the right. Taller means more checks passed.
           </p>
 
           {episodes?.filter((e) => !e.recovered_at).length > 0 && (
             <>
-              <h3>Currently failing</h3>
+              <h3>Failing right now</h3>
               <table>
                 <thead>
                   <tr>
                     <th>Check</th>
-                    <th>Severity</th>
+                    <th>How serious</th>
                     <th>Failing since</th>
                     <th>Anyone told?</th>
                   </tr>
@@ -482,20 +472,18 @@ export function TrustPage({ author, user }) {
                         <td className="mono">{e.check_id}</td>
                         <td>
                           <span className={`pill ${e.severity === 'invariant' ? 'escalated' : ''}`}>
-                            {e.severity}
+                            {e.severity === 'invariant' ? 'Must never happen' : 'Good practice'}
                           </span>
                         </td>
-                        <td className="mono">
-                          {new Date(e.started_at).toISOString().slice(0, 19).replace('T', ' ')}
-                        </td>
+                        <td className="num">{localTime(e.started_at)}</td>
                         <td className="mono">
                           {/* An alert nobody sent and an alert nobody read are
                               different failures, and only the first is ours. */}
                           {e.severity !== 'invariant'
                             ? '—'
                             : e.alerted_at
-                              ? 'alerted'
-                              : 'NOT YET'}
+                              ? 'Yes'
+                              : 'Not yet'}
                         </td>
                       </tr>
                     ))}
@@ -503,36 +491,31 @@ export function TrustPage({ author, user }) {
               </table>
             </>
           )}
-        </div>
+        </details>
       )}
 
       {/* STORY-024: which readable routes are checked for cross-tenant leaks.
           The number is the point — it sat at 10 of 35 for six stories and
           nothing noticed, because the list was kept by hand. */}
       {surface && (
-        <div className="card">
-          <h2>
-            Leak-checked routes ({surface.walkable} of {surface.total})
-          </h2>
+        <details className="card disclosure">
+          <summary><h2>Pages tested for leaks between authors ({surface.walkable} of {surface.total})</h2></summary>
           <p className="hint">
-            Every route a tenant can read is walked as one author and checked for another author's
-            id anywhere in the response, at any depth. The list is derived from the router, so a
-            route added tomorrow is walked tomorrow. {surface.declared.length} are deliberately not
-            walked and each says why — an exclusion nobody can see is indistinguishable from a check
-            that never ran.
+            The app’s tests open each page as one author and check that nothing belonging to another author shows up.
+            The ones not tested are listed with the reason.
           </p>
           <div className="meta">
-            <span className="pill approved">{surface.walkable} walked</span>
-            <span className="pill">{surface.declared.length} declared</span>
+            <span className="pill approved">{surface.walkable} tested</span>
+            <span className="pill">{surface.declared.length} skipped, with a reason</span>
             {surface.needsId > 0 && (
-              <span className="pill escalated">{surface.needsId} unwalkable and undeclared</span>
+              <span className="pill escalated">{surface.needsId} skipped with no reason</span>
             )}
           </div>
           <table>
             <thead>
               <tr>
-                <th>Not walked</th>
-                <th>Why that is not a gap</th>
+                <th>Not tested</th>
+                <th>Why that’s OK</th>
               </tr>
             </thead>
             <tbody>
@@ -544,64 +527,58 @@ export function TrustPage({ author, user }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </details>
       )}
 
       {/* STORY-020: every way out of the system, exemptions included. The three
           gate invariants each verify a gate that exists; this is the list that
           shows whether one was ever missed. */}
       {outbound && (
-        <div className="card">
-          <h2>
-            Ways out ({outbound.gated} gated · {outbound.exempt} exempt)
-          </h2>
+        <details className="card disclosure">
+          <summary><h2>Everything the app can send out ({outbound.gated} need approval · {outbound.exempt} don’t)</h2></summary>
           <p className="hint">
-            Every path that can send or publish. A gated path names the approval it sits behind and
-            the invariant that checks it from outside; an exempt one says why it has none.
-            Exemptions are listed rather than filtered, because an exclusion nobody can see is
-            indistinguishable from a check that never ran.
+            Every way the app can post or send something. Most need a person’s approval first; the few that don’t
+            (like a password reset email) say why.
           </p>
           <table>
             <thead>
               <tr>
-                <th>Path</th>
+                <th>What</th>
                 <th>Sends</th>
-                <th>Gate, or why not</th>
+                <th>Approval needed, or why not</th>
               </tr>
             </thead>
             <tbody>
               {outbound.paths.map((p) => (
                 <tr key={p.id}>
                   <td className="mono">
-                    <span className={`pill ${p.kind === 'gated' ? 'approved' : ''}`}>{p.kind}</span>{' '}
+                    <span className={`pill ${p.kind === 'gated' ? 'approved' : ''}`}>{p.kind === 'gated' ? 'needs approval' : 'no approval'}</span>{' '}
                     {p.id}
                   </td>
                   <td>{p.sends}</td>
-                  <td className="mono">{p.kind === 'gated' ? p.gate : p.why}</td>
+                  <td className="audit-detail">{p.kind === 'gated' ? p.gate : p.why}</td>
                 </tr>
               ))}
             </tbody>
           </table>
           {outbound.unverified.length > 0 && (
             <div className="banner error">
-              Gated with no invariant behind it: {outbound.unverified.join(', ')}
+              These need approval but nothing double-checks it: {outbound.unverified.join(', ')}
             </div>
           )}
-        </div>
+        </details>
       )}
 
-      <div className="card">
-        <h2>Anomalies ({anomalies.findings} found)</h2>
+      <details className="card disclosure">
+        <summary><h2>What the unusual-activity checks look for ({anomalies.findings} found)</h2></summary>
         <p className="hint">
-          Patterns worth a second look, which is a much weaker claim than a failed check. Detectors
-          that could not look say so — a panel listing only its findings looks the same whether it
-          checked and found nothing or never checked at all.
+          Patterns worth a second look. A check that didn’t have enough to go on says so, rather than looking like it found nothing.
         </p>
         <table>
           <thead>
             <tr>
-              <th>State</th>
-              <th>Detector</th>
+              <th>Result</th>
+              <th>Check</th>
               <th>Why</th>
             </tr>
           </thead>
@@ -628,8 +605,7 @@ export function TrustPage({ author, user }) {
             })}
           </tbody>
         </table>
-      </div>
-
+      </details>
     </>
   );
 }

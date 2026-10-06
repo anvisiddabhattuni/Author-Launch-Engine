@@ -20,6 +20,16 @@ export const setSessionLostHandler = (fn) => {
   onSessionLost = fn;
 };
 
+/** Server refusals in words a reader can act on; the precise reason stays in brackets. */
+function plainError(message, status) {
+  const permission = message.match(/requires permission: (\S+)/);
+  if (permission) return `Your account isn’t allowed to do this (it needs “${permission[1]}”). Ask an admin if you think it should be.`;
+  if (message) return message;
+  if (status >= 500) return 'Something went wrong on our side. Please try again in a minute.';
+  if (status === 404) return 'That item could not be found — it may have been removed.';
+  return `That didn’t work (error ${status}). Please try again.`;
+}
+
 async function request(path, options = {}) {
   const token = session.get();
   const response = await fetch(`/api${path}`, {
@@ -32,7 +42,13 @@ async function request(path, options = {}) {
   });
 
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  // A proxy in front of the API answers an outage with an HTML page, not JSON.
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
 
   if (!response.ok) {
     // An expired or rejected token should return the user to the login screen
@@ -49,7 +65,7 @@ async function request(path, options = {}) {
     const serverMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
     // Per-field problems from input validation (STORY-032) ride along, so a
     // page can point at the line that is wrong instead of printing the prose.
-    throw Object.assign(new Error(serverMessage || `Request failed with ${response.status}`), {
+    throw Object.assign(new Error(plainError(serverMessage, response.status)), {
       status: response.status,
       details: Array.isArray(payload?.details) ? payload.details : null,
     });

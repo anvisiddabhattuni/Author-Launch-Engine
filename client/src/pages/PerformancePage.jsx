@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localDate, platformName, statusLabel } from '../labels.js';
 
 /**
  * Meme versus text (STORY-069).
@@ -11,35 +12,35 @@ import { api } from '../api.js';
  * before any number that might be mistaken for evidence.
  */
 const VERDICT_COPY = {
-  insufficient_data: { pill: 'unnamed', label: 'not enough data' },
-  no_measurable_difference: { pill: 'neutral', label: 'no measurable difference' },
-  meme_leads: { pill: 'approved', label: 'memes lead' },
-  text_leads: { pill: 'approved', label: 'text leads' },
+  insufficient_data: { pill: 'unnamed', label: 'Too early to tell' },
+  no_measurable_difference: { pill: 'neutral', label: 'About the same' },
+  meme_leads: { pill: 'approved', label: 'Images do better' },
+  text_leads: { pill: 'approved', label: 'Text does better' },
 };
 
-const pct = (n) => (n === null || n === undefined ? '—' : `${(Number(n) * 100).toFixed(2)}%`);
+const pct = (n) => (n === null || n === undefined ? '—' : `${(Number(n) * 100).toFixed(1)}%`);
 
 /** What an analysis concluded (STORY-029). Same three answers for every question. */
 const FINDING_COPY = {
-  insufficient_data: { pill: 'unnamed', label: 'not enough data' },
-  no_measurable_relationship: { pill: 'neutral', label: 'no measurable relationship' },
-  relationship_found: { pill: 'approved', label: 'found' },
+  insufficient_data: { pill: 'unnamed', label: 'Too early to tell' },
+  no_measurable_relationship: { pill: 'neutral', label: 'No clear link' },
+  relationship_found: { pill: 'approved', label: 'Yes' },
 };
 
 const TRAJECTORY_COPY = {
-  unmeasured: { pill: 'escalated', label: 'never measured' },
-  one_reading: { pill: 'neutral', label: 'one reading' },
-  climbing: { pill: 'scheduled', label: 'still climbing' },
-  settled: { pill: 'approved', label: 'settled' },
+  unmeasured: { pill: 'escalated', label: 'Not measured yet' },
+  one_reading: { pill: 'neutral', label: 'Just started' },
+  climbing: { pill: 'scheduled', label: 'Still growing' },
+  settled: { pill: 'approved', label: 'Settled' },
 };
 
 const ago = (iso) => {
   if (!iso) return 'never';
   const s = Math.round((Date.now() - new Date(iso)) / 1000);
-  if (s < 90) return `${s}s ago`;
-  if (s < 5400) return `${Math.round(s / 60)} min ago`;
-  if (s < 172800) return `${Math.round(s / 3600)} h ago`;
-  return `${Math.round(s / 86400)} d ago`;
+  if (s < 90) return 'just now';
+  if (s < 5400) return `${Math.round(s / 60)} minutes ago`;
+  if (s < 172800) return `${Math.round(s / 3600)} hours ago`;
+  return `${Math.round(s / 86400)} days ago`;
 };
 
 /** A tiny inline series: impressions per reading, newest last. */
@@ -63,6 +64,7 @@ export function PerformancePage({ author, user }) {
   const [perf, setPerf] = useState(null);
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [shown, setShown] = useState(20);
 
   const refresh = useCallback(async () => {
     const [formats, performance] = await Promise.all([
@@ -98,8 +100,8 @@ export function PerformancePage({ author, user }) {
           : api.rejectMix(rec.id, { reviewer: user?.name ?? author.name }),
       () =>
         decision === 'approve'
-          ? `Approved. The drafter now aims for ${rec.suggested_memes} meme(s) per batch.`
-          : 'Rejected. Nothing about what gets published has changed.',
+          ? `Approved. Each weekly batch will now include ${rec.suggested_memes} image post${rec.suggested_memes === 1 ? '' : 's'}.`
+          : 'Rejected. Nothing has changed.',
     );
   }
 
@@ -109,40 +111,216 @@ export function PerformancePage({ author, user }) {
   const decided = data.recommendations.filter((r) => r.status !== 'pending_approval');
   const cov = perf.coverage;
 
+  const sum = (k) => perf.totals.reduce((n, t) => n + Number(t[k] ?? 0), 0);
+  const views = sum('impressions');
+  const engagements = sum('engagements');
+
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
-      {/* STORY-029: what is tracked, how, and what the numbers can say. Leads
-          with coverage because a chart is only about the posts it includes. */}
+      {/* STORY-029: what is tracked and what the numbers can say. */}
       <div className="card">
-        <h2>Content performance</h2>
-        <div className="meta">
-          <span className="pill">{cov.published} published</span>
-          <span className={`pill ${cov.measured === cov.published ? 'approved' : 'pending_approval'}`}>{cov.measured} measured</span>
-          <span className="pill">{cov.settled} settled · {cov.tooYoung} under {cov.maturityHours}h</span>
-          {cov.unmeasuredMature > 0 && <span className="pill escalated">{cov.unmeasuredMature} matured unmeasured</span>}
-          <span className="pill neutral">{cov.readings} readings · last {ago(cov.lastReadingAt)}</span>
-          <span className={`pill ${cov.sweep.lastRunAt ? 'approved' : 'unnamed'}`}>
-            sweep {cov.sweep.lastRunAt ? `ran ${ago(cov.sweep.lastRunAt)}` : 'has not run yet'} · every {Math.round(cov.sweep.everySeconds / 60)} min
-          </span>
-          {cov.allMocked && <span className="pill unnamed">all readings mocked</span>}
+        <h2>At a glance</h2>
+        <div className="stat-tiles">
+          <div><span className="fact-num">{cov.published}</span><span className="fact-label">posts published</span></div>
+          <div><span className="fact-num">{views.toLocaleString()}</span><span className="fact-label">times seen</span></div>
+          <div><span className="fact-num">{engagements.toLocaleString()}</span><span className="fact-label">likes, shares &amp; comments</span></div>
+          <div><span className="fact-num">{views ? pct(engagements / views) : '—'}</span><span className="fact-label">of viewers reacted</span></div>
         </div>
-        <p className="hint">
-          Every published post is measured on a timer and every reading is kept, so a post has a
-          series rather than a number. Nothing here came from a real platform yet; the collector is
-          mocked and blind to everything but platform, which is why most of the questions below
-          answer “no measurable relationship” — the honest result on data with nothing in it.
-        </p>
+        <div className="row" style={{ marginTop: 14 }}>
+          <button disabled={busy} onClick={() => run(() => api.collectEngagement(author.id), (r) => `Updated the numbers for ${r.collected} posts.`)}>
+            Update the numbers now
+          </button>
+          <span className="hint">
+            Last updated {ago(cov.lastReadingAt)}. They also update by themselves every {Math.round(cov.sweep.everySeconds / 60)} minutes.
+          </span>
+        </div>
+        {cov.allMocked && (
+          <p className="hint">
+            <span className="pill unnamed">demo numbers</span> This demo isn’t connected to real social media accounts, so these
+            numbers are simulated.
+          </p>
+        )}
+      </div>
 
-        <h3>What the numbers can say</h3>
+      <div className="card">
+        <h2>By platform</h2>
+        <table>
+          <thead>
+            <tr><th>Platform</th><th>Posts</th><th>Times seen</th><th>Reactions</th><th>Reacted</th></tr>
+          </thead>
+          <tbody>
+            {perf.totals.map((t) => (
+              <tr key={t.platform}>
+                <td>{platformName(t.platform)}</td>
+                <td className="num">{t.posts}</td>
+                <td className="num">{t.impressions.toLocaleString()}</td>
+                <td className="num">{t.engagements.toLocaleString()}</td>
+                <td className="num">{pct(t.rate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <h2>Your posts ({perf.posts.length})</h2>
+        <p className="hint">“Still growing” means people are still finding the post; “Settled” means its numbers have stopped changing.</p>
         <table>
           <thead>
             <tr>
-              <th>Question</th>
-              <th>Answer</th>
-              <th>Because</th>
+              <th>Post</th>
+              <th>Posted</th>
+              <th>Times seen</th>
+              <th>Reacted</th>
+              <th>Trend</th>
             </tr>
+          </thead>
+          <tbody>
+            {perf.posts.slice(0, shown).map((p) => {
+              const tr = TRAJECTORY_COPY[p.trajectory] ?? { pill: 'neutral', label: p.trajectory };
+              return (
+                <tr key={p.id}>
+                  <td>
+                    <span className="pill">{platformName(p.platform)}</span> <span className="pill neutral">{p.format === 'meme' ? 'image' : p.format}</span>
+                    <div className="hint">{p.excerpt}</div>
+                  </td>
+                  <td className="num">{localDate(p.publishedAt)}</td>
+                  <td className="num">{p.latest ? p.latest.impressions.toLocaleString() : '—'}</td>
+                  <td className="num">{p.latest ? pct(p.latest.engagementRate) : '—'}</td>
+                  <td>
+                    <Spark history={p.history} />
+                    <div><span className={`pill ${tr.pill}`}>{tr.label}</span></div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {perf.posts.length > shown && (
+          <button className="show-more" onClick={() => setShown(shown + 20)}>Show {Math.min(20, perf.posts.length - shown)} more</button>
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Do image posts do better than text posts?</h2>
+        {/* The headline is the honest one. A dashboard that always shows a
+            winner is a dashboard that will show one made of noise. */}
+        <div className={`banner ${data.conclusive ? 'ok' : ''}`} style={{ marginTop: 8 }}>
+          {data.conclusive
+            ? 'Yes, on at least one platform there is a real difference. See the table below.'
+            : `Not enough to tell yet. The app needs at least ${data.minSample} image posts and ${data.minSample} text posts on a platform before it will answer — so far ${data.totalMeasured} posts have been measured.`}
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th>Image posts</th>
+              <th>Text posts</th>
+              <th>Answer</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.platforms.length === 0 ? (
+              <tr><td colSpan={4}><span className="empty">No measured posts yet.</span></td></tr>
+            ) : (
+              data.platforms.map((p) => {
+                const copy = VERDICT_COPY[p.verdict] ?? { pill: 'neutral', label: p.verdict };
+                return (
+                  <tr key={p.platform}>
+                    <td>{platformName(p.platform)}</td>
+                    <td className="num">{p.meme.n} posts · {pct(p.meme.mean)} reacted</td>
+                    <td className="num">{p.text.n} posts · {pct(p.text.mean)} reacted</td>
+                    <td>
+                      <span className={`pill ${copy.pill}`}>{copy.label}</span>
+                      {p.lift !== null && (
+                        <span className="num"> {p.lift > 0 ? '+' : ''}{(p.lift * 100).toFixed(0)}%</span>
+                      )}
+                      <div className="hint">{p.because}</div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="ghost" disabled={busy} onClick={() => run(() => api.scanMixRecommendations(author.id), (r) => r.proposed.length > 0 ? `${r.proposed.length} suggestion${r.proposed.length === 1 ? '' : 's'} below — nothing changes unless you approve.` : 'No suggestions yet — there isn’t enough evidence to change anything.')}>
+            Suggest a better mix
+          </button>
+          <span className="hint">Right now the app writes <strong>{data.memesPerBatch} image post{data.memesPerBatch === 1 ? '' : 's'}</strong> in each weekly batch.</span>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Suggestions waiting for you ({open.length})</h2>
+        <p className="hint">A suggestion changes nothing until you approve it.</p>
+
+        {open.length === 0 ? (
+          <div className="empty">No suggestions right now.</div>
+        ) : (
+          open.map((rec) => (
+            <div className="draft" key={rec.id}>
+              <div className="draft-head">
+                <span className="pill pending_approval">Needs your decision</span>
+                <strong>{platformName(rec.platform)}</strong>
+              </div>
+              <p>
+                Write <strong>{rec.suggested_memes}</strong> image post{rec.suggested_memes === 1 ? '' : 's'} per batch instead of{' '}
+                {rec.current_memes}, because {rec.favours === 'meme' ? 'image posts' : rec.favours === 'text' ? 'text posts' : rec.favours} are doing
+                {' '}{Math.abs(Math.round(rec.evidence.lift * 100))}% better there.
+              </p>
+              <div className="hint">{rec.evidence.because}</div>
+              <div className="row" style={{ marginTop: 10 }}>
+                <button onClick={() => decide(rec, 'approve')} disabled={busy}>Approve</button>
+                <button className="danger" onClick={() => decide(rec, 'reject')} disabled={busy}>Reject</button>
+              </div>
+            </div>
+          ))
+        )}
+
+        {decided.length > 0 && (
+          <details className="draft-details">
+            <summary>Earlier suggestions ({decided.length})</summary>
+            <table>
+              <thead>
+                <tr><th>Platform</th><th>Image posts per batch</th><th>Decision</th><th>When</th></tr>
+              </thead>
+              <tbody>
+                {decided.map((r) => (
+                  <tr key={r.id}>
+                    <td>{platformName(r.platform)}</td>
+                    <td className="num">{r.current_memes} → {r.suggested_memes}</td>
+                    <td><span className={`pill ${r.status === 'approved' ? 'approved' : 'rejected'}`}>{statusLabel(r.status)}</span></td>
+                    <td className="num">{localDate(r.updated_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        )}
+      </div>
+
+      <details className="card disclosure">
+        <summary><h2>How the numbers are measured</h2></summary>
+        <div className="meta">
+          <span className="pill">{cov.published} published</span>
+          <span className={`pill ${cov.measured === cov.published ? 'approved' : 'pending_approval'}`}>{cov.measured} measured</span>
+          <span className="pill">{cov.settled} settled · {cov.tooYoung} newer than {cov.maturityHours} hours</span>
+          {cov.unmeasuredMature > 0 && <span className="pill escalated">{cov.unmeasuredMature} never measured</span>}
+          <span className="pill neutral">{cov.readings} readings</span>
+        </div>
+        <p className="hint">
+          Each post is checked again and again, so you can see how it grows over time. Posts newer than{' '}
+          {data.maturityHours} hours ({data.excludedTooYoung} right now) are left out of comparisons — a brand-new post
+          hasn’t had time to be seen yet. Differences are only reported when they are bigger than chance (a 95% interval).
+        </p>
+        <h3>What the numbers can tell you</h3>
+        <table>
+          <thead>
+            <tr><th>Question</th><th>Answer</th><th>Because</th></tr>
           </thead>
           <tbody>
             {perf.insights.map((i) => {
@@ -155,8 +333,8 @@ export function PerformancePage({ author, user }) {
                   </td>
                   <td>
                     <span className={`pill ${copy.pill}`}>{copy.label}</span>
-                    {i.leads && <div className="mono">{i.leads} {i.lift !== undefined && i.lift !== null ? `+${(i.lift * 100).toFixed(0)}%` : ''}</div>}
-                    {i.direction && <div className="mono">{i.direction} · r = {i.correlation.r}</div>}
+                    {i.leads && <div className="num">{i.leads} {i.lift !== undefined && i.lift !== null ? `+${(i.lift * 100).toFixed(0)}%` : ''}</div>}
+                    {i.direction && <div className="num">{i.direction} · r = {i.correlation.r}</div>}
                   </td>
                   <td className="hint">{i.because}</td>
                 </tr>
@@ -164,196 +342,7 @@ export function PerformancePage({ author, user }) {
             })}
           </tbody>
         </table>
-
-        <h3>By platform</h3>
-        <table>
-          <thead>
-            <tr><th>Platform</th><th>Posts</th><th>Measured</th><th>Impressions</th><th>Engagements</th><th>Rate</th></tr>
-          </thead>
-          <tbody>
-            {perf.totals.map((t) => (
-              <tr key={t.platform}>
-                <td>{t.platform}</td>
-                <td className="mono">{t.posts}</td>
-                <td className="mono">{t.measured}</td>
-                <td className="mono">{t.impressions.toLocaleString()}</td>
-                <td className="mono">{t.engagements.toLocaleString()}</td>
-                <td className="mono">{pct(t.rate)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <h3>Posts ({perf.posts.length})</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Post</th>
-              <th>Published</th>
-              <th>Window</th>
-              <th>Scores</th>
-              <th>Impressions</th>
-              <th>Rate</th>
-              <th>Series</th>
-              <th>Trajectory</th>
-            </tr>
-          </thead>
-          <tbody>
-            {perf.posts.slice(0, 40).map((p) => {
-              const tr = TRAJECTORY_COPY[p.trajectory] ?? { pill: 'neutral', label: p.trajectory };
-              return (
-                <tr key={p.id}>
-                  <td>
-                    <span className="pill">{p.platform}</span> <span className="pill neutral">{p.format}</span>
-                    <div className="hint">{p.excerpt}</div>
-                  </td>
-                  <td className="mono">{String(p.publishedAt).slice(0, 10)} {String(p.publishedHour).padStart(2, '0')}:00</td>
-                  <td>{p.inWindow === null ? '—' : <span className={`pill ${p.inWindow ? 'approved' : 'neutral'}`}>{p.inWindow ? 'in' : 'out'}</span>}</td>
-                  <td className="mono">
-                    theme {p.scores.themeAlignment ?? '—'} · voice {p.scores.voice ?? '—'}
-                  </td>
-                  <td className="mono">{p.latest ? p.latest.impressions.toLocaleString() : '—'}</td>
-                  <td className="mono">{p.latest ? pct(p.latest.engagementRate) : '—'}</td>
-                  <td><Spark history={p.history} /></td>
-                  <td><span className={`pill ${tr.pill}`}>{tr.label}</span> <span className="hint">{p.readings} reading{p.readings === 1 ? '' : 's'}</span></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {perf.posts.length > 40 && <p className="hint">Showing the 40 most recent of {perf.posts.length}.</p>}
-      </div>
-
-      <div className="card">
-        <h2>Do memes actually do better?</h2>
-        {/* The headline is the honest one. A dashboard that always shows a
-            winner is a dashboard that will show one made of noise. */}
-        <div className={`banner ${data.conclusive ? 'ok' : 'error'}`} style={{ marginTop: 8 }}>
-          {data.conclusive
-            ? 'On at least one platform the difference is large enough to be measurable. See below.'
-            : `Not yet. Nothing here separates the two formats on any platform — ${data.totalMeasured} posts measured, and this view needs ${data.minSample} of each format on a platform before it will say anything at all.`}
-        </div>
-        <p className="hint">
-          Engagement is collected from mocked platform adapters, and the collector does not know
-          which format it is measuring — so any gap on default data is sampling noise, which is what
-          this refuses to report as a result. Posts younger than {data.maturityHours} hours are
-          excluded ({data.excludedTooYoung} right now): a meme measured an hour after publishing
-          against a three-week-old text post is measuring age, not format.
-        </p>
-
-        <div className="row">
-          <button disabled={busy} onClick={() => run(() => api.collectEngagement(author.id), (r) => `Collected metrics for ${r.collected} published posts.`)}>
-            Collect engagement
-          </button>
-          <button className="ghost" disabled={busy} onClick={() => run(() => api.scanMixRecommendations(author.id), (r) => r.proposed.length > 0 ? `${r.proposed.length} recommendation(s) proposed — they change nothing until you approve.` : 'Nothing proposed: no platform has evidence strong enough to act on.')}>
-            Look for a mix recommendation
-          </button>
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>Per platform</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Platform</th>
-              <th>Memes</th>
-              <th>Text</th>
-              <th>Verdict</th>
-              <th>Why</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.platforms.length === 0 ? (
-              <tr><td colSpan={5}><span className="empty">No measured posts yet.</span></td></tr>
-            ) : (
-              data.platforms.map((p) => {
-                const copy = VERDICT_COPY[p.verdict] ?? { pill: 'neutral', label: p.verdict };
-                return (
-                  <tr key={p.platform}>
-                    <td>{p.platform}</td>
-                    <td className="mono">
-                      n={p.meme.n} · {pct(p.meme.mean)}
-                      {p.meme.n >= data.minSample && (
-                        <span className="muted"> [{pct(p.meme.low)}–{pct(p.meme.high)}]</span>
-                      )}
-                    </td>
-                    <td className="mono">
-                      n={p.text.n} · {pct(p.text.mean)}
-                      {p.text.n >= data.minSample && (
-                        <span className="muted"> [{pct(p.text.low)}–{pct(p.text.high)}]</span>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`pill ${copy.pill}`}>{copy.label}</span>
-                      {p.lift !== null && (
-                        <span className="mono"> {p.lift > 0 ? '+' : ''}{(p.lift * 100).toFixed(0)}%</span>
-                      )}
-                    </td>
-                    <td className="hint">{p.because}</td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-        <p className="hint">
-          The bracket is a 95% interval. When two intervals overlap, the gap between the averages is
-          inside the noise and this says so rather than picking the larger number.
-        </p>
-      </div>
-
-      <div className="card">
-        <h2>Mix recommendations ({open.length} awaiting you)</h2>
-        <p className="hint">
-          A recommendation is a proposal and nothing else. The drafter aims for{' '}
-          <strong>{data.memesPerBatch} meme(s) per batch</strong> right now, and only an approval
-          here moves that — a suggestion sitting unapproved changes nothing about what gets
-          published.
-        </p>
-
-        {open.length === 0 ? (
-          <div className="empty">Nothing proposed. That is the expected state until a platform has evidence.</div>
-        ) : (
-          open.map((rec) => (
-            <div className="draft" key={rec.id}>
-              <div className="meta">
-                <span className="pill escalated">awaiting approval</span>
-                <strong>{rec.platform}</strong>
-                <span>favours {rec.favours}</span>
-                <span className="mono">{rec.current_memes} → {rec.suggested_memes} memes per batch</span>
-              </div>
-              <div className="meta mono">
-                meme n={rec.evidence.meme?.n} {pct(rec.evidence.meme?.mean)} · text n={rec.evidence.text?.n}{' '}
-                {pct(rec.evidence.text?.mean)} · lift {(rec.evidence.lift * 100).toFixed(0)}%
-              </div>
-              <div className="meta hint">{rec.evidence.because}</div>
-              <div className="row">
-                <button onClick={() => decide(rec, 'approve')} disabled={busy}>Approve</button>
-                <button className="danger" onClick={() => decide(rec, 'reject')} disabled={busy}>Reject</button>
-              </div>
-            </div>
-          ))
-        )}
-
-        {decided.length > 0 && (
-          <table>
-            <thead>
-              <tr><th>Platform</th><th>Proposed</th><th>Status</th><th>When</th></tr>
-            </thead>
-            <tbody>
-              {decided.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.platform}</td>
-                  <td className="mono">{r.current_memes} → {r.suggested_memes}</td>
-                  <td><span className={`pill ${r.status === 'approved' ? 'approved' : 'rejected'}`}>{r.status}</span></td>
-                  <td className="mono">{String(r.updated_at).slice(0, 10)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      </details>
     </>
   );
 }

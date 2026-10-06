@@ -65,14 +65,14 @@ export const QUEUES = [
     column: 'mix_recommendation_id',
     notifies: true,
     label: (row) => `Content mix change for ${row.platform}`,
-    detail: (row) => `${row.current_memes} → ${row.suggested_memes} memes per batch`,
+    detail: (row) => `${row.current_memes} → ${row.suggested_memes} image posts per batch`,
   },
   {
     kind: 'prMaterial',
     table: 'pr_materials',
     column: 'pr_kit_id',
     notifies: false,
-    label: (row) => `Press ${String(row.type ?? '').replace('_', ' ')}`,
+    label: (row) => ({ press_release: 'Press release', author_bio: 'Author bio for the press', fact_sheet: 'Press fact sheet' }[row.type] ?? `Press ${String(row.type ?? '').replace('_', ' ')}`),
     detail: (row) => String(row.headline ?? '').slice(0, 90),
   },
 ];

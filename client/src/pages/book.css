@@ -173,19 +173,37 @@
   color: var(--sand);
   font: inherit;
   text-align: left;
-  background:
+  --cover-cloth:
     /* spine */
     linear-gradient(90deg, #6e1714 0, var(--brick) 18px, #5d1411 22px, transparent 23px),
     /* cloth grain */
     repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.018) 0 2px, transparent 2px 5px),
     radial-gradient(120% 90% at 70% 20%, #57603a, var(--olive) 55%, #2e331b);
+  background: var(--cover-cloth);
   box-shadow:
     inset -2px 0 0 rgba(255, 255, 255, 0.05),
     0 30px 60px -20px rgba(0, 0, 0, 0.85),
     6px 6px 0 #c0a57c;
 }
 .cover-front:disabled { cursor: default; opacity: 1; }
-.cover-front:hover:not(:disabled) { background-color: transparent; filter: brightness(1.06); }
+/* No `filter` here: a filter flattens the 3D cover, so its inside face
+   showed through on hover — the book seemed to flash open and shut. The lift
+   is done with the shadow and a small move instead, which stays in 3D. */
+.cover-front { transition: box-shadow 0.25s, transform 0.25s; }
+/* The site's button hover would replace this background — and the cover,
+   left transparent, showed the sign-in page through it. Restated here. */
+.cover-front:hover:not(:disabled),
+.cover-front:active:not(:disabled),
+.cover-front:disabled {
+  background: var(--cover-cloth);
+}
+.cover-front:hover:not(:disabled) {
+  transform: translateY(-3px);
+  box-shadow:
+    inset -2px 0 0 rgba(255, 255, 255, 0.05),
+    0 40px 70px -22px rgba(0, 0, 0, 0.9),
+    6px 6px 0 #c0a57c;
+}
 .cover-front:focus-visible { outline: 3px solid var(--caramel); outline-offset: 4px; }
 
 .cover-frame {

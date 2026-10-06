@@ -157,9 +157,9 @@ await step('the author asks for changes, and a revision comes back into the queu
     return Boolean(b);
   });
   expect(ok, 'no Request changes button');
-  await author.waitForFunction(() => /Revision #\d+ is in the queue/.test(document.querySelector('.banner:not(.attention-notice)')?.textContent ?? ''), { timeout: 20000 });
+  await author.waitForFunction(() => /The rewrite is post \d+/.test(document.querySelector('.banner:not(.attention-notice)')?.textContent ?? ''), { timeout: 20000 });
   // The banner comes first; the queue re-renders a moment later.
-  await author.waitForFunction(() => /Revision of draft #\d+/.test(document.body.innerText), { timeout: 10000 })
+  await author.waitForFunction(() => /Rewrite of post #\d+/.test(document.body.innerText), { timeout: 10000 })
     .catch(() => { throw new Error('the revision is not labelled in the queue'); });
 });
 
@@ -167,14 +167,14 @@ await step('the revision is approved, and leaves the queue', async () => {
   // The revision is on screen one render before the page stops being busy; a
   // click in that gap lands on a disabled button and does nothing.
   await author.waitForFunction(() => {
-    const d = [...document.querySelectorAll('.draft')].find((x) => /Revision of draft #/.test(x.textContent));
+    const d = [...document.querySelectorAll('.draft')].find((x) => /Rewrite of post #/.test(x.textContent));
     const b = d && [...d.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Approve');
     return b && !b.disabled;
   }, { timeout: 10000 }).catch(() => { throw new Error('the revision\'s Approve button never became usable'); });
-  const revision = await author.evaluateHandle(() => [...document.querySelectorAll('.draft')].find((d) => /Revision of draft #/.test(d.textContent)));
-  const id = await revision.evaluate((d) => d.textContent.match(/draft (\d+)/)?.[1]);
+  const revision = await author.evaluateHandle(() => [...document.querySelectorAll('.draft')].find((d) => /Rewrite of post #/.test(d.textContent)));
+  const id = await revision.evaluate((d) => d.textContent.match(/Post #(\d+)/)?.[1]);
   await revision.evaluate((d) => [...d.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Approve').click());
-  await author.waitForFunction((n) => (document.querySelector('.banner:not(.attention-notice)')?.textContent ?? '').includes(`Draft ${n} approved`), { timeout: 10000 }, id)
+  await author.waitForFunction((n) => (document.querySelector('.banner:not(.attention-notice)')?.textContent ?? '').includes(`Post ${n} approved`), { timeout: 10000 }, id)
     .catch(async () => {
       const all = await author.$$eval('.banner', (bs) => bs.map((b) => `[${b.className}] ${b.textContent.trim()}`).join(' | '));
       throw new Error(`draft ${id}: the page said "${await bannerText(author)}" — every banner: ${all}`);
@@ -199,10 +199,10 @@ await step('the compliance auditor may read but not approve', async () => {
   const clicked = await clickButton(auditor, 'Approve');
   if (clicked) {
     await auditor.waitForSelector('.banner:not(.attention-notice)', { timeout: 10000 });
-    expect(/requires permission: content\.approve/.test(await bannerText(auditor)), `an approval by compliance was not refused: ${await bannerText(auditor)}`);
+    expect(/needs “content\.approve”/.test(await bannerText(auditor)), `an approval by compliance was not refused: ${await bannerText(auditor)}`);
   }
   await auditor.goto(`${base}/audit`, { waitUntil: 'networkidle0' });
-  expect(await auditor.evaluate(() => /Audit log \(\d+\)/.test(document.body.innerText)), 'the auditor cannot read the audit log');
+  expect(await auditor.evaluate(() => /Everything that happened \(\d+\)/.test(document.body.innerText)), 'the auditor cannot read the audit log');
 });
 
 await step('no uncaught error, console error or 5xx on the way', async () => {

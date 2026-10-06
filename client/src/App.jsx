@@ -21,6 +21,7 @@ import { PerformancePage } from './pages/PerformancePage.jsx';
 import { TrustPage } from './pages/TrustPage.jsx';
 import { BillingPage } from './pages/BillingPage.jsx';
 import { AttentionNotice } from './pages/TrustLive.jsx';
+import { PageIntro, ROLE_LABEL, navGroups } from './navigation.jsx';
 
 export function App() {
   const [user, setUser] = useState(null);
@@ -92,59 +93,37 @@ export function App() {
           <h1>Author Launch Engine</h1>
           <div className="story tagline">A launch companion for authors — social, outreach, press and trust</div>
         </div>
-        <div className="story">
-          Signed in as <strong>{user.name}</strong>
-          <span className="pill" style={{ marginLeft: 8 }}>{user.role}</span>
+        <div className="account">
+          <span className="account-name">{user.name}</span>
+          <span className="pill" title={user.permissions?.join('\n')}>{ROLE_LABEL[user.role] ?? user.role}</span>
           {/* Reads the capability rather than the role name: `compliance` also
-              spans every tenant, and "all tenants" said about an admin only
-              would be wrong for them (STORY-019). */}
-          {user.permissions?.includes('tenant.read.all') && (
-            <span className="mono"> · all tenants</span>
-          )}
-          {user.permissions?.length > 0 && (
-            <span className="mono" title={user.permissions.join('\n')}>
-              {' '}· {user.permissions.length} permissions
-            </span>
-          )}
-          <button className="link" onClick={signOut} style={{ marginLeft: 12 }}>
-            Sign out
-          </button>
+              spans every tenant (STORY-019). */}
+          {user.permissions?.includes('tenant.read.all') && <span className="account-scope">sees all authors</span>}
+          <button className="ghost small" onClick={signOut}>Sign out</button>
         </div>
       </header>
 
-      <nav className="tabs">
-        {[
-          ['/upload', 'Upload'],
-          ['/review', 'Social · review'],
-          ['/schedule', 'Social · schedule'],
-          ['/opportunities', 'Opportunities'],
-          ['/outreach', 'Outreach'],
-          ['/press', 'Press'],
-          ['/worker', 'Worker'],
-          ['/templates', 'Meme templates'],
-          ['/performance', 'Performance'],
-          ['/trust', 'Trust'],
-          // STORY-050: shown only to those who may read it — the API refuses
-          // the rest anyway, and a tab that can only fail is not offered.
-          ...(user.permissions?.includes('audit.read') ? [['/audit', 'Audit log']] : []),
-          // STORY-045: this tenant's API keys — for the tenant, and admins who manage tenants.
-          ...(user.authorId || user.permissions?.includes('tenant.manage') ? [['/api-keys', 'API keys']] : []),
-          // STORY-036: an author's own subscription; admins charge and review.
-          ...(user.authorId || user.permissions?.includes('tenant.manage') ? [['/billing', 'Billing']] : []),
-          // STORY-043: onboarding, for those who can see every tenant.
-          ...(user.permissions?.includes('tenant.read.all') ? [['/tenants', 'Tenants']] : []),
-          // STORY-042: only for those who manage access or review it.
-          // STORY-044: the access audit, for the same people.
-          ...(user.permissions?.includes('access.manage') ||
-          (user.permissions?.includes('audit.read') && user.permissions?.includes('tenant.read.all'))
-            ? [['/access', 'Access'], ['/security', 'Security']]
-            : []),
-        ].map(([to, label]) => (
-          <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
-            {label}
-          </NavLink>
+      <nav className="tabs" aria-label="Sections">
+        {navGroups(user).map((group) => (
+          <div className="tab-group" key={group.label}>
+            <span className="tab-group-label">{group.label}</span>
+            {group.items.map(([to, label]) => (
+              <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : undefined)}>
+                {label}
+              </NavLink>
+            ))}
+          </div>
         ))}
       </nav>
+
+      <PageIntro />
+
+      {/* Someone who can look but not decide should know before they press a button. */}
+      {user.permissions && !user.permissions.includes('content.approve') && (
+        <p className="readonly-note" role="note">
+          👁 You have <strong>view-only</strong> access: you can see everything, but you can’t approve or change things.
+        </p>
+      )}
 
       {error && <div className="banner error">{error}</div>}
 

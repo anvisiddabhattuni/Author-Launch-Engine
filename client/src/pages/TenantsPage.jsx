@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localDate, localTime } from '../labels.js';
 
 /**
  * Onboarding a tenant (STORY-043).
@@ -10,14 +11,13 @@ import { api } from '../api.js';
  * the welcome email, so nobody who set the account up ever knows it. Before
  * this story the admin chose it and had to pass it on somehow.
  */
-const when = (v) => (v ? new Date(v).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) : '—');
 
 function accessState(t) {
-  if (t.tenant_status === 'suspended') return ['rejected', 'suspended'];
-  if (t.activated) return ['approved', 'signed in'];
-  if (t.invite_expired) return ['escalated', 'invitation expired'];
-  if (t.invite_expires_at) return ['pending_approval', 'invited'];
-  return ['neutral', 'no account'];
+  if (t.tenant_status === 'suspended') return ['rejected', 'Paused'];
+  if (t.activated) return ['approved', 'Active'];
+  if (t.invite_expired) return ['escalated', 'Invitation expired'];
+  if (t.invite_expires_at) return ['pending_approval', 'Invited — not joined yet'];
+  return ['neutral', 'No account'];
 }
 
 export function TenantsPage({ user }) {
@@ -65,7 +65,7 @@ export function TenantsPage({ user }) {
   }
 
   async function resend(t) {
-    const result = await run(() => api.resendInvite(t.id), (r) => `A new link went to ${r.sentTo}. The previous one no longer works.`);
+    const result = await run(() => api.resendInvite(t.id), (r) => `A new link went to ${r.sentTo}. The old one no longer works.`);
     if (result) setSent({ name: t.name, email: result.sentTo, expiresAt: result.expiresAt, link: result.devInviteLink });
   }
 
@@ -79,26 +79,25 @@ export function TenantsPage({ user }) {
 
       {canManage && (
         <div className="card">
-          <h2>Onboard a new author</h2>
+          <h2>Invite a new author</h2>
           <p className="hint">
-            Creates their account and their own private section of the database, then emails them a
-            link to choose a password. <strong>You never set or see their password.</strong> The link
-            works once and expires after 72 hours.
+            They get an email with a link to choose their own password — <strong>you never see it.</strong>{' '}
+            The link works once and stops working after 3 days. Their books and posts are kept separate from every other author’s.
           </p>
           <form onSubmit={onboard}>
-            <div className="row" style={{ alignItems: 'flex-end' }}>
+            <div className="row form-row">
               <div style={{ flex: 1, minWidth: 200 }}>
-                <label htmlFor="tenant-name">Name</label>
+                <label htmlFor="tenant-name">Author’s name</label>
                 <input id="tenant-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
               </div>
               <div style={{ flex: 1, minWidth: 200 }}>
-                <label htmlFor="tenant-email">Email</label>
+                <label htmlFor="tenant-email">Their email</label>
                 <input id="tenant-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
               </div>
             </div>
             <div className="row" style={{ marginTop: 14 }}>
               <button type="submit" disabled={busy || !form.name.trim() || !form.email.trim()}>
-                {busy ? 'Onboarding…' : 'Onboard and send welcome email'}
+                {busy ? 'Sending…' : 'Send invitation'}
               </button>
             </div>
           </form>
@@ -106,14 +105,13 @@ export function TenantsPage({ user }) {
           {sent && (
             <div className="banner ok" style={{ marginTop: 14 }}>
               <div>
-                <strong>{sent.name}</strong> is set up.
-                {sent.schema && <> Private schema <span className="mono">{sent.schema.name}</span> created.</>}{' '}
-                Welcome email sent to <span className="mono">{sent.email}</span>; the link expires {when(sent.expiresAt)} UTC.
+                <strong>{sent.name}</strong> is set up. An invitation went to <strong>{sent.email}</strong>; the link
+                works until {localTime(sent.expiresAt)}.
               </div>
               {sent.link && (
                 <div style={{ marginTop: 8 }}>
-                  <span className="pill">development only</span>{' '}
-                  Email here goes nowhere, so the link is shown instead. In production it exists only in the email.
+                  <span className="pill">demo only</span>{' '}
+                  This demo doesn’t send real email, so here is the link the author would have received:
                   <div className="mono" style={{ wordBreak: 'break-all', marginTop: 4 }}>
                     <a href={sent.link}>{sent.link}</a>
                   </div>
@@ -125,22 +123,19 @@ export function TenantsPage({ user }) {
       )}
 
       <div className="card">
-        <h2>Tenants ({tenants.length})</h2>
+        <h2>All authors ({tenants.length})</h2>
         <p className="hint">
           {waiting === 0
-            ? 'Everyone onboarded has signed in.'
-            : `${waiting} ${waiting === 1 ? 'author has' : 'authors have'} not accepted their invitation yet.`}{' '}
-          Every onboarding is on the Audit log with the admin who did it and when.
+            ? 'Everyone invited has joined.'
+            : `${waiting} ${waiting === 1 ? 'author hasn’t' : 'authors haven’t'} joined yet.`}
         </p>
         <div>
           <table>
             <thead>
               <tr>
                 <th>Author</th>
-                <th>Access</th>
-                <th>Private schema</th>
-                <th>Onboarded</th>
-                <th>By</th>
+                <th>Status</th>
+                <th>Added</th>
                 {canManage && <th />}
               </tr>
             </thead>
@@ -151,41 +146,42 @@ export function TenantsPage({ user }) {
                   <tr key={t.id}>
                     <td>
                       <strong>{t.name}</strong>
-                      <div className="mono hint">{t.email}</div>
+                      <div className="hint">{t.email}</div>
                     </td>
                     <td>
                       <span className={`pill ${pill}`}>{label}</span>
                       {!t.activated && t.invite_expires_at && !t.invite_expired && (
-                        <div className="hint">link expires {when(t.invite_expires_at)}</div>
+                        <div className="hint">link works until {localDate(t.invite_expires_at)}</div>
                       )}
                     </td>
-                    <td className="mono">{t.has_schema ? `tenant_${t.id}` : '—'}</td>
-                    <td className="mono">{when(t.onboarded_at)}</td>
-                    <td>{t.onboarded_by ?? <span className="hint">before STORY-043</span>}</td>
+                    <td>
+                      {localDate(t.onboarded_at)}
+                      {t.onboarded_by && <div className="hint">by {t.onboarded_by}</div>}
+                    </td>
                     {canManage && (
-                      <td className="row">
+                      <td className="cell-action"><div className="row">
                         {!t.activated && t.user_id && t.tenant_status !== 'suspended' && (
                           <button className="ghost" disabled={busy} onClick={() => resend(t)}>
-                            Resend invitation
+                            Send a new link
                           </button>
                         )}
                         {t.tenant_status === 'suspended' ? (
-                          <button className="ghost" disabled={busy} onClick={() => run(() => api.restoreTenant(t.id), `${t.name} restored.`)}>
-                            Restore
+                          <button className="ghost" disabled={busy} onClick={() => run(() => api.restoreTenant(t.id), `${t.name} can use the app again.`)}>
+                            Un-pause
                           </button>
                         ) : (
                           <button
-                            className="ghost"
+                            className="danger"
                             disabled={busy}
                             onClick={() => {
-                              const reason = window.prompt(`Why suspend ${t.name}?`);
-                              if (reason) run(() => api.suspendTenant(t.id, reason), `${t.name} suspended. Nothing was deleted.`);
+                              const reason = window.prompt(`Pausing stops ${t.name} from signing in. Nothing is deleted. Why are you pausing this account?`);
+                              if (reason) run(() => api.suspendTenant(t.id, reason), `${t.name} is paused. Nothing was deleted.`);
                             }}
                           >
-                            Suspend
+                            Pause
                           </button>
                         )}
-                      </td>
+                      </div></td>
                     )}
                   </tr>
                 );

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localTime } from '../labels.js';
 
 /**
  * Subscription payments through Stripe (STORY-036).
@@ -12,7 +13,8 @@ import { api } from '../api.js';
  * test methods; in production, one Stripe's own form collected.
  */
 const money = (cents, currency) => `${(cents / 100).toFixed(2)} ${String(currency).toUpperCase()}`;
-const when = (iso) => (iso ? new Date(iso).toISOString().slice(0, 16).replace('T', ' ') : '—');
+const PAY_LABEL = { succeeded: 'Paid', active: 'Active', failed: 'Failed', past_due: 'Overdue', processing: 'Processing', pending: 'Pending', requires_action: 'Needs action', canceled: 'Cancelled' };
+const statusLabel = (s) => PAY_LABEL[s] ?? String(s).replace(/_/g, ' ');
 const TONE = { succeeded: 'approved', active: 'approved', failed: 'escalated', past_due: 'escalated', processing: 'pending_approval', pending: 'pending_approval', requires_action: 'pending_approval' };
 
 export function BillingPage({ author, user }) {
@@ -44,7 +46,7 @@ export function BillingPage({ author, user }) {
       const r = await api.chargeSubscription(authorId, method);
       setStatus(r.payment.status === 'succeeded'
         ? { kind: 'ok', message: `Charged ${money(r.payment.amount_cents, r.payment.currency)}. The subscription is active.` }
-        : { kind: 'error', message: `Payment ${r.payment.status}: ${r.payment.failure_message ?? r.payment.failure_code}. ${r.notified ? 'The author has been emailed.' : ''} Flagged for review.` });
+        : { kind: 'error', message: `The payment didn’t go through: ${r.payment.failure_message ?? r.payment.failure_code}. ${r.notified ? 'The author has been emailed. ' : ''}An admin will look at it.` });
       await refresh();
     } catch (e) {
       setStatus({ kind: 'error', message: e.message });
@@ -75,19 +77,19 @@ export function BillingPage({ author, user }) {
         <h2>Subscription</h2>
         {canManage && tenants.length > 0 && (
           <div className="row">
-            <label htmlFor="billing-tenant">Tenant</label>
+            <label htmlFor="billing-tenant">Author</label>
             <select id="billing-tenant" value={authorId} onChange={(e) => setAuthorId(Number(e.target.value))}>
               {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </div>
         )}
         {!billing.configured ? (
-          <div className="banner">Payments aren't set up here: the server has no Stripe key (STRIPE_SECRET_KEY).</div>
+          <div className="banner">Payments aren’t switched on yet. An administrator needs to connect the payment service (Stripe).</div>
         ) : (
           <div className="meta">
-            <span className={`pill ${TONE[sub?.status ?? 'pending']}`}>{sub?.status ?? 'not charged yet'}</span>
+            <span className={`pill ${TONE[sub?.status ?? 'pending']}`}>{sub ? statusLabel(sub.status) : 'Not charged yet'}</span>
             <span className="pill neutral">{money(sub?.amount_cents ?? billing.price.amountCents, sub?.currency ?? billing.price.currency)} / month</span>
-            {billing.testMode && <span className="pill pending_approval">Stripe test mode — no real card is charged</span>}
+            {billing.testMode && <span className="pill pending_approval">Test mode — no real card is charged</span>}
           </div>
         )}
 
@@ -97,12 +99,12 @@ export function BillingPage({ author, user }) {
             <select id="billing-method" value={method} onChange={(e) => setMethod(e.target.value)}>
               {billing.testPaymentMethods.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
-            <button type="button" disabled={busy} onClick={charge}>{busy ? 'Charging…' : 'Charge subscription'}</button>
+            <button type="button" disabled={busy} onClick={charge}>{busy ? 'Charging…' : 'Charge this month'}</button>
           </div>
         )}
         <p className="hint">
-          Card details never reach this system: Stripe holds them, and a payment here names only a Stripe payment
-          method. Every payment is on the audit log; a failed one is flagged for review and the author is emailed why.
+          Card details are kept by Stripe, the payment service — never by this app. If a payment fails, the author
+          gets an email saying why and an admin is asked to look at it.
         </p>
       </div>
 
@@ -112,16 +114,15 @@ export function BillingPage({ author, user }) {
           <div className="empty">No payments yet.</div>
         ) : (
           <table>
-            <thead><tr><th>When (UTC)</th><th>Amount</th><th>Status</th><th>Why it failed</th><th>Author told</th><th>Stripe</th></tr></thead>
+            <thead><tr><th>Date</th><th>Amount</th><th>Status</th><th>Why it failed</th><th>Author emailed</th></tr></thead>
             <tbody>
               {billing.payments.map((p) => (
                 <tr key={p.id}>
-                  <td className="mono">{when(p.created_at)}</td>
-                  <td className="mono">{money(p.amount_cents, p.currency)}</td>
-                  <td><span className={`pill ${TONE[p.status]}`}>{p.status}</span>{p.needs_review && !p.reviewed_at && <div className="hint">flagged for review</div>}</td>
-                  <td>{p.failure_message ?? '—'}{p.failure_code && <div className="hint mono">{p.failure_code}</div>}</td>
-                  <td className="mono">{p.status === 'failed' ? (p.notified_at ? when(p.notified_at) : 'not yet') : '—'}</td>
-                  <td className="mono">{p.stripe_payment_intent_id ?? '—'}</td>
+                  <td>{localTime(p.created_at)}</td>
+                  <td className="num">{money(p.amount_cents, p.currency)}</td>
+                  <td><span className={`pill ${TONE[p.status]}`}>{statusLabel(p.status)}</span>{p.needs_review && !p.reviewed_at && <div className="hint">waiting for an admin to look</div>}</td>
+                  <td>{p.failure_message ?? '—'}</td>
+                  <td>{p.status === 'failed' ? (p.notified_at ? localTime(p.notified_at) : 'Not yet') : '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -133,18 +134,18 @@ export function BillingPage({ author, user }) {
         <div className="card">
           <h2>Failed payments to review ({review.length})</h2>
           {review.length === 0 ? (
-            <div className="empty">Nothing waiting — every failed payment has been looked at.</div>
+            <div className="empty">Nothing to look at — every failed payment has been checked.</div>
           ) : (
             <table>
-              <thead><tr><th>When (UTC)</th><th>Tenant</th><th>Amount</th><th>Reason</th><th /></tr></thead>
+              <thead><tr><th>Date</th><th>Author</th><th>Amount</th><th>Why it failed</th><th /></tr></thead>
               <tbody>
                 {review.map((p) => (
                   <tr key={p.id}>
-                    <td className="mono">{when(p.created_at)}</td>
+                    <td>{localTime(p.created_at)}</td>
                     <td>{p.author_name}</td>
-                    <td className="mono">{money(p.amount_cents, p.currency)}</td>
+                    <td className="num">{money(p.amount_cents, p.currency)}</td>
                     <td>{p.failure_message ?? p.failure_code}</td>
-                    <td><button type="button" disabled={busy} onClick={() => reviewed(p.id)}>Mark reviewed</button></td>
+                    <td className="cell-action"><button type="button" disabled={busy} onClick={() => reviewed(p.id)}>Mark as looked at</button></td>
                   </tr>
                 ))}
               </tbody>

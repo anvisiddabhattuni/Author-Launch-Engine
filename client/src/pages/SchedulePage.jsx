@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localTime, platformName, statusLabel } from '../labels.js';
 
-const when = (value) => new Date(value).toUTCString().replace(' GMT', ' UTC');
 
 /** Build steps 4 and 5: queue approved posts, then publish through mocks. */
 export function SchedulePage({ author }) {
@@ -38,101 +38,85 @@ export function SchedulePage({ author }) {
     }
   }
 
+  const failed = posts.filter((p) => p.status === 'failed').length;
+
   return (
     <>
       {status && <div className={`banner ${status.kind}`}>{status.message}</div>}
 
-      {/* STORY-025: a failed post used to be one pill in a table nobody had a
-          reason to open, while the author believed it had gone out. The failure
-          is announced by email now; this is the same fact on the page they are
-          already looking at. */}
-      {posts.some((p) => p.status === 'failed') && (
+      {/* STORY-025: a failed post is announced by email and shown here. */}
+      {failed > 0 && (
         <div className="banner error">
-          <strong>
-            {posts.filter((p) => p.status === 'failed').length} post
-            {posts.filter((p) => p.status === 'failed').length === 1 ? '' : 's'} failed to publish.
-          </strong>{' '}
-          These were approved and scheduled — the failure happened at the platform, after the gate.
-          Nothing was published that should not have been, and a failed post does not retry on its
-          own. Your reviewers have been emailed once about each.
+          <strong>{failed} post{failed === 1 ? '' : 's'} couldn’t be posted.</strong>{' '}
+          {failed === 1 ? 'It was' : 'They were'} approved and scheduled, but the platform refused {failed === 1 ? 'it' : 'them'}.
+          Failed posts don’t retry on their own, and your reviewers have been emailed. Nothing went out that you
+          hadn’t approved.
         </div>
       )}
 
       <div className="card">
-        <h2>Approved, ready to queue ({approved.length})</h2>
+        <h2>Approved — ready to schedule ({approved.length})</h2>
         <p className="hint">
-          Scheduling picks the next high-engagement window for the platform and avoids stacking two
-          posts within an hour of each other.
+          The app picks the next good time to post on each platform, and keeps your posts at least an hour apart.
         </p>
         {approved.length === 0 ? (
-          <div className="empty">Nothing approved yet. Approve a draft on the Review tab.</div>
+          <div className="empty">Nothing approved yet. Approve posts on the Review posts page.</div>
         ) : (
           approved.map((draft) => (
             <div className="draft" key={draft.id}>
-              <div className="meta">
-                <span className="pill approved">approved</span>
-                <strong>{draft.platform}</strong>
-                <span>draft {draft.id}</span>
+              <div className="draft-head">
+                <span className="pill approved">Approved</span>
+                <strong>{platformName(draft.platform)}</strong>
+                <span className="draft-id">Post #{draft.id}</span>
               </div>
               <pre>{draft.content}</pre>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  run(() => api.schedule(draft.id), `Draft ${draft.id} queued at its next optimal slot.`)
-                }
-              >
-                Schedule at optimal time
-              </button>
+              <div className="row">
+                <button
+                  disabled={busy}
+                  onClick={() => run(() => api.schedule(draft.id), `Post ${draft.id} is scheduled for the next good time to post.`)}
+                >
+                  Schedule for the best time
+                </button>
+              </div>
             </div>
           ))
         )}
       </div>
 
       <div className="card">
-        <h2>Publishing queue ({posts.length})</h2>
+        <h2>Scheduled and posted ({posts.length})</h2>
         <p className="hint">
-          Publishing goes through mocked platform adapters, so the demo runs without live social
-          accounts. "Publish due now" fast-forwards the clock 60 days to flush the queue.
+          In this demo, posting is simulated — nothing reaches real social media accounts. “Post everything due now”
+          skips ahead in time so you can see scheduled posts go out.
         </p>
 
         <div className="row" style={{ marginBottom: 14 }}>
           <button
             className="ghost"
             disabled={busy}
-            onClick={() =>
-              run(
-                () => api.publishDue(new Date(Date.now() + 60 * 864e5).toISOString()),
-                'Ran the publisher over everything due.',
-              )
-            }
+            onClick={() => run(() => api.publishDue(new Date(Date.now() + 60 * 864e5).toISOString()), 'Everything that was due has been posted.')}
           >
-            Publish due now
+            Post everything due now
           </button>
         </div>
 
         {posts.length === 0 ? (
-          <div className="empty">Nothing queued.</div>
+          <div className="empty">Nothing scheduled yet.</div>
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>Platform</th>
-                <th>Scheduled for (UTC)</th>
-                <th>Status</th>
-                <th>Platform id</th>
-                <th>Content</th>
-              </tr>
+              <tr><th>Platform</th><th>When</th><th>Status</th><th>Post</th></tr>
             </thead>
             <tbody>
               {posts.map((post) => (
                 <tr key={post.id}>
-                  <td>{post.platform}</td>
-                  <td className="mono">{when(post.scheduled_for)}</td>
+                  <td>{platformName(post.platform)}</td>
+                  <td>{localTime(post.scheduled_for)}</td>
                   <td>
-                    <span className={`pill ${post.status}`}>{post.status}</span>
+                    <span className={`pill ${post.status}`}>{statusLabel(post.status)}</span>
+                    {post.status === 'failed' && post.error && <div className="hint">{post.error}</div>}
                   </td>
-                  <td className="mono">{post.external_id ?? post.error ?? '—'}</td>
-                  <td>{post.content.slice(0, 70)}…</td>
+                  <td>{post.content.slice(0, 90)}{post.content.length > 90 ? '…' : ''}</td>
                 </tr>
               ))}
             </tbody>

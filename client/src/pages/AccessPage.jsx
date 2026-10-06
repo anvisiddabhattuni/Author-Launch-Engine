@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localTime } from '../labels.js';
 
 /**
  * Who may do what, and every change to it (STORY-042).
@@ -24,7 +25,8 @@ const describe = (c) =>
     ? `make ${c.user_email ?? `account ${c.user_id}`} ${c.new_role}`
     : `${c.kind === 'grant_permission' ? 'grant' : 'revoke'} ${c.permission} ${c.kind === 'grant_permission' ? 'to' : 'from'} ${c.role}`;
 
-const when = (v) => (v ? new Date(v).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) : '—');
+const when = localTime;
+const STATUS_WORD = { pending: 'Waiting', approved: 'Approved', rejected: 'Rejected', withdrawn: 'Withdrawn', bootstrap: 'Set up at start' };
 
 export function AccessPage({ user }) {
   const [data, setData] = useState(null);
@@ -73,11 +75,10 @@ export function AccessPage({ user }) {
       <div className="card">
         <h2>Waiting for a decision ({pending.length})</h2>
         <p className="hint">
-          Nothing below has changed anyone&apos;s access yet. Each needs an admin other than the one
-          who asked — the database refuses a requester&apos;s own approval — and an approved change
-          applies to every signed-in session on its next request, not when their token expires.
+          These requests haven’t changed anything yet. A <strong>different</strong> admin from the one who asked must
+          approve each one; once approved, it takes effect straight away.
           {data.approvers < 2 && (
-            <strong> Only {data.approvers} person can approve changes, so nothing can be approved.</strong>
+            <strong> Only {data.approvers} person can approve changes right now, so nothing can be approved until a second admin is added.</strong>
           )}
         </p>
         {pending.length === 0 ? (
@@ -88,7 +89,7 @@ export function AccessPage({ user }) {
             return (
               <div className="draft" key={c.id}>
                 <div className="meta">
-                  <span className="pill pending_approval">waiting</span>
+                  <span className="pill pending_approval">Waiting</span>
                   <strong>{describe(c)}</strong>
                 </div>
                 <div className="hint">
@@ -98,12 +99,12 @@ export function AccessPage({ user }) {
                   <div className="row">
                     {mine ? (
                       <>
-                        <span className="pill neutral">you asked — another admin decides</span>
-                        <button className="ghost" disabled={busy} onClick={() => run(() => api.withdrawAccessChange(c.id), 'Withdrawn.')}>Withdraw</button>
+                        <span className="pill neutral">You asked — another admin decides</span>
+                        <button className="ghost" disabled={busy} onClick={() => run(() => api.withdrawAccessChange(c.id), 'Request withdrawn. Nothing changed.')}>Withdraw</button>
                       </>
                     ) : (
                       <>
-                        <button disabled={busy} onClick={() => run(() => api.approveAccessChange(c.id), 'Approved and applied.')}>Approve</button>
+                        <button disabled={busy} onClick={() => run(() => api.approveAccessChange(c.id), 'Approved. The change is now in effect.')}>Approve</button>
                         <button className="danger" disabled={busy} onClick={() => run(() => api.rejectAccessChange(c.id), 'Rejected. Nothing changed.')}>Reject</button>
                       </>
                     )}
@@ -117,41 +118,45 @@ export function AccessPage({ user }) {
 
       {canManage && (
         <form className="card" onSubmit={submit}>
-          <h2>Request a change</h2>
+          <h2>Ask for a change</h2>
+          <p className="hint">Another admin will need to approve it.</p>
+          <label htmlFor="ac-kind">What kind of change</label>
           <div className="row">
-            <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+            <select id="ac-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
               <option value="grant_permission">Grant a permission to a role</option>
               <option value="revoke_permission">Revoke a permission from a role</option>
               <option value="assign_role">Give an account a role</option>
             </select>
           </div>
           {form.kind === 'assign_role' ? (
-            <div className="row">
-              <input placeholder="account id" value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })} />
-              <select value={form.newRole} onChange={(e) => setForm({ ...form, newRole: e.target.value })}>
+            <div className="row form-row">
+              <div><label htmlFor="ac-user">Account number</label><input id="ac-user" placeholder="e.g. 4" value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })} />
+</div>
+              <div><label htmlFor="ac-newrole">New role</label><select id="ac-newrole" value={form.newRole} onChange={(e) => setForm({ ...form, newRole: e.target.value })}>
                 {data.matrix.map((r) => <option key={r.role} value={r.role}>{r.role}</option>)}
-              </select>
+              </select></div>
             </div>
           ) : (
-            <div className="row">
-              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+            <div className="row form-row">
+              <div><label htmlFor="ac-role">Role</label><select id="ac-role" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
                 {data.matrix.map((r) => <option key={r.role} value={r.role}>{r.role}</option>)}
-              </select>
-              <select value={form.permission} onChange={(e) => setForm({ ...form, permission: e.target.value })}>
-                <option value="">permission…</option>
+              </select></div>
+              <div><label htmlFor="ac-perm">Permission</label><select id="ac-perm" value={form.permission} onChange={(e) => setForm({ ...form, permission: e.target.value })}>
+                <option value="">Choose…</option>
                 {allPermissions.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
+              </select></div>
             </div>
           )}
-          <input placeholder="Why — at least ten characters, and it goes on the audit log" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} />
-          <button type="submit" disabled={busy}>Request</button>
+          <label htmlFor="ac-reason">Why is this needed? <span className="label-hint">— at least 10 characters; it’s kept in the activity history</span></label>
+          <input id="ac-reason" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} />
+          <div className="row" style={{ marginTop: 12 }}><button type="submit" disabled={busy || form.reason.trim().length < 10}>Send request</button></div>
         </form>
       )}
 
       <AuditAccessPolicy />
 
       <div className="card">
-        <h2>Who holds what</h2>
+        <h2>Roles and what each can do</h2>
         <table>
           <thead><tr><th>Role</th><th>Permissions</th></tr></thead>
           <tbody>
@@ -164,18 +169,18 @@ export function AccessPage({ user }) {
           </tbody>
         </table>
 
-        <h3>Accounts with more than author access</h3>
+        <h3>People with extra access</h3>
         <table>
           <thead><tr><th>Account</th><th>Role</th><th>How they got it</th></tr></thead>
           <tbody>
             {data.elevated.map((u) => (
               <tr key={u.id}>
-                <td>{u.name}<div className="hint mono">{u.email} · id {u.id}</div></td>
+                <td>{u.name}<div className="hint">{u.email} · account {u.id}</div></td>
                 <td>{u.role}</td>
                 <td>
-                  {u.how === 'approved' ? <span className="pill approved">approved change</span>
-                    : u.how === 'bootstrap' ? <span className="pill neutral">seeded before review existed</span>
-                      : <span className="pill escalated">nobody approved this</span>}
+                  {u.how === 'approved' ? <span className="pill approved">Approved request</span>
+                    : u.how === 'bootstrap' ? <span className="pill neutral">Set up at the start</span>
+                      : <span className="pill escalated">Nobody approved this — check it</span>}
                 </td>
               </tr>
             ))}
@@ -184,16 +189,16 @@ export function AccessPage({ user }) {
       </div>
 
       <div className="card">
-        <h2>Decided ({decided.length})</h2>
+        <h2>Past requests ({decided.length})</h2>
         <table>
           <thead><tr><th>Change</th><th>Asked by</th><th>Decided by</th><th>Status</th></tr></thead>
           <tbody>
             {decided.map((c) => (
               <tr key={c.id}>
                 <td>{describe(c)}<div className="hint">“{c.reason}”</div></td>
-                <td>{c.requested_by_name ?? '—'}<div className="hint mono">{when(c.requested_at)}</div></td>
-                <td>{c.decided_by_name ?? '—'}<div className="hint mono">{when(c.decided_at)}</div></td>
-                <td><span className={`pill ${STATUS[c.status] ?? ''}`}>{c.status}{c.applied_at ? ', applied' : ''}</span></td>
+                <td>{c.requested_by_name ?? '—'}<div className="hint">{when(c.requested_at)}</div></td>
+                <td>{c.decided_by_name ?? '—'}<div className="hint">{when(c.decided_at)}</div></td>
+                <td><span className={`pill ${STATUS[c.status] ?? ''}`}>{STATUS_WORD[c.status] ?? c.status}</span></td>
               </tr>
             ))}
           </tbody>
@@ -217,12 +222,11 @@ function AuditAccessPolicy() {
   const roles = Object.keys(policy[0]?.roles ?? {});
   const PILL = { no: 'neutral', yes: 'approved', 'own tenant': 'pending_approval', 'all tenants': 'approved' };
   return (
-    <div className="card">
-      <h2>Who can read the audit logs</h2>
+    <details className="card disclosure">
+      <summary><h2>Who can see the activity history</h2></summary>
       <p className="hint">
-        Every route that serves audit data, the permission that guards it, and what each role gets. Worked out
-        from the grants below, not written down twice — change a grant and this table changes. A route that
-        serves audit data without being on this list fails the build.
+        Worked out from the roles below, so it is always up to date. Technical: each row is one place the
+        activity history can be read from, and the permission it needs.
       </p>
       <table>
         <thead>
@@ -240,6 +244,6 @@ function AuditAccessPolicy() {
           ))}
         </tbody>
       </table>
-    </div>
+    </details>
   );
 }

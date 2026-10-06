@@ -14,6 +14,8 @@ import { api } from '../api.js';
  * story on the same point about opportunities: an offered template is visible
  * and can be judged wrong, and a withheld one used to leave no trace at all.
  */
+const COLOUR_LABEL = { ground: 'Background colour', ink: 'Text colour', accent: 'Highlight colour' };
+
 export function TemplatesPage({ user, author, book }) {
   const [templates, setTemplates] = useState([]);
   const [identity, setIdentity] = useState(null);
@@ -46,7 +48,7 @@ export function TemplatesPage({ user, author, book }) {
     setStatus(null);
     try {
       await api.retireMemeTemplate(key, reasons[key] ?? '');
-      setStatus({ kind: 'ok', message: `"${key}" retired. Drafts that used it keep their provenance.` });
+      setStatus({ kind: 'ok', message: `“${key}” won’t be used any more. Posts already made with it are unchanged.` });
       await refresh();
     } catch (error) {
       setStatus({ kind: 'error', message: error.message });
@@ -66,7 +68,7 @@ export function TemplatesPage({ user, author, book }) {
       });
       setStatus({
         kind: 'ok',
-        message: `Saved as version ${saved.version}. Memes drafted from now on are judged against it; earlier ones keep the version they were made under.`,
+        message: `Saved. New image posts will follow this look; earlier ones are unchanged.`,
       });
       await refresh();
     } catch (error) {
@@ -86,11 +88,10 @@ export function TemplatesPage({ user, author, book }) {
 
       {active && edit && (
         <div className="card">
-          <h2>Visual identity — version {active.version}</h2>
+          <h2>Your book’s look</h2>
           <p className="hint">
-            What every meme is generated against and scored against, so the output looks like one
-            book rather than one feed. Editing writes a new version: later memes are judged against
-            it, and memes already drafted keep pointing at the version they were made to satisfy.
+            The colours and rules every image post follows, so they all look like they belong to your book.
+            Changes apply to new image posts only. (Version {active.version}.)
           </p>
           {/* Where the palette came from, said as its own claim rather than
               buried mid-sentence — an inferred palette and one the author set
@@ -99,21 +100,22 @@ export function TemplatesPage({ user, author, book }) {
             <span
               className={`pill ${active.derivedFrom?.coverArt || active.createdBy !== 'system' ? 'approved' : 'neutral'}`}
             >
-              palette {active.derivedFrom?.confidence}
+              colours: {active.derivedFrom?.coverArt ? 'taken from your cover' : active.createdBy !== 'system' ? 'chosen by you' : 'a starting guess'}
             </span>
           </div>
 
-          <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div className="row form-row">
             {['ground', 'ink', 'accent'].map((key) => (
               <div key={key}>
-                <label htmlFor={`c-${key}`}>{key}</label>
+                <label htmlFor={`c-${key}`}>{COLOUR_LABEL[key]}</label>
                 <div className="row" style={{ alignItems: 'center' }}>
                   <span
                     style={{
                       width: 26,
                       height: 26,
                       borderRadius: 6,
-                      border: '1px solid #333',
+                      border: '1px solid var(--border-strong)',
+                      flex: 'none',
                       background: edit[key],
                       display: 'inline-block',
                     }}
@@ -128,21 +130,20 @@ export function TemplatesPage({ user, author, book }) {
               </div>
             ))}
             <div>
-              <label htmlFor="c-mode">mode</label>
+              <label htmlFor="c-mode">Style</label>
               <select
                 id="c-mode"
                 value={edit.mode}
                 onChange={(e) => setEdit({ ...edit, mode: e.target.value })}
               >
-                <option value="dark">dark</option>
-                <option value="light">light</option>
+                <option value="dark">Dark background</option>
+                <option value="light">Light background</option>
               </select>
             </div>
           </div>
 
           <label htmlFor="dnu" style={{ marginTop: 12 }}>
-            Do not use — one rule per line. These are the half with teeth: a meme breaking one is
-            withheld and sent to you.
+            Never use — one rule per line <span className="label-hint">— an image breaking one of these is held back and shown to you</span>
           </label>
           <textarea
             id="dnu"
@@ -151,27 +152,28 @@ export function TemplatesPage({ user, author, book }) {
             onChange={(e) => setEdit({ ...edit, doNotUse: e.target.value })}
           />
 
+          <label htmlFor="identity-note">Why are you changing it? <span className="label-hint">— optional, kept in the activity history</span></label>
           <input
-            placeholder="Why are you changing it? (goes on the audit log)"
+            id="identity-note"
             value={edit.note}
             onChange={(e) => setEdit({ ...edit, note: e.target.value })}
-            style={{ marginTop: 8 }}
           />
 
           <div className="row" style={{ marginTop: 12 }}>
             <button onClick={revise} disabled={busy}>
-              Save as version {active.version + 1}
+              Save changes
             </button>
           </div>
 
-          <h3>History</h3>
+          <details className="draft-details">
+          <summary>Earlier versions ({identity.versions.length})</summary>
           <table>
             <thead>
               <tr>
                 <th>Version</th>
-                <th>Accent</th>
-                <th>Mode</th>
-                <th>Set by</th>
+                <th>Main colour</th>
+                <th>Style</th>
+                <th>Changed by</th>
                 <th>Why</th>
               </tr>
             </thead>
@@ -180,7 +182,7 @@ export function TemplatesPage({ user, author, book }) {
                 <tr key={v.version}>
                   <td className="mono">
                     v{v.version}
-                    {v.active && <span className="pill approved" style={{ marginLeft: 6 }}>active</span>}
+                    {v.active && <span className="pill approved" style={{ marginLeft: 6 }}>in use</span>}
                   </td>
                   <td className="mono">
                     <span
@@ -195,33 +197,32 @@ export function TemplatesPage({ user, author, book }) {
                     />
                     {v.palette.accent}
                   </td>
-                  <td className="mono">{v.palette.mode}</td>
+                  <td>{v.palette.mode === 'dark' ? 'Dark' : 'Light'}</td>
                   <td>{v.createdBy}</td>
                   <td>{v.note || <span className="mono">—</span>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </details>
         </div>
       )}
 
-      <div className="card">
-        <h2>Withheld from the generator ({withheld.length})</h2>
+      <details className="card disclosure">
+        <summary><h2>Not allowed to be used ({withheld.length})</h2></summary>
         <p className="hint">
-          Templates the system will not compose a meme from, and why. Every time the generator
-          reaches for one it is refused and the refusal is written to the audit log — an unlicensed
-          image cannot reach a draft, and now you can check that rather than take it on trust.
+          Pictures the app will never use — usually because we don’t have permission (a licence) to use them.
         </p>
         {withheld.length === 0 ? (
-          <div className="empty">Every template in the library is licensed and active.</div>
+          <div className="empty">None — every picture can be used.</div>
         ) : (
           <table>
             <thead>
               <tr>
                 <th>Template</th>
-                <th>Source</th>
+                <th>Where it’s from</th>
                 <th>Licence</th>
-                <th>Why it is withheld</th>
+                <th>Why not</th>
               </tr>
             </thead>
             <tbody>
@@ -229,39 +230,35 @@ export function TemplatesPage({ user, author, book }) {
                 <tr key={t.key}>
                   <td>
                     {t.name}
-                    <span className="mono"> · {t.key}</span>
                   </td>
-                  <td className="mono">{t.source || '—'}</td>
-                  <td className="mono">{t.licence?.terms ?? 'none recorded'}</td>
+                  <td className="audit-detail mono">{t.source || '—'}</td>
+                  <td>{t.licence?.terms ?? 'None recorded'}</td>
                   <td>
                     <span className="pill unnamed">{t.reason?.replace(/_/g, ' ')}</span>
-                    {t.retiredReason && <span className="mono"> · {t.retiredReason}</span>}
+                    {t.retiredReason && <div className="hint">{t.retiredReason}</div>}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </details>
 
       <div className="card">
-        <h2>Available to the generator ({usable.length})</h2>
+        <h2>Pictures the app can use ({usable.length})</h2>
         <p className="hint">
-          Each template is a piece of artwork with named caption slots the drafter fills. A slot says
-          what it is <em>for</em>, so a new template can be added without a code change to go with it.
-          The identity score says whether it looks like <em>this book</em> — a separate question from
-          whether it is licensed, and the generator prefers the ones that fit.
-          {!isAdmin && ' Retiring a template is an operator action — sign in as ops to do it.'}
+          Each picture has spaces for captions, which the app fills in. “Fits your book’s look” shows how well
+          its colours match — the app prefers the ones that fit best.
+          {!isAdmin && ' Only an admin can stop a picture from being used.'}
         </p>
 
         {usable.map((t) => (
           <div className="draft" key={t.key}>
             <div className="meta">
               <strong>{t.name}</strong>
-              <span className="mono">{t.key}</span>
               <span className="pill">{t.layout}</span>
               <span className="pill approved">{t.licence?.terms}</span>
-              {t.licence?.attribution && <span className="mono">© {t.licence.attribution}</span>}
+              {t.licence?.attribution && <span className="hint">© {t.licence.attribution}</span>}
               {/* Licensed and on-brand are different questions (STORY-068). A
                   template can be perfectly licensed and still not look like
                   this book, and the author is the one who decides what to do
@@ -272,10 +269,10 @@ export function TemplatesPage({ user, author, book }) {
                   title={
                     t.identityFindings?.length
                       ? t.identityFindings.join(', ')
-                      : 'matches the active identity'
+                      : 'matches your book’s look'
                   }
                 >
-                  identity {Number(t.identityScore).toFixed(2)}
+                  {t.identityScore >= (t.identityFloor ?? 0.75) ? 'Fits your book’s look' : 'Doesn’t quite fit your look'} {Math.round(t.identityScore * 100)}%
                   {t.identityFindings?.length > 0 && ` · ${t.identityFindings.join(', ').replace(/_/g, ' ')}`}
                 </span>
               )}
@@ -284,21 +281,21 @@ export function TemplatesPage({ user, author, book }) {
             <div className="meme">
               <img src={t.imageRef} alt={`${t.name} artwork, before any caption`} />
               <div>
-                <div className="meta mono">source: {t.source}</div>
+                <div className="hint audit-detail">From: {t.source}</div>
                 <table>
                   <thead>
                     <tr>
-                      <th>Slot</th>
-                      <th>What it is for</th>
-                      <th>Limit</th>
+                      <th>Caption space</th>
+                      <th>What goes there</th>
+                      <th>Max letters</th>
                     </tr>
                   </thead>
                   <tbody>
                     {t.captionSlots.map((slot) => (
                       <tr key={slot.name}>
-                        <td className="mono">{slot.name}</td>
+                        <td>{slot.name.replace(/_/g, ' ')}</td>
                         <td>{slot.role}</td>
-                        <td className="mono">{slot.maxChars}</td>
+                        <td className="num">{slot.maxChars}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -307,12 +304,13 @@ export function TemplatesPage({ user, author, book }) {
                 {isAdmin && (
                   <div className="row" style={{ marginTop: 12 }}>
                     <input
-                      placeholder="Why retire it? (goes on the audit log)"
+                      aria-label={`Why stop using ${t.name}?`}
+                      placeholder="Why stop using it? (kept in the activity history)"
                       value={reasons[t.key] ?? ''}
                       onChange={(e) => setReasons({ ...reasons, [t.key]: e.target.value })}
                     />
                     <button className="danger" disabled={busy} onClick={() => retire(t.key)}>
-                      Retire
+                      Stop using
                     </button>
                   </div>
                 )}

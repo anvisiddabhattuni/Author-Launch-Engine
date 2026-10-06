@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api.js';
+import { localDate } from '../labels.js';
 
 /**
  * Per-tenant API keys (STORY-045).
@@ -9,8 +10,8 @@ import { api } from '../api.js';
  * password. A key is shown once, stored only as a hash, works inside this
  * tenant only, expires, and can never approve content.
  */
-const when = (v) => (v ? new Date(v).toISOString().slice(0, 16).replace('T', ' ') : '—');
 const STATUS_PILL = { live: 'approved', expired: 'neutral', revoked: 'rejected' };
+const KEY_LABEL = { live: 'Working', expired: 'Expired', revoked: 'Turned off' };
 
 export function ApiKeysPage({ author, user }) {
   const [keys, setKeys] = useState(null);
@@ -60,25 +61,25 @@ export function ApiKeysPage({ author, user }) {
       <div className="card">
         <h2>Create an API key{own ? '' : ` for ${author.name}`}</h2>
         <p className="hint">
-          For software that needs {own ? 'your' : `${author.name}'s`} data — a newsletter sync, an upload
-          script — without anyone&apos;s password. A key works only inside this account, acts on behalf of
-          whoever creates it, expires, and <strong>can never approve content</strong>: approval stays with people.
+          A key lets another program — say, a newsletter tool — use {own ? 'your' : `${author.name}’s`} account
+          without a password. It stops working on the date you choose, and it <strong>can never approve posts</strong> —
+          only people can do that.
         </p>
         <form onSubmit={create}>
-          <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div className="row form-row">
             <div style={{ flex: 2, minWidth: 200 }}>
               <label htmlFor="key-name">What it is for</label>
               <input id="key-name" value={form.name} placeholder="e.g. Newsletter sync" onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
             <div>
-              <label htmlFor="key-access">Access</label>
+              <label htmlFor="key-access">What it may do</label>
               <select id="key-access" value={form.access} onChange={(e) => setForm({ ...form, access: e.target.value })}>
-                <option value="read">Read only</option>
-                <option value="read_write">Read and submit</option>
+                <option value="read">Look only</option>
+                <option value="read_write">Look and add things</option>
               </select>
             </div>
             <div>
-              <label htmlFor="key-days">Expires after</label>
+              <label htmlFor="key-days">Stops working after</label>
               <select id="key-days" value={form.expiresInDays} onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}>
                 <option value="30">30 days</option>
                 <option value="90">90 days</option>
@@ -92,44 +93,41 @@ export function ApiKeysPage({ author, user }) {
         {created && (
           <div className="banner ok" style={{ marginTop: 14 }}>
             <div>
-              <strong>Copy this key now — it will not be shown again.</strong> Only a fingerprint of it is stored,
-              so nobody, including us, can show it to you later.
+              <strong>Copy this key now — it won’t be shown again.</strong> The app doesn’t keep a readable copy,
+              so nobody can show it to you later.
             </div>
             <div className="mono" style={{ wordBreak: 'break-all', marginTop: 6 }}>{created.key}</div>
             <div className="hint" style={{ marginTop: 6 }}>
-              Send it as <span className="mono">X-API-Key: {created.key.slice(0, 17)}…</span>
+              For the person setting it up: send it in the <span className="mono">X-API-Key</span> header.
             </div>
           </div>
         )}
       </div>
 
       <div className="card">
-        <h2>Keys ({live.length} live)</h2>
+        <h2>Your keys ({live.length} working)</h2>
         <p className="hint">
-          Every request a key makes is on the Security and Trust tabs, marked with the key. Revoking stops it on
-          its next request; so does blocking the person it acts for, or suspending the account.
+          Turning a key off takes effect straight away. Everything a key does is recorded in the activity history.
         </p>
         {keys.length === 0 ? (
           <div className="empty">No keys yet.</div>
         ) : (
           <table>
             <thead>
-              <tr><th>Key</th><th>For</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th /></tr>
+              <tr><th>Name</th><th>May</th><th>Last used</th><th>Stops working</th><th>Status</th><th /></tr>
             </thead>
             <tbody>
               {keys.map((k) => (
                 <tr key={k.id}>
-                  <td className="mono">ale_{k.prefix}_…</td>
-                  <td>{k.name}<div className="hint">by {k.createdBy ?? 'staff'}</div></td>
-                  <td>{k.access === 'read' ? 'read only' : 'read and submit'}</td>
-                  <td className="mono">{when(k.createdAt)}</td>
-                  <td className="mono">{when(k.lastUsedAt)}</td>
-                  <td className="mono">{when(k.expiresAt)}</td>
-                  <td><span className={`pill ${STATUS_PILL[k.status]}`}>{k.status}</span></td>
-                  <td>
+                  <td>{k.name}<div className="hint">made by {k.createdBy ?? 'staff'} on {localDate(k.createdAt)} · <span className="mono">ale_{k.prefix}_…</span></div></td>
+                  <td>{k.access === 'read' ? 'Look only' : 'Look and add'}</td>
+                  <td>{k.lastUsedAt ? localDate(k.lastUsedAt) : 'Never'}</td>
+                  <td>{localDate(k.expiresAt)}</td>
+                  <td><span className={`pill ${STATUS_PILL[k.status]}`}>{KEY_LABEL[k.status] ?? k.status}</span></td>
+                  <td className="cell-action">
                     {k.status === 'live' && (
                       <button className="danger" disabled={busy} onClick={() => run(() => api.revokeApiKey(author.id, k.id))}>
-                        Revoke
+                        Turn off
                       </button>
                     )}
                   </td>

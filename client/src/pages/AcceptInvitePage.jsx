@@ -37,18 +37,17 @@ export function AcceptInvitePage({ onSignedIn }) {
       <header className="masthead">
         <div>
           <h1>Author Launch Engine</h1>
-          <div className="story">STORY-043 · Welcome</div>
+          <div className="story">Welcome</div>
         </div>
       </header>
 
       <div className="card" style={{ maxWidth: 460 }}>
         <h2>Choose your password</h2>
         <p className="hint">
-          Your account and your own private workspace are ready. Nobody else — including whoever set
-          this up — knows this password or can see it. This link works once.
+          Your account is ready. Choose a password to finish — only you will know it. This link can only be used once.
         </p>
 
-        {!token && <div className="banner error">This link is incomplete. Use the full link from your welcome email.</div>}
+        {!token && <div className="banner error">This link is incomplete. Open the full link from your welcome email.</div>}
         {error && <div className="banner error">{error}</div>}
 
         <form onSubmit={submit}>
@@ -62,7 +61,7 @@ export function AcceptInvitePage({ onSignedIn }) {
           />
           {tooShort && <div className="hint">{10 - password.length} more characters.</div>}
 
-          <label htmlFor="invite-confirm">The same again</label>
+          <label htmlFor="invite-confirm">Type the password again</label>
           <input
             id="invite-confirm"
             type="password"
@@ -70,7 +69,7 @@ export function AcceptInvitePage({ onSignedIn }) {
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
           />
-          {mismatch && <div className="hint">These do not match yet.</div>}
+          {mismatch && <div className="hint">The two passwords don’t match yet.</div>}
 
           <div className="row" style={{ marginTop: 14 }}>
             <button type="submit" disabled={busy || !token || password.length < 10 || confirm !== password}>
