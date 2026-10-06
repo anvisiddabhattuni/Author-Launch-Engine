@@ -168,11 +168,10 @@ function buildMemePrompt({ book, voiceProfile, voice, grounding, bookModel = nul
     '',
     `Write exactly ${memeCount} meme${memeCount === 1 ? '' : 's'}. Use a different format for each where you can.`,
     'For each: the format key, the one theme it argues (from the themes above), the words for each slot,',
-    'a short post to go with the image (1–2 sentences, in the author\'s voice), and alt text describing the',
-    'finished image for someone who cannot see it.',
+    'and a short post to go with the image (1–2 sentences, in the author\'s voice).',
     'No exclamation marks or hype words unless the author\'s own posts use them.',
     'Respond with JSON only, in exactly this shape:',
-    '{"memes":[{"format":"meme-expectation-reality","theme":"...","captions":{"expectation":"...","reality":"..."},"post":"...","altText":"..."}]}',
+    '{"memes":[{"format":"meme-expectation-reality","theme":"...","captions":{"expectation":"...","reality":"..."},"post":"..."}]}',
   ]
     .filter(Boolean)
     .join('\n');
@@ -247,7 +246,9 @@ async function writeMemes({ book, voiceProfile, voice, grounding, bookModel, mem
       template: m.template,
       captions: m.captions,
       panels,
-      altText: m.altText || `${m.template.name} meme: ${panels.join(' — ')}`,
+      // Written from what is actually drawn. Claude's own descriptions imagined
+      // pictures the format does not have (a phone, an office door — seen live).
+      altText: `${m.template.name} meme. ${m.template.captionSlots.filter((sl) => m.captions[sl.name]).map((sl) => `${sl.name.replace(/_/g, ' ')}: ${m.captions[sl.name]}`).join('. ')}`,
       chosenBy: 'writer',
       writtenBy: 'anthropic',
     };

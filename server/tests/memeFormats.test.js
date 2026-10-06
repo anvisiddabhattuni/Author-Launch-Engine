@@ -199,6 +199,7 @@ describe('a weekly batch drafted with Claude', () => {
     assert.ok(er, 'the format Claude chose is the one drawn');
     assert.equal(er.content, 'The quiet hours are where the work gets good.');
     assert.equal(er.media.provenance.writer, 'anthropic');
+    assert.equal(er.media.altText, 'Expectation vs reality meme. expectation: Finishing the novel in one inspired weekend. reality: Three quiet years of showing up to the desk', 'describes what is drawn, nothing imagined');
     assert.match(svgText(er.media.imageRef), /Three quiet years of showing/);
     assert.match(svgText(er.media.imageRef), /up to the desk/);
     for (const placeholder of Object.values(SWATCH)) {
