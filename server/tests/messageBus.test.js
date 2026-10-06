@@ -209,7 +209,16 @@ describe('The real hand-off: an escalation reaches its reviewers within one poll
     const results = await dispatch({ authorId });
     const delivered = results.find((r) => r.topic === 'escalation.raised' && r.status === 'acked');
     assert.ok(delivered, 'not delivered');
-    assert.ok(delivered.result.notified >= 1, 'the reviewer was not told');
+    // Whether the reviewer was told, not by whom: jobs.test.js runs the real
+    // worker tick, whose sweeps cover every author — this one included — and
+    // when the two suites overlap the sweep sometimes tells the reviewer first
+    // (found in CI's third repeated run). Either way the record must say sent.
+    const { rows: told } = await query(
+      `SELECT n.status FROM notifications n JOIN reviewers r ON r.id = n.reviewer_id
+        WHERE r.email = $1 AND n.escalation_id IS NOT NULL`,
+      [`bus-reviewer-${stamp}@example.test`],
+    );
+    assert.ok(told.some((n) => n.status === 'sent'), 'the reviewer was not told');
   });
 });
 
