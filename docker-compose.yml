@@ -64,6 +64,11 @@ services:
       DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+      # The AI provider (STORY-009/035): stub unless set in .env; keys only from .env.
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GIT_COMMIT: ${GIT_COMMIT:-}
       # This stack has no TLS terminator in front of nginx, so a browser
       # reaches it over http and enforcement would refuse every call. Off here;
@@ -83,6 +88,11 @@ services:
       DATABASE_URL: postgres://ale_app_login:${APP_DB_PASSWORD}@postgres:5432/author_launch_engine
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before running the stack}
+      # The AI provider (STORY-009/035): stub unless set in .env; keys only from .env.
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AUDIT_KEY_FILE: /run/secrets/audit_key
     secrets: [audit_key]
     depends_on:

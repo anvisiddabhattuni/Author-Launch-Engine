@@ -24,7 +24,7 @@ export const config = {
   port: number(process.env.PORT, 4000),
   aiProvider: process.env.AI_PROVIDER ?? 'stub',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
-  anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
+  anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-5',
   // STORY-035. The key comes from the environment only — on the server, the
   // mode-600 .env beside the stack — and is never logged. The base URL is
   // configurable so the tests can stand a local server in for OpenAI.

@@ -2712,7 +2712,7 @@ whole scan (a foreign key) — every other anomaly unescalated with it. Now skip
 | Auto-scaling policies | CPU (and memory for the worker), up at once, down one pod a minute after five calm minutes |
 
 Proven: on k3s in STORY-054 (2 → 3 under load); CI's `kubernetes` job installs the chart on kind, loads the API
-and requires the autoscaler to add pods — **not run yet**; the next push runs it.
+and requires the autoscaler to add pods — **passed on its first run** (CI run 36666616980).
 
 ### STORY-061 — NGINX load balancing
 
@@ -2732,7 +2732,7 @@ timeout. Active health checks are NGINX Plus only — said here rather than impl
 
 The first run found requests to a dead instance waiting out nginx's 60 s connect default: now 3 s. The remaining
 1 in 1000 is the moment of the kill — a request in flight, or the few seconds DNS still lists the dead instance.
-CI's `loadbalancer` job repeats the evenness and kill tests on every push — **not run yet**.
+CI's `loadbalancer` job repeats the evenness and kill tests on every push — **passed on its first run**.
 
 ### STORY-062 — scalability metrics and alerts
 
@@ -2745,7 +2745,7 @@ CI's `loadbalancer` job repeats the evenness and kill tests on every push — **
 healthy one (a 50% threshold mutation was caught). A test reads every metric the rules and the dashboard use and
 fails if the API does not export it — a renamed metric cannot silently disable an alert. Verified here: Prometheus
 3.15 scraping the local API, target UP, nine rules loaded. CI's `monitoring` job runs the rules, a real
-Prometheus and Alertmanager, and follows one alert to an escalated anomaly — **not run yet**.
+Prometheus and Alertmanager, and follows one alert to an escalated anomaly — **passed on its first run**.
 
 ## Requirements
 

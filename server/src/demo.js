@@ -4912,9 +4912,8 @@ console.log(`  its digest: ${digestOf(esDoc).slice(0, 32)}… — each document 
 rule('268. Aggregate, search, reconcile');
 if (!config.elasticsearchUrl) {
   console.log('  ELASTICSEARCH_URL is not set on this machine, so nothing is copied and the Trust tab says search');
-  console.log('  is not set up. The CI job `search` is written to run a real Elasticsearch — 20,000 rows, 40 queries');
-  console.log('  each under a second, deleted and altered documents repaired (tests/searchLive.test.js) — and has');
-  console.log('  not run yet: the next push says whether it passes.');
+  console.log('  is not set up. The CI job `search` runs a real Elasticsearch — 20,000 rows, 40 queries each under a');
+  console.log('  second, deleted and altered documents repaired (tests/searchLive.test.js) — and passes.');
 } else {
   const esRun = await searchAggregate({});
   for (const src of esRun.sources) console.log(`  ${src.source.padEnd(9)} indexed ${src.indexed} through id ${src.mark}`);
@@ -5050,7 +5049,7 @@ console.log('  measured on the AWS server, a private copy of the stack with thre
 console.log('    60 requests → 20 / 20 / 20;  a fourth added without restarting nginx → 20 / 20 / 20 / 20');
 console.log('    graceful stop mid-traffic → 40 of 40 answered;  kill -9 mid-traffic → 999 of 1000 (three runs)');
 console.log('\nSTORY-061 complete — traffic spread evenly across every API instance, with failover; CI\'s');
-console.log('`loadbalancer` job is written to re-check it on every push — not run yet\n');
+console.log('`loadbalancer` job re-checks it on every push (passed on its first run)\n');
 
 rule('280. STORY-060 — every service scales horizontally');
 const chartValues = YAML.parse(await readFile(new URL('../../deploy/helm/author-launch-engine/values.yaml', import.meta.url), 'utf8'));
@@ -5058,7 +5057,7 @@ for (const svc of ['api', 'worker', 'client']) {
   const a = chartValues[svc].autoscaling;
   console.log(`  ${svc.padEnd(7)} ${a.minReplicas}–${a.maxReplicas} pods at ${a.targetCPUUtilizationPercentage}% CPU${a.targetMemoryUtilizationPercentage ? ` or ${a.targetMemoryUtilizationPercentage}% memory` : ''}; scale down after ${a.scaleDownStabilizationSeconds}s calm`);
 }
-console.log('  proven: STORY-054 on k3s (2 → 3 under load). CI\'s `kubernetes` job (kind) is written to prove it on every push — not run yet.');
+console.log('  proven: STORY-054 on k3s (2 → 3 under load). CI\'s `kubernetes` job (kind) proves it on every push (passed on its first run).');
 console.log('  EKS: deploy/eks/cluster.yaml, ready — not created: it is billed by the hour in the owner\'s account.');
 console.log('\nSTORY-060 complete — API, worker and web autoscale; nodes scale on EKS when created\n');
 await closePool();
