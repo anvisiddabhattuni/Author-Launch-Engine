@@ -22,7 +22,10 @@ COPY server/src/services/securityHeaders.js ./server/src/services/securityHeader
 ENV VITE_SHOW_DEMO_LOGINS=false
 RUN npm run build --workspace client
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 AS runtime
+# 1.30.5 (stable) since 2026-10-06: Clair's first real scan found 157 known
+# vulnerabilities in the 1.27 image's Alpine packages (OpenSSL 3.3.3, zlib,
+# c-ares). Digest from Docker Hub for the 2026-10-05 build, not from memory.
+FROM nginxinc/nginx-unprivileged:1.30.5-alpine@sha256:15c994d10d6d78658721c3bcafff14cb281fba2a4bdf9d5ba92c416a472516e3 AS runtime
 # nginx-unprivileged rather than nginx (STORY-034): the stock image starts its
 # master process as root. This one runs as uid 101 and listens on 8080 — the
 # port nginx.conf already used — so a flaw in nginx is not a root shell.

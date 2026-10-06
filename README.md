@@ -2717,7 +2717,7 @@ and requires the autoscaler to add pods — **passed on its first run** (CI run 
 ### STORY-061 — NGINX load balancing
 
 `client/nginx.conf`: an `upstream` of every API instance, **re-resolved** every 5 s (`resolve`, open-source since
-nginx 1.27.3; the image is 1.27.5) so instances join and leave without a restart; round robin; passive health
+nginx 1.27.3; the image is 1.30.5) so instances join and leave without a restart; round robin; passive health
 (`max_fails=3 fail_timeout=10s`); a refused or failed request retried on the next instance; a 3 s connect
 timeout. Active health checks are NGINX Plus only — said here rather than implied.
 
